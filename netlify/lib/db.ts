@@ -344,3 +344,15 @@ export async function findPushByIdempotencyKey(key: string): Promise<{ tiktok_pr
   `)
   return found[0] ?? null
 }
+
+/**
+ * Record a sign-in or a refused attempt.
+ *
+ * The app being replaced had no notion of a user, so no action could be
+ * attributed to anyone. This is the minimum needed to answer "who listed
+ * this?" later.
+ */
+export async function logSignIn(email: string, event: string): Promise<void> {
+  const db = sql()
+  await db`INSERT INTO sessions_log (email, event) VALUES (${email}, ${event})`
+}

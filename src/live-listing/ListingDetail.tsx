@@ -16,6 +16,7 @@ import type { Draft, Listing, Shop } from '../types'
 import CameraCapture from './CameraCapture'
 import VoiceCapture from './VoiceCapture'
 import DraftQueue from './DraftQueue'
+import BulkAdd from './BulkAdd'
 
 /**
  * Build SKUs against one factory stream.
@@ -112,6 +113,13 @@ export default function ListingDetail({
         shop={shop}
         listing={listing}
         identifier={formatIdentifier(next.prefix, next.seq)}
+        onSaved={refreshDrafts}
+      />
+
+      <BulkAdd
+        shop={shop}
+        listing={listing}
+        startIdentifier={formatIdentifier(next.prefix, next.seq)}
         onSaved={refreshDrafts}
       />
 

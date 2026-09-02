@@ -26,6 +26,18 @@ export function resetDbCache(): void {
   cached = undefined
 }
 
+/**
+ * Narrow the driver's row type.
+ *
+ * The Neon HTTP driver returns a union covering array-mode and full-result
+ * shapes, so indexing it directly does not typecheck. Every query here uses
+ * the default object-row mode, so narrowing once in one place beats a cast at
+ * each call site.
+ */
+async function rows<T>(query: Promise<unknown>): Promise<T[]> {
+  return (await query) as T[]
+}
+
 export interface ShopRow {
   shop_id: string
   brand: string
@@ -50,19 +62,18 @@ export async function listShopsForClient(): Promise<
   Pick<ShopRow, 'shop_id' | 'brand' | 'tiktok_handle' | 'entity' | 'authorised' | 'daily_listing_cap'>[]
 > {
   const db = sql()
-  const rows = await db`
+  return rows(db`
     SELECT shop_id, brand, tiktok_handle, entity, authorised, daily_listing_cap
     FROM shops
     ORDER BY brand
-  `
-  return rows as never
+  `)
 }
 
 /** Full row including secrets. Server-side callers only. */
 export async function getShop(shopId: string): Promise<ShopRow | null> {
   const db = sql()
-  const rows = await db`SELECT * FROM shops WHERE shop_id = ${shopId}`
-  return (rows[0] as ShopRow | undefined) ?? null
+  const found = await rows<ShopRow>(db`SELECT * FROM shops WHERE shop_id = ${shopId}`)
+  return found[0] ?? null
 }
 
 /**
@@ -92,7 +103,7 @@ export async function allocateIdentifier(
   floor = 0,
 ): Promise<number> {
   const db = sql()
-  const rows = await db`
+  const allocated = await rows<{ seq: number }>(db`
     INSERT INTO identifier_counters (listing_id, prefix, next_seq)
     VALUES (
       ${listingId},
@@ -115,8 +126,8 @@ export async function allocateIdentifier(
     ON CONFLICT (listing_id, prefix)
     DO UPDATE SET next_seq = identifier_counters.next_seq + 1
     RETURNING next_seq - 1 AS seq
-  `
-  const seq = (rows[0] as { seq: number } | undefined)?.seq
+  `)
+  const seq = allocated[0]?.seq
   if (seq === undefined) {
     throw new Error(`Failed to allocate an identifier for listing ${listingId}`)
   }
@@ -132,13 +143,13 @@ export async function allocateIdentifier(
  */
 export async function listingsUsedToday(shopId: string): Promise<number> {
   const db = sql()
-  const rows = await db`
+  const counted = await rows<{ used: number }>(db`
     SELECT COUNT(*)::int AS used
     FROM drafts
     WHERE shop_id = ${shopId}
       AND status = 'pushed'
       AND pushed_at >= date_trunc('day', now() AT TIME ZONE 'Asia/Singapore')
                           AT TIME ZONE 'Asia/Singapore'
-  `
-  return (rows[0] as { used: number } | undefined)?.used ?? 0
+  `)
+  return counted[0]?.used ?? 0
 }

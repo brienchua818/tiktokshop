@@ -165,6 +165,13 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
       idempotency_key: draft.idempotency_key,
     })
 
+    // A success with no product id is not a success. Marking a draft Live
+    // without one loses the only handle we have on the product, and the SKU
+    // would look done while being untraceable.
+    if (!result?.product_id) {
+      throw new Error('TikTok accepted the product but returned no product ID.')
+    }
+
     await updateDraft(
       draft.draft_id,
       afterAttempt(draft, { ok: true, tiktokProductId: result.product_id }),

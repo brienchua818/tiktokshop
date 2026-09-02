@@ -40,6 +40,20 @@ export const WEIGHT_UNIT = 'KILOGRAM'
 export const DIMENSION_UNIT = 'CENTIMETER'
 export const CURRENCY = 'SGD'
 
+/**
+ * Fixed package weight and dimensions.
+ *
+ * TikTok makes both mandatory on every product, but they do not vary enough
+ * across a factory run to be worth typing 200 times — so they are declared
+ * once here and never shown in the form.
+ *
+ * These are a SHIPPING declaration, not a measurement of the product. That is
+ * why dimensions no longer appear in product titles: stating 10x10x10cm in a
+ * title would advertise a size the product does not have.
+ */
+export const DEFAULT_WEIGHT_KG = '1'
+export const DEFAULT_DIMENSIONS = { length: '10', width: '10', height: '10' } as const
+
 /** MAIN_IMAGE must land between 300x300 and 4000x4000. We target the middle. */
 export const IMAGE_TARGET_PX = 1600
 export const IMAGE_MIN_PX = 300

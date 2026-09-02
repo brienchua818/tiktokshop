@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { buildTitle, formatIdentifier, nextIdentifier } from '../lib/identifiers'
-import { validateTitle, validatePrice, validateStock, validateWeight, TITLE_MIN } from '../lib/tiktok-rules'
+import {
+  validateTitle,
+  validatePrice,
+  validateStock,
+  validateWeight,
+  DEFAULT_WEIGHT_KG,
+  DEFAULT_DIMENSIONS,
+  TITLE_MIN,
+} from '../lib/tiktok-rules'
 import { allDrafts, enqueue, removeDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import type { Draft, Listing, Shop } from '../types'
@@ -104,7 +112,6 @@ export default function ListingDetail({
         shop={shop}
         listing={listing}
         identifier={formatIdentifier(next.prefix, next.seq)}
-        defaultWeightKg={listing.default_weight_kg ?? ''}
         onSaved={refreshDrafts}
       />
 
@@ -162,13 +169,11 @@ function SkuForm({
   shop,
   listing,
   identifier,
-  defaultWeightKg,
   onSaved,
 }: {
   shop: Shop
   listing: Listing
   identifier: string
-  defaultWeightKg: string
   onSaved: () => Promise<void>
 }) {
   const [photo, setPhoto] = useState<Blob | null>(null)
@@ -177,9 +182,6 @@ function SkuForm({
   const [variant, setVariant] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('')
-  const [weight, setWeight] = useState(defaultWeightKg)
-  const [dims, setDims] = useState({ length: '', width: '', height: '' })
-  const [includeDims, setIncludeDims] = useState(false)
   const [uploaded, setUploaded] = useState<{ tiktok_image_uri: string; ai_image_url: string } | null>(
     null,
   )
@@ -194,12 +196,9 @@ function SkuForm({
     [],
   )
 
-  const title = buildTitle({
-    identifier,
-    productName: name,
-    includeDims,
-    dimensions: includeDims ? dims : null,
-  })
+  // No dimensions in the title: they are a fixed shipping declaration, not a
+  // measurement of this product, so putting them here would misdescribe it.
+  const title = buildTitle({ identifier, productName: name, includeDims: false })
   const titleProblems = name ? validateTitle(title) : []
 
   async function acceptPhoto(blob: Blob) {
@@ -240,9 +239,6 @@ function SkuForm({
       const result = await api.titleFromPhoto(uploaded.ai_image_url, name || undefined)
       if (result.title) setName(stripIdentifier(result.title, identifier))
       if (result.variant_name) setVariant(result.variant_name)
-      if (result.dimensions) {
-        setDims(result.dimensions)
-      }
     } catch (e: unknown) {
       setError(`Could not read the photo: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -264,15 +260,16 @@ function SkuForm({
     if (fields.variant) setVariant(fields.variant)
     if (fields.price) setPrice(fields.price)
     if (fields.stock !== undefined) setStock(String(fields.stock))
-    if (fields.weightKg) setWeight(fields.weightKg)
-    if (fields.dimensions) setDims(fields.dimensions)
+    // Spoken weight and dimensions are deliberately ignored: both are fixed
+    // declarations now, so accepting them here would silently reintroduce a
+    // field nobody can see or correct.
   }
 
   const problems = [
     ...titleProblems,
     ...validatePrice(price),
     ...validateStock(Number.parseInt(stock, 10)),
-    ...validateWeight(weight),
+    ...validateWeight(DEFAULT_WEIGHT_KG),
     ...(photo ? [] : [{ field: 'photo', message: 'A photo is required.' }]),
   ]
 
@@ -293,9 +290,9 @@ function SkuForm({
         variant_name: variant || null,
         price,
         stock: Number.parseInt(stock, 10),
-        weight_kg: weight,
-        dimensions: includeDims ? dims : null,
-        include_dims_in_title: includeDims,
+        weight_kg: DEFAULT_WEIGHT_KG,
+        dimensions: { ...DEFAULT_DIMENSIONS },
+        include_dims_in_title: false,
         image_preview: photoUrl,
         tiktok_image_uri: uploaded?.tiktok_image_uri ?? null,
         status: 'queued',
@@ -308,8 +305,8 @@ function SkuForm({
       await enqueue(draft, photo)
       await onSaved()
 
-      // Clear the per-product fields but keep weight, which is usually the
-      // same across a stream.
+      // Clear everything that varies per product. Weight and dimensions are
+      // constants now, so there is nothing to preserve between SKUs.
       setPhoto(null)
       setPhotoUrl(null)
       setUploaded(null)
@@ -317,7 +314,6 @@ function SkuForm({
       setVariant('')
       setPrice('')
       setStock('')
-      setDims({ length: '', width: '', height: '' })
     } catch (e: unknown) {
       setError(`Could not save: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -365,7 +361,7 @@ function SkuForm({
         />
       </Field>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <Field label="Price (SGD)">
           <input
             inputMode="decimal"
@@ -384,42 +380,7 @@ function SkuForm({
             className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
           />
         </Field>
-        {/* Mandatory to TikTok, and absent from the app being replaced. */}
-        <Field label="Weight (kg)">
-          <input
-            inputMode="decimal"
-            value={weight}
-            onChange={(e) => setWeight(e.target.value)}
-            placeholder="0.8"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
-          />
-        </Field>
       </div>
-
-      <label className="flex items-center gap-2 cursor-pointer select-none">
-        <input
-          type="checkbox"
-          checked={includeDims}
-          onChange={(e) => setIncludeDims(e.target.checked)}
-          className="w-4 h-4 accent-pink-500"
-        />
-        <span className="text-xs text-gray-300">Put dimensions in the title</span>
-      </label>
-
-      {includeDims && (
-        <div className="grid grid-cols-3 gap-2">
-          {(['length', 'width', 'height'] as const).map((key) => (
-            <Field key={key} label={`${key[0]!.toUpperCase()}${key.slice(1)} (cm)`}>
-              <input
-                inputMode="decimal"
-                value={dims[key]}
-                onChange={(e) => setDims({ ...dims, [key]: e.target.value })}
-                className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
-              />
-            </Field>
-          ))}
-        </div>
-      )}
 
       <div className="bg-sunken rounded-lg px-3 py-2">
         <p className="text-xs text-gray-500 mb-0.5">

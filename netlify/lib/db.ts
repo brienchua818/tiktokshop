@@ -1,4 +1,6 @@
 import { neon } from '@neondatabase/serverless'
+import { encryptSecret, decryptSecret, needsRefresh } from './crypto'
+import { refreshAccessToken } from './tiktok-auth'
 
 /**
  * Database access. Netlify DB (Neon serverless Postgres) over HTTP.
@@ -152,4 +154,193 @@ export async function listingsUsedToday(shopId: string): Promise<number> {
                           AT TIME ZONE 'Asia/Singapore'
   `)
   return counted[0]?.used ?? 0
+}
+
+/**
+ * Store a shop's tokens after authorisation or refresh.
+ *
+ * Both tokens are written every time. TikTok issues a NEW refresh token on
+ * every refresh, and keeping the old one is a bug that only surfaces a week
+ * later when the access token lapses and the stale refresh token cannot renew
+ * it — by which point the shop has silently stopped working.
+ */
+export async function saveShopTokens(
+  shopId: string,
+  tokens: {
+    accessToken: string
+    refreshToken: string
+    accessTokenExpiresAt: Date
+    refreshTokenExpiresAt: Date
+    shopCipher: string | null
+  },
+): Promise<void> {
+  const db = sql()
+  await db`
+    UPDATE shops SET
+      access_token_enc         = ${encryptSecret(tokens.accessToken)},
+      refresh_token_enc        = ${encryptSecret(tokens.refreshToken)},
+      access_token_expires_at  = ${tokens.accessTokenExpiresAt.toISOString()},
+      refresh_token_expires_at = ${tokens.refreshTokenExpiresAt.toISOString()},
+      shop_cipher              = COALESCE(${tokens.shopCipher}, shop_cipher),
+      authorised               = TRUE,
+      updated_at               = now()
+    WHERE shop_id = ${shopId}
+  `
+}
+
+/**
+ * Credentials ready to call TikTok with, refreshing the access token first if
+ * it is close to expiry.
+ *
+ * Refreshing early rather than on failure matters here: discovering an expired
+ * token is a mid-livestream problem, and the retry would cost a listing slot.
+ */
+export async function shopCredentials(shopId: string): Promise<{
+  appKey: string
+  appSecret: string
+  accessToken: string
+  shopCipher: string | undefined
+  brand: string
+}> {
+  const shop = await getShop(shopId)
+  if (!shop) throw new Error(`Unknown shop: ${shopId}`)
+  if (!shop.app_key || !shop.app_secret_enc) {
+    throw new Error(`${shop.brand} has no TikTok app credentials configured.`)
+  }
+  if (!shop.refresh_token_enc || !shop.access_token_enc) {
+    throw new Error(`${shop.brand} is not connected to TikTok yet.`)
+  }
+
+  const appSecret = decryptSecret(shop.app_secret_enc)
+  const expiresAt = shop.access_token_expires_at ? new Date(shop.access_token_expires_at) : null
+
+  let accessToken = decryptSecret(shop.access_token_enc)
+
+  if (needsRefresh(expiresAt)) {
+    const refreshExpiry = shop.refresh_token_expires_at
+      ? new Date(shop.refresh_token_expires_at)
+      : null
+    if (refreshExpiry && refreshExpiry.getTime() < Date.now()) {
+      // Once the refresh token lapses there is no programmatic way back —
+      // the shop owner has to authorise again.
+      throw new Error(
+        `${shop.brand}'s TikTok authorisation has expired. It needs to be reconnected.`,
+      )
+    }
+
+    const refreshed = await refreshAccessToken({
+      appKey: shop.app_key,
+      appSecret,
+      refreshToken: decryptSecret(shop.refresh_token_enc),
+    })
+    await saveShopTokens(shopId, {
+      accessToken: refreshed.access_token,
+      refreshToken: refreshed.refresh_token,
+      accessTokenExpiresAt: new Date(refreshed.access_token_expire_in * 1000),
+      refreshTokenExpiresAt: new Date(refreshed.refresh_token_expire_in * 1000),
+      shopCipher: null,
+    })
+    accessToken = refreshed.access_token
+  }
+
+  return {
+    appKey: shop.app_key,
+    appSecret,
+    accessToken,
+    shopCipher: shop.shop_cipher ?? undefined,
+    brand: shop.brand,
+  }
+}
+
+export interface ListingRow {
+  listing_id: string
+  shop_id: string
+  product_name: string | null
+  supplier: string | null
+  default_weight_kg: string | null
+  created_at: string
+}
+
+/** Factory streams for a shop, newest first. */
+export function listListings(shopId: string): Promise<ListingRow[]> {
+  const db = sql()
+  return rows<ListingRow>(db`
+    SELECT listing_id, shop_id, product_name, supplier, default_weight_kg, created_at
+    FROM listings
+    WHERE shop_id = ${shopId} AND archived = FALSE
+    ORDER BY created_at DESC
+  `)
+}
+
+/**
+ * Add a factory stream, or return the existing row.
+ *
+ * Idempotent on purpose: two people adding the same stream during setup should
+ * not produce a duplicate-key error they have to interpret.
+ */
+export async function addListing(shopId: string, listingId: string): Promise<ListingRow> {
+  const db = sql()
+  const inserted = await rows<ListingRow>(db`
+    INSERT INTO listings (listing_id, shop_id)
+    VALUES (${listingId}, ${shopId})
+    ON CONFLICT (listing_id) DO UPDATE SET archived = FALSE
+    RETURNING listing_id, shop_id, product_name, supplier, default_weight_kg, created_at
+  `)
+  const row = inserted[0]
+  if (!row) throw new Error(`Could not add listing ${listingId}`)
+  return row
+}
+
+/** Record a pushed SKU, so the daily allowance count stays accurate. */
+export async function recordPush(draft: {
+  draftId: string
+  listingId: string
+  shopId: string
+  identifier: string
+  title: string
+  variantName: string | null
+  price: string
+  stock: number
+  weightKg: string
+  dimensions: { length: string; width: string; height: string } | null
+  tiktokImageUri: string
+  idempotencyKey: string
+  tiktokProductId: string
+}): Promise<void> {
+  const db = sql()
+  await db`
+    INSERT INTO drafts (
+      draft_id, listing_id, shop_id, identifier, title, variant_name,
+      price, stock, weight_kg, length_cm, width_cm, height_cm,
+      tiktok_image_uri, status, idempotency_key, tiktok_product_id, pushed_at
+    ) VALUES (
+      ${draft.draftId}, ${draft.listingId}, ${draft.shopId}, ${draft.identifier},
+      ${draft.title}, ${draft.variantName}, ${draft.price}, ${draft.stock},
+      ${draft.weightKg}, ${draft.dimensions?.length ?? null},
+      ${draft.dimensions?.width ?? null}, ${draft.dimensions?.height ?? null},
+      ${draft.tiktokImageUri}, 'pushed', ${draft.idempotencyKey},
+      ${draft.tiktokProductId}, now()
+    )
+    ON CONFLICT (draft_id) DO UPDATE SET
+      status            = 'pushed',
+      tiktok_product_id = EXCLUDED.tiktok_product_id,
+      pushed_at         = now()
+  `
+}
+
+/**
+ * A previous push with this idempotency key, if any.
+ *
+ * The client retries a timed-out push with the same key. Checking here means a
+ * retry returns the original product instead of creating a second one — the
+ * exact failure bad factory Wi-Fi produces.
+ */
+export async function findPushByIdempotencyKey(key: string): Promise<{ tiktok_product_id: string | null } | null> {
+  const db = sql()
+  const found = await rows<{ tiktok_product_id: string | null }>(db`
+    SELECT tiktok_product_id FROM drafts
+    WHERE idempotency_key = ${key} AND status = 'pushed'
+    LIMIT 1
+  `)
+  return found[0] ?? null
 }

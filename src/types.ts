@@ -26,6 +26,12 @@ export interface Listing {
   product_name: string | null
   /** Supplier this stream was filmed at, once we start recording it. */
   supplier: string | null
+  /**
+   * Default package weight for SKUs in this stream, in kilograms. TikTok makes
+   * weight mandatory, and products from one factory run are usually similar —
+   * so it is set once per stream rather than typed 200 times.
+   */
+  default_weight_kg: string | null
   created_at: string
 }
 

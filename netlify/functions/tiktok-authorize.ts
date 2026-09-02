@@ -15,12 +15,16 @@ export default withAuth(async (request) => {
     const shop = await getShop(shopId)
     if (!shop) return json({ error: 'Unknown shop.' }, 404)
 
-    // Each shop has its own app registration, because a TikTok Seller
-    // Developer app is bound to a single shop.
-    const serviceId = process.env[`TIKTOK_SERVICE_ID_${shopId}`] ?? process.env.TIKTOK_SERVICE_ID
+    // Each shop has its own app registration, because a TikTok Custom app can
+    // only be authorised by the partner account that owns it.
+    //
+    // Naming follows the convention already used by Sheldon Delivery API, so
+    // the two projects do not drift: {PREFIX}_SERVICE_ID with PREFIX being
+    // PM, HZ or TM. The shared TIKTOK_SERVICE_ID is a fallback.
+    const serviceId = process.env[`${shopId}_SERVICE_ID`] ?? process.env.TIKTOK_SERVICE_ID
     if (!serviceId) {
       return json(
-        { error: `No TikTok service ID configured for ${shop.brand}. Set TIKTOK_SERVICE_ID_${shopId}.` },
+        { error: `No TikTok service ID configured for ${shop.brand}. Set ${shopId}_SERVICE_ID.` },
         400,
       )
     }

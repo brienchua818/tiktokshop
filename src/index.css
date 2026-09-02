@@ -1,0 +1,52 @@
+@import 'tailwindcss';
+
+/* Theme carried over from the app the team already knows, so the rebuild
+   doesn't feel like a new tool: near-black surfaces, pink for primary
+   actions, emerald for export, amber for SKU identifiers. */
+@theme {
+  --color-ink: #0f0f0f;
+  --color-surface: #161616;
+  --color-raised: #1a1a1a;
+  --color-sunken: #111111;
+  --color-accent: #ec4899;
+  --color-accent-hover: #f472b6;
+  --color-identifier: #fbbf24;
+}
+
+html {
+  color-scheme: dark;
+  /* The app is used one-handed on a phone; stop iOS zooming on input focus
+     and stop rubber-banding over a fixed header. */
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: #fff;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /* Respect the notch when installed to the home screen. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+
+/* 16px minimum on form controls, or iOS Safari zooms the viewport on focus —
+   which is disorienting when you're holding a product in the other hand. */
+input,
+select,
+textarea,
+button {
+  font-size: 16px;
+  font-family: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

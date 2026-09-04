@@ -50,3 +50,109 @@ button {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Touch, on the devices this is actually used on.
+
+   The app is used on iPhones, Android phones and iPads, standing in a factory,
+   holding a product in the other hand. Apple's guidance is a 44pt minimum
+   target and Material's is 48dp; a 28px button styled `text-xs px-3 py-1.5`
+   is comfortable with a mouse and genuinely hard to hit with a thumb.
+
+   Scoped to `pointer: coarse` rather than applied globally, so the compact
+   layout survives on a desktop where it is fine — a phone-sized target on a
+   mouse-driven screen just wastes space.
+   --------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  button,
+  select,
+  [role='button'],
+  input[type='checkbox'],
+  input[type='radio'] {
+    min-height: 44px;
+  }
+
+  /* Width matters as much as height for the small square controls — a delete
+     ✕ that is 44px tall and 12px wide is still a miss. */
+  button {
+    min-width: 44px;
+  }
+
+  /* Inputs get the same floor, so a row of a label and a field does not end
+     up with the field shorter than the button beside it. */
+  input:not([type='checkbox']):not([type='radio']):not([hidden]),
+  textarea:not([hidden]) {
+    min-height: 44px;
+  }
+
+  /* Navigation links are controls, not prose, so they need the same floor.
+     Scoped to `nav` rather than every `a`, because an inline link inside a
+     sentence must not become a 44px block and break the line it sits in. */
+  nav a {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   The two-column layout, keyed on width AND height.
+
+   Tailwind's `lg:` is width-only at 1024px, which gets both ends wrong: a
+   portrait iPad Pro at 834px has ample room for two columns and would not get
+   them, while a landscape iPhone at 852px would qualify on width and then try
+   to show two columns in 393px of height.
+
+   820px of width leaves roughly 440px for the form beside a 22rem queue —
+   wider than any phone. 600px of height is the floor at which a stacked form
+   and a scrolling queue are both usable at once.
+   --------------------------------------------------------------------------- */
+.listing-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (min-width: 820px) and (min-height: 600px) {
+  .listing-columns {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 22rem);
+  }
+
+  /* Keeps the queue in view as the form grows, so a rejection is noticed when
+     it happens rather than at the end of the stream. */
+  .listing-columns > .listing-queue {
+    position: sticky;
+    top: 6rem;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Viewport height on mobile browsers.
+
+   `100vh` on iOS Safari and Chrome Android is the height with the URL bar
+   HIDDEN, so a `min-h-screen` layout is taller than the visible area and the
+   bottom of the page sits under the browser chrome. During a livestream the
+   thing at the bottom is the draft queue, which is the one thing that must not
+   be cut off.
+
+   `100dvh` tracks the actual visible viewport. Declared after the `vh` value
+   so a browser that does not understand it keeps the old behaviour rather
+   than collapsing to nothing.
+   --------------------------------------------------------------------------- */
+.min-h-screen {
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* ---------------------------------------------------------------------------
+   Text that must never be truncated by the browser's own sizing.
+
+   iOS applies text inflation in landscape, which can push a title preview past
+   its container. The preview is how someone checks a title has cleared 25
+   characters before pushing, so it has to read exactly as it will be sent.
+   --------------------------------------------------------------------------- */
+.no-inflate {
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+}

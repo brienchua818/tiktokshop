@@ -82,7 +82,17 @@ export default function DraftQueue({
   }
 
   if (drafts.length === 0) {
-    return <p className="text-xs text-gray-600 text-center py-4">No SKUs yet.</p>
+    // A card rather than bare text, because on an iPad this is a whole column.
+    // Floating grey words in an empty half-screen read as something failing to
+    // load; a panel reads as a place where SKUs will appear.
+    return (
+      <div className="bg-raised border border-white/8 border-dashed rounded-xl px-4 py-8 text-center">
+        <p className="text-sm text-gray-500">No SKUs yet</p>
+        <p className="text-xs text-gray-600 mt-1">
+          They appear here as you add them, and upload themselves.
+        </p>
+      </div>
+    )
   }
 
   return (

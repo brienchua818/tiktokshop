@@ -114,28 +114,44 @@ export default function ListingDetail({
 
       <IdentifierSettings prefix={prefix} onPrefix={setPrefix} nextIdentifier={formatIdentifier(next.prefix, next.seq)} />
 
-      <SkuForm
-        shop={shop}
-        listing={listing}
-        identifier={formatIdentifier(next.prefix, next.seq)}
-        onSaved={refreshDrafts}
-      />
+      {/* One column on a phone, two on an iPad. See `.listing-columns` in
+          index.css — the breakpoint is on width AND height, because a
+          landscape phone is wide enough for two columns and nowhere near tall
+          enough to use them.
 
-      <BulkAdd
-        shop={shop}
-        listing={listing}
-        startIdentifier={formatIdentifier(next.prefix, next.seq)}
-        onSaved={refreshDrafts}
-      />
+          Not decoration. On a phone the queue sits below the form and you
+          scroll to it; on an iPad there is horizontal room going spare, and
+          putting the queue beside the form means watching SKUs land while
+          adding the next one. During a stream that is the difference between
+          noticing a rejection immediately and finding six at the end. */}
+      <div className="listing-columns">
+        <div className="space-y-4 min-w-0">
+          <SkuForm
+            shop={shop}
+            listing={listing}
+            identifier={formatIdentifier(next.prefix, next.seq)}
+            onSaved={refreshDrafts}
+          />
 
-      <DraftQueue
-        drafts={drafts}
-        onChanged={refreshDrafts}
-        onDelete={async (id) => {
-          await removeDraft(id)
-          await refreshDrafts()
-        }}
-      />
+          <BulkAdd
+            shop={shop}
+            listing={listing}
+            startIdentifier={formatIdentifier(next.prefix, next.seq)}
+            onSaved={refreshDrafts}
+          />
+        </div>
+
+        <div className="listing-queue min-w-0">
+          <DraftQueue
+            drafts={drafts}
+            onChanged={refreshDrafts}
+            onDelete={async (id) => {
+              await removeDraft(id)
+              await refreshDrafts()
+            }}
+          />
+        </div>
+      </div>
     </div>
   )
 }
@@ -352,7 +368,10 @@ function SkuForm({
 
       <div className="flex gap-3">
         <CameraCapture preview={photoUrl} busy={busy === 'uploading'} onCapture={acceptPhoto} />
-        <div className="flex flex-col gap-2 flex-1">
+        {/* The two actions stretch to match the photo box beside them. Left at
+            their natural height they leave a band of dead space under them,
+            which reads as something missing. */}
+        <div className="flex flex-col gap-2 flex-1 min-w-0 [&>*]:flex-1">
           <VoiceCapture onFields={applyVoice} />
           <button
             onClick={fillFromPhoto}
@@ -407,7 +426,7 @@ function SkuForm({
         <p className="text-xs text-gray-500 mb-0.5">
           Title preview — {title.length}/{TITLE_MIN} minimum
         </p>
-        <p className="text-sm font-mono text-white break-words">{title}</p>
+        <p className="text-sm font-mono text-white break-words no-inflate">{title}</p>
         {/* The 25-character floor is TikTok's own rule, so it is shown as it is
             approached rather than discovered on rejection. */}
         {titleProblems.map((p) => (

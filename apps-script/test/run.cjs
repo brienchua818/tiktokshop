@@ -58,6 +58,7 @@ const sandbox = `
 ${src}
   module.exports = {
     variantValueName_, buildAppendPayload_, buildPayload_, validateTitle_,
+    validateVariantName_, continuationTitle_,
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
@@ -264,6 +265,67 @@ check('rejects a control character', () => {
   if (!/control characters/.test(gs.validateTitle_('Ceramic Serving Bowl\u0007White Glaze'))) throw new Error('accepted it')
 })
 check('rejects emoji', () => { if (!/English/.test(gs.validateTitle_('Ceramic Serving Bowl White 🎉'))) throw new Error('accepted emoji') })
+
+console.log('\nvalidateVariantName_ — a variant name is not a product title')
+check('accepts a short name, since there is no minimum', () => eq(gs.validateVariantName_('Blue Mug'), ''))
+check('accepts a single word', () => eq(gs.validateVariantName_('Bowl'), ''))
+check('accepts exactly 50 characters', () => {
+  const n = 'Hand Thrown Reactive Glaze Stoneware Dinner Plates'
+  if (n.length !== 50) throw new Error('fixture is ' + n.length)
+  eq(gs.validateVariantName_(n), '')
+})
+check('rejects 51 characters, and says by how much', () => {
+  const n = 'Hand Thrown Reactive Glaze Stoneware Dinner Plate A'
+  if (n.length !== 51) throw new Error('fixture is ' + n.length)
+  if (!/at most 50 characters — this is 51/.test(gs.validateVariantName_(n))) {
+    throw new Error(gs.validateVariantName_(n))
+  }
+})
+check('requires something', () => {
+  if (!/required/.test(gs.validateVariantName_(''))) throw new Error('accepted empty')
+  if (!/required/.test(gs.validateVariantName_('   '))) throw new Error('accepted blank')
+})
+check('rejects Chinese', () => {
+  if (!/must be English/.test(gs.validateVariantName_('白釉碗'))) throw new Error('accepted Chinese')
+})
+check('rejects emoji', () => {
+  if (!/must be English/.test(gs.validateVariantName_('Blue Mug 🎉'))) throw new Error('accepted emoji')
+})
+check('rejects an HTML entity', () => {
+  if (!/HTML entity/.test(gs.validateVariantName_('Blue&nbsp;Mug'))) throw new Error('accepted it')
+})
+check('never applies a minimum length', () => {
+  // Asserting the ABSENCE of the title floor, not just that one short name passes.
+  ;['Red', 'Blue Mug', 'A', '20cm'].forEach((n) => {
+    if (/at least/.test(gs.validateVariantName_(n))) throw new Error('held "' + n + '" to a minimum')
+  })
+})
+check('agrees with the TypeScript validator case for case', () => {
+  // The two backends serve the same livestream and must not drift.
+  eq(gs.validateVariantName_('Blue Mug'), '')
+  eq(gs.validateVariantName_('Bowl'), '')
+  if (!gs.validateVariantName_('白釉碗')) throw new Error('drifted on Chinese')
+  if (!gs.validateVariantName_('')) throw new Error('drifted on empty')
+})
+
+console.log('\ncontinuationTitle_ — naming the listing that carries on')
+check('suffixes a first continuation with (2)', () =>
+  eq(gs.continuationTitle_('Katrin BJ Ceramic Factory Run'), 'Katrin BJ Ceramic Factory Run (2)'))
+check('increments rather than stacking', () => {
+  eq(gs.continuationTitle_('Katrin BJ Ceramic Factory Run (2)'), 'Katrin BJ Ceramic Factory Run (3)')
+  eq(gs.continuationTitle_('Katrin BJ Ceramic Factory Run (9)'), 'Katrin BJ Ceramic Factory Run (10)')
+})
+check('leaves a trailing bracket that is not a part number alone', () =>
+  eq(gs.continuationTitle_('Ceramic Bowl Set (Limited Edition)'), 'Ceramic Bowl Set (Limited Edition) (2)'))
+check('never exceeds the 255-character ceiling', () => {
+  const r = gs.continuationTitle_('x'.repeat(300))
+  if (r.length > 255) throw new Error('length ' + r.length)
+  if (!/ \(2\)$/.test(r)) throw new Error('lost the suffix: ' + r.slice(-8))
+})
+check('produces a title the title validator accepts', () =>
+  eq(gs.validateTitle_(gs.continuationTitle_('Katrin BJ Ceramic Factory Run')), ''))
+check('tolerates surrounding whitespace', () =>
+  eq(gs.continuationTitle_('  Katrin BJ Ceramic Factory Run  '), 'Katrin BJ Ceramic Factory Run (2)'))
 
 console.log('\nLock.gs — one lock per execution')
 check('takes the lock when nothing holds it', () => {

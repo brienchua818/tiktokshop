@@ -141,9 +141,28 @@ export const api = {
     }>('upload-photo', { method: 'POST', body: form })
   },
 
-  /** Photo to English title, at least 25 characters. */
+  /**
+   * Photo to variant name — the name of one variation within a listing.
+   *
+   * This is what the SKU form uses. `product_name` is the listing's own title,
+   * passed so the answer distinguishes this piece rather than repeating what
+   * the listing already says.
+   */
+  variantFromPhoto: (imageUrl: string, productName?: string, hint?: string) =>
+    request<{ variant_name: string; material: string | null; problems: string[] }>('ai-variant', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image_url: imageUrl, product_name: productName, hint }),
+    }),
+
+  /**
+   * Photo to English product title, at least 25 characters.
+   *
+   * For naming a listing, not a SKU — a stream needs one title and many
+   * variant names.
+   */
   titleFromPhoto: (imageUrl: string, hint?: string) =>
-    request<ExtractedFields & { material?: string }>('ai-title', {
+    request<ExtractedFields & { material?: string; problems: string[] }>('ai-title', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ image_url: imageUrl, hint }),
@@ -181,6 +200,11 @@ export const api = {
     shop_id: string
     /** Omit to start the stream's listing with this SKU as its first variation. */
     listing_id?: string
+    /**
+     * The listing this one continues, when the previous filled up. The server
+     * reads that product's title and derives this listing's from it.
+     */
+    continues_from?: string
     identifier: string
     title: string
     variant_name: string | null

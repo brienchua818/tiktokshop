@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../lib/api'
 import { toSquareJpeg } from '../capture/camera'
-import { buildTitle, formatIdentifier, parseIdentifier } from '../lib/identifiers'
+import { formatIdentifier, parseIdentifier } from '../lib/identifiers'
 import {
-  validateTitle,
+  validateVariantName,
   validatePrice,
   validateStock,
+  variantValueName,
   DEFAULT_WEIGHT_KG,
   DEFAULT_DIMENSIONS,
+  VALUE_NAME_MAX,
 } from '../lib/tiktok-rules'
 import { enqueue } from '../offline/queue'
 import type { Draft, Listing, Shop } from '../types'
@@ -20,8 +22,13 @@ import type { Draft, Listing, Shop } from '../types'
  * stock, different photo. Entering that twelve times is the kind of friction
  * that makes people stop using a tool mid-livestream.
  *
- * Each photo becomes its own SKU with its own sequential identifier, so a
- * gallery of twelve produces A5 through A16 in one action.
+ * Each photo becomes its own variation with its own sequential identifier, so
+ * a gallery of twelve produces A5 through A16 in one action.
+ *
+ * Sharing one variant name across all twelve is safe even though TikTok
+ * forbids duplicate values under an attribute: the identifier is prepended, so
+ * "A5 Ceramic Bowl" and "A6 Ceramic Bowl" are distinct. Refine them
+ * individually afterwards if a finish deserves its own name.
  */
 export default function BulkAdd({
   shop,
@@ -59,14 +66,10 @@ export default function BulkAdd({
   const prefix = parsed?.prefix ?? 'A'
   const firstSeq = parsed?.seq ?? 1
 
-  // Preview against the first identifier: if the title is too short it will be
-  // too short for every photo, so it is worth seeing before adding twelve.
-  const sampleTitle = buildTitle({
-    identifier: formatIdentifier(prefix, firstSeq),
-    productName: name,
-    includeDims: false,
-  })
-  const titleProblems = name ? validateTitle(sampleTitle) : []
+  // Preview against the first identifier: if the name is too long it will be
+  // too long for every photo, so it is worth seeing before adding twelve.
+  const sampleValueName = variantValueName(formatIdentifier(prefix, firstSeq), name)
+  const variantProblems = name ? validateVariantName(sampleValueName) : []
 
   async function addFiles(files: FileList | null) {
     if (!files?.length) return
@@ -92,7 +95,8 @@ export default function BulkAdd({
   }
 
   const problems = [
-    ...titleProblems,
+    ...variantProblems,
+    ...(name.trim() ? [] : [{ field: 'variant_name', message: 'Variant name is required.' }]),
     ...validatePrice(price),
     ...validateStock(Number.parseInt(stock, 10)),
     ...(photos.length === 0 ? [{ field: 'photos', message: 'Add at least one photo.' }] : []),
@@ -128,10 +132,14 @@ export default function BulkAdd({
         draft_id: crypto.randomUUID(),
         listing_id: listing.listing_id,
         stream_id: listing.listing_id,
+        // Only set when a listing has filled up and its work moves to a new one.
+        continues_from: null,
         shop_id: shop.shop_id,
         identifier,
-        title: buildTitle({ identifier, productName: name, includeDims: false }),
-        variant_name: null,
+        // The listing's product title, carried for the record. It is the
+        // listing's to set, not this form's.
+        title: listing.product_name ?? shop.brand,
+        variant_name: name.trim(),
         price,
         stock: Number.parseInt(stock, 10),
         weight_kg: DEFAULT_WEIGHT_KG,
@@ -226,11 +234,11 @@ export default function BulkAdd({
       )}
 
       <div className="flex flex-col gap-1">
-        <label className="text-xs text-gray-400">Product name — used for every photo</label>
+        <label className="text-xs text-gray-400">Variant name — used for every photo</label>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Ceramic Serving Bowl White Glaze"
+          placeholder="e.g. Reactive Glaze Bowl"
           className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
         />
       </div>
@@ -260,10 +268,10 @@ export default function BulkAdd({
 
       <div className="bg-sunken rounded-lg px-3 py-2">
         <p className="text-xs text-gray-500 mb-0.5">
-          First title — {sampleTitle.length}/25 minimum
+          Buyer sees, first of them — {sampleValueName.length}/{VALUE_NAME_MAX} max
         </p>
-        <p className="text-sm font-mono text-white break-words">{sampleTitle}</p>
-        {titleProblems.map((p) => (
+        <p className="text-sm font-mono text-white break-words no-inflate">{sampleValueName}</p>
+        {variantProblems.map((p) => (
           <p key={p.message} className="text-xs text-amber-400 mt-1">
             {p.message}
           </p>

@@ -24,6 +24,7 @@ function draft(partial: Partial<QueuedDraft> = {}): QueuedDraft {
     draft_id: `d${seq}`,
     listing_id: 'L1',
     stream_id: 'L1',
+    continues_from: null,
     shop_id: 'S1',
     identifier: `A${seq}`,
     title: 'Ceramic Serving Bowl White Glaze',

@@ -77,6 +77,63 @@ function variantValueName_(identifier, variantName) {
 }
 
 /**
+ * Validate a variant name — the buyer-visible name of one variation.
+ *
+ * Deliberately NOT validateTitle_. A product title and a variant name are
+ * different fields with different rules, and conflating them was a real bug:
+ * a title floors at 25 characters and caps at 255, a variant name has no
+ * minimum and caps at 50. So "Blue Mug" is perfectly valid here and was being
+ * rejected.
+ *
+ * The character rules are shared, because TikTok polices them identically in
+ * both places — 12052243 rejects Chinese in a sales-attribute name just as
+ * 12052262 rejects it in a product name.
+ */
+function validateVariantName_(name) {
+  var n = String(name || '').trim();
+  if (!n) return 'Variant name is required.';
+  if (n.length > VALUE_NAME_MAX) {
+    return 'Variant name must be at most ' + VALUE_NAME_MAX + ' characters — this is ' +
+      n.length + '.';
+  }
+  if (/[\u0000-\u001F\u007F]/.test(n)) return 'Variant name contains control characters.';
+  if (/&(?:[a-zA-Z][a-zA-Z0-9]{1,31}|#\d{1,7}|#[xX][0-9a-fA-F]{1,6});/.test(n)) {
+    return 'Variant name contains an HTML entity such as &nbsp; — write the character itself.';
+  }
+  if (/[^\u0020-\u024F\u2018\u2019\u201C\u201D\u2013\u2014]/.test(n)) {
+    return 'Variant name must be English. TikTok rejects Chinese characters and emoji here.';
+  }
+  if (!/[a-zA-Z0-9]/.test(n)) return 'Variant name cannot be only symbols.';
+  if (/(.)\1{9,}/.test(n)) {
+    return 'Variant name repeats one character more than nine times in a row.';
+  }
+  return '';
+}
+
+/**
+ * The title for a continuation listing.
+ *
+ * Singapore caps a product at 100 variations, so a long factory run spills
+ * into a second listing. That listing needs a product title, and the one thing
+ * it must not need is for someone to invent one mid-broadcast — so it is
+ * derived from the listing it continues.
+ *
+ * An existing "(2)" is incremented rather than stacked, because a 300-SKU run
+ * produces a third listing and "Ceramic Run (2) (2)" is nobody's idea of a
+ * product name.
+ */
+function continuationTitle_(parentTitle) {
+  var title = String(parentTitle || '').trim();
+  var match = /^(.*?)\s*\((\d+)\)$/.exec(title);
+  var base = match ? match[1].replace(/\s+$/, '') : title;
+  var next = match ? parseInt(match[2], 10) + 1 : 2;
+  var suffix = ' (' + next + ')';
+  var room = TITLE_MAX - suffix.length;
+  if (base.length > room) base = base.slice(0, room).replace(/\s+$/, '');
+  return base + suffix;
+}
+
+/**
  * Read a product and its variations.
  *
  * Called immediately before every edit, and its result is the only safe basis
@@ -343,8 +400,6 @@ function pushSku_(body, user) {
   var shop = shopById_(prefix);
   if (!shop) throw new Error('Unknown shop: ' + body.shop_id);
 
-  var titleProblem = validateTitle_(body.title);
-  if (titleProblem) throw new Error(titleProblem);
   if (!body.identifier || /\s/.test(body.identifier)) {
     throw new Error('SKU identifier is required and cannot contain spaces.');
   }
@@ -353,12 +408,16 @@ function pushSku_(body, user) {
   if (!(stock >= 1 && stock <= 99999)) throw new Error('Stock must be between 1 and 99,999.');
   if (!body.photo_base64 && !body.tiktok_image_uri) throw new Error('A photo is required.');
 
-  // A variation's name is buyer-visible, so it is held to the same
-  // character rules as a title — 12052243 rejects Chinese in sales-attribute
-  // names — but not to a title's 25-character floor.
-  var valueName = variantValueName_(body.identifier, body.variant_name);
-  if (/[^\u0020-\u024F\u2018\u2019\u201C\u201D\u2013\u2014]/.test(valueName)) {
-    throw new Error('Variant name must be English. TikTok rejects Chinese characters and emoji.');
+  // The variant name is the ONLY text a SKU contributes. The product title
+  // belongs to the listing and is set once, so it is validated only on the
+  // path that creates one — holding a variation to a product title's
+  // 25-character floor rejected every short variant name.
+  var variantProblem = validateVariantName_(variantValueName_(body.identifier, body.variant_name));
+  if (variantProblem) throw new Error(variantProblem);
+
+  if (!body.listing_id) {
+    var titleProblem = validateTitle_(body.title);
+    if (titleProblem) throw new Error(titleProblem);
   }
 
   // NO LOCK IS TAKEN HERE, deliberately.
@@ -512,8 +571,23 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
  *   4. create.
  */
 function startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl) {
+  // A continuation listing takes its title from the listing it continues, read
+  // from TikTok rather than from the client — authoritative, and it means
+  // nobody has to invent a product name mid-broadcast.
+  var title = String(body.title || '').trim();
+  if (body.continues_from) {
+    var parent = ttGetProduct_(prefix, body.continues_from);
+    if (!parent.title) {
+      throw new Error('Could not read the title of the listing this continues, so the new one ' +
+        'cannot be named. Try again in a moment.');
+    }
+    title = continuationTitle_(parent.title);
+  }
+  var titleProblem = validateTitle_(title);
+  if (titleProblem) throw new Error(titleProblem);
+
   var input = {
-    title: String(body.title).trim(),
+    title: title,
     identifier: addition.identifier,
     variantName: addition.variantName,
     price: addition.price,

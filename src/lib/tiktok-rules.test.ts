@@ -6,7 +6,11 @@ import {
   validatePrice,
   validateStock,
   validateWeight,
+  validateVariantName,
+  variantValueName,
+  continuationTitle,
   TITLE_MIN,
+  TITLE_MAX,
 } from './tiktok-rules'
 
 /**
@@ -152,5 +156,126 @@ describe('validateWeight', () => {
 
   it('rejects zero, which TikTok rejects with 12052181', () => {
     expect(validateWeight('0')).not.toEqual([])
+  })
+})
+
+/**
+ * A variant name is not a product title.
+ *
+ * Conflating them was a real bug. A stream is one TikTok product and every SKU
+ * is a variation of it, so a SKU contributes a variant name and nothing else —
+ * the product title belongs to the listing. Reusing the title validator here
+ * applied a 25-character floor that does not exist for variant names, and
+ * rejected every short one.
+ */
+describe('validateVariantName', () => {
+  it('accepts a short name — there is no minimum', () => {
+    // The exact case the title validator was wrongly rejecting.
+    expect(validateVariantName('Blue Mug')).toEqual([])
+  })
+
+  it('accepts a single word', () => {
+    expect(validateVariantName('Bowl')).toEqual([])
+  })
+
+  it('accepts a name at exactly the 50-character ceiling', () => {
+    const name = 'Hand Thrown Reactive Glaze Stoneware Dinner Plates'
+    expect(name).toHaveLength(50)
+    expect(validateVariantName(name)).toEqual([])
+  })
+
+  it('rejects one character over the ceiling, and says by how much', () => {
+    const name = 'Hand Thrown Reactive Glaze Stoneware Dinner Plate A'
+    // Asserted, not counted by eye — an earlier version of this test was
+    // wrong about its own fixture.
+    expect(name).toHaveLength(51)
+    expect(validateVariantName(name)[0]!.message).toMatch(/at most 50 characters — this is 51/)
+  })
+
+  it('requires something', () => {
+    expect(validateVariantName('')[0]!.message).toMatch(/required/)
+    expect(validateVariantName('   ')[0]!.message).toMatch(/required/)
+  })
+
+  it('rejects Chinese, which 12052243 refuses in a sales-attribute name', () => {
+    expect(validateVariantName('白釉碗')[0]!.message).toMatch(/must be English/)
+  })
+
+  it('rejects emoji', () => {
+    expect(validateVariantName('Blue Mug 🎉')[0]!.message).toMatch(/must be English/)
+  })
+
+  it('rejects a symbols-only name', () => {
+    expect(validateVariantName('///')[0]!.message).toMatch(/only symbols/)
+  })
+
+  it('does not apply the title 25-character floor at all', () => {
+    // Belt and braces: assert the absence of the rule, not just that one short
+    // name passes.
+    for (const name of ['Red', 'Blue Mug', 'Matte Bowl', 'A', '20cm']) {
+      expect(
+        validateVariantName(name).some((v) => /at least/.test(v.message)),
+        `"${name}" was held to a minimum length`,
+      ).toBe(false)
+    }
+  })
+})
+
+describe('variantValueName', () => {
+  it('leads with the identifier, which is what the host says on air', () => {
+    expect(variantValueName('A7', 'Blue Reactive Glaze Mug')).toBe('A7 Blue Reactive Glaze Mug')
+  })
+
+  it('produces a name that passes its own validator', () => {
+    expect(validateVariantName(variantValueName('A7', 'Blue Reactive Glaze Mug'))).toEqual([])
+  })
+
+  it('stays valid even when the typed name alone would overflow', () => {
+    // The identifier is prepended, so a 48-character name that fits on its own
+    // does not once "A123 " is in front of it. Truncation keeps it legal.
+    const long = 'Hand Thrown Reactive Glaze Stoneware Dinner Plate'
+    expect(validateVariantName(variantValueName('A123', long))).toEqual([])
+  })
+})
+
+describe('continuationTitle', () => {
+  it('suffixes a first continuation with (2)', () => {
+    expect(continuationTitle('Katrin BJ Ceramic Factory Run')).toBe(
+      'Katrin BJ Ceramic Factory Run (2)',
+    )
+  })
+
+  it('increments rather than stacking', () => {
+    // A 300-SKU run makes a third listing, and "Run (2) (2)" is nobody's idea
+    // of a product name.
+    expect(continuationTitle('Katrin BJ Ceramic Factory Run (2)')).toBe(
+      'Katrin BJ Ceramic Factory Run (3)',
+    )
+    expect(continuationTitle('Katrin BJ Ceramic Factory Run (9)')).toBe(
+      'Katrin BJ Ceramic Factory Run (10)',
+    )
+  })
+
+  it('leaves a trailing bracket that is not a part number alone', () => {
+    expect(continuationTitle('Ceramic Bowl Set (Limited Edition)')).toBe(
+      'Ceramic Bowl Set (Limited Edition) (2)',
+    )
+  })
+
+  it('never exceeds the 255-character title ceiling', () => {
+    const result = continuationTitle('x'.repeat(300))
+    expect(result.length).toBeLessThanOrEqual(TITLE_MAX)
+    expect(result.endsWith(' (2)')).toBe(true)
+  })
+
+  it('produces a title that passes the title validator', () => {
+    // Including the floor: a parent title long enough to be legal stays legal.
+    expect(validateTitle(continuationTitle('Katrin BJ Ceramic Factory Run'))).toEqual([])
+  })
+
+  it('tolerates surrounding whitespace on the parent title', () => {
+    expect(continuationTitle('  Katrin BJ Ceramic Factory Run  ')).toBe(
+      'Katrin BJ Ceramic Factory Run (2)',
+    )
   })
 })

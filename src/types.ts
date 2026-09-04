@@ -64,6 +64,15 @@ export interface Draft {
    * TikTok still knows nothing about it.
    */
   stream_id: string
+  /**
+   * The listing this one continues, when the previous filled up.
+   *
+   * Set only on the drafts that move across after a listing hits TikTok's
+   * 100-variation ceiling. The server reads that product's own title and
+   * derives the new listing's — so nobody has to invent a product name
+   * mid-broadcast.
+   */
+  continues_from: string | null
   shop_id: string
   /** Sequential identifier — "A1", "A2". Also becomes the TikTok seller_sku. */
   identifier: string

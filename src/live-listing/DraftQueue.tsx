@@ -228,6 +228,7 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
       shop_id: draft.shop_id,
       // Omitted for the first SKU of a stream, which creates the listing.
       ...(draft.listing_id ? { listing_id: draft.listing_id } : {}),
+      ...(draft.continues_from ? { continues_from: draft.continues_from } : {}),
       identifier: draft.identifier,
       title: draft.title,
       variant_name: draft.variant_name,
@@ -328,6 +329,9 @@ export async function startContinuationListing(
     // Clearing listing_id is what makes the first of them create it.
     stream_id: streamId,
     listing_id: null,
+    // Remembered so the server can read the full listing's own title and
+    // derive the continuation's from it — nobody names a product mid-stream.
+    continues_from: draft.listing_id,
     status: 'queued',
     error: null,
     attempts: 0,

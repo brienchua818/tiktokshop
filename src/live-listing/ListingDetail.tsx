@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../lib/api'
-import { buildTitle, formatIdentifier, nextIdentifier } from '../lib/identifiers'
+import { formatIdentifier, nextIdentifier } from '../lib/identifiers'
 import {
-  validateTitle,
+  validateVariantName,
   validatePrice,
   validateStock,
   validateWeight,
+  variantValueName,
   DEFAULT_WEIGHT_KG,
   DEFAULT_DIMENSIONS,
-  TITLE_MIN,
+  VALUE_NAME_MAX,
 } from '../lib/tiktok-rules'
 import { allDrafts, enqueue, removeDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
@@ -207,7 +208,10 @@ function SkuForm({
 }) {
   const [photo, setPhoto] = useState<Blob | null>(null)
   const [photoUrl, setPhotoUrl] = useState<string | null>(null)
-  const [name, setName] = useState('')
+  // No product-name field, deliberately. A stream is ONE TikTok product and
+  // every SKU is a variation of it, so the product title belongs to the
+  // listing and is set once — asking for it per SKU invited 200 slightly
+  // different titles for one factory run.
   const [variant, setVariant] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('')
@@ -218,7 +222,7 @@ function SkuForm({
   } | null>(
     null,
   )
-  const [busy, setBusy] = useState<'' | 'uploading' | 'titling' | 'saving'>('')
+  const [busy, setBusy] = useState<'' | 'uploading' | 'naming' | 'saving'>('')
   const [error, setError] = useState('')
   const objectUrl = useRef<string | null>(null)
 
@@ -229,10 +233,14 @@ function SkuForm({
     [],
   )
 
-  // No dimensions in the title: they are a fixed shipping declaration, not a
-  // measurement of this product, so putting them here would misdescribe it.
-  const title = buildTitle({ identifier, productName: name, includeDims: false })
-  const titleProblems = name ? validateTitle(title) : []
+  // What the buyer will actually see in the variant picker. The identifier
+  // leads it because that is the shared vocabulary of the broadcast — the host
+  // says "A7 is the blue one" and the buyer looks for A7.
+  const valueName = variantValueName(identifier, variant)
+  const variantProblems = variant ? validateVariantName(valueName) : []
+
+  // The product title comes from the listing, unchanged per SKU.
+  const productTitle = listing.product_name ?? shop.brand
 
   async function acceptPhoto(blob: Blob) {
     if (objectUrl.current) URL.revokeObjectURL(objectUrl.current)
@@ -266,12 +274,19 @@ function SkuForm({
       setError('The photo has not uploaded yet, so it cannot be read.')
       return
     }
-    setBusy('titling')
+    setBusy('naming')
     setError('')
     try {
-      const result = await api.titleFromPhoto(uploaded.ai_image_url, name || undefined)
-      if (result.title) setName(stripIdentifier(result.title, identifier))
+      // The listing's title goes along so the answer distinguishes this piece
+      // rather than repeating what the listing already says.
+      const result = await api.variantFromPhoto(
+        uploaded.ai_image_url,
+        productTitle,
+        variant || undefined,
+      )
       if (result.variant_name) setVariant(result.variant_name)
+      // Said plainly rather than left for the operator to discover on save.
+      if (result.problems.length > 0) setError(result.problems[0]!)
     } catch (e: unknown) {
       setError(`Could not read the photo: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
@@ -289,8 +304,13 @@ function SkuForm({
   }) {
     // Only overwrite what was actually heard, so speaking a price does not
     // wipe a name already typed.
-    if (fields.name) setName(fields.name)
-    if (fields.variant) setVariant(fields.variant)
+    //
+    // Both spoken name fields land on the variant, because there is nowhere
+    // else for them to go: describing the item on air IS describing the
+    // variation. `variant` wins when the model returned both, since it is the
+    // more specific of the two.
+    const spokenName = fields.variant || fields.name
+    if (spokenName) setVariant(spokenName)
     if (fields.price) setPrice(fields.price)
     if (fields.stock !== undefined) setStock(String(fields.stock))
     // Spoken weight and dimensions are deliberately ignored: both are fixed
@@ -299,7 +319,11 @@ function SkuForm({
   }
 
   const problems = [
-    ...titleProblems,
+    ...variantProblems,
+    // Required, not optional. It is the only text this SKU contributes, and a
+    // listing of a hundred variations all called "A1", "A2"… is unusable to a
+    // buyer even though TikTok would accept it.
+    ...(variant.trim() ? [] : [{ field: 'variant_name', message: 'Variant name is required.' }]),
     ...validatePrice(price),
     ...validateStock(Number.parseInt(stock, 10)),
     ...validateWeight(DEFAULT_WEIGHT_KG),
@@ -320,10 +344,14 @@ function SkuForm({
         // Groups this SKU with the rest of the same factory run, so the queue
         // pushes them one at a time against one listing.
         stream_id: listing.listing_id,
+        // Only set when a listing has filled up and its work moves to a new one.
+        continues_from: null,
         shop_id: shop.shop_id,
         identifier,
-        title,
-        variant_name: variant || null,
+        // The listing's product title, carried for the record. TikTok already
+        // holds it on the product and it is not resent per variation.
+        title: productTitle,
+        variant_name: variant.trim(),
         price,
         stock: Number.parseInt(stock, 10),
         weight_kg: DEFAULT_WEIGHT_KG,
@@ -347,7 +375,6 @@ function SkuForm({
       setPhoto(null)
       setPhotoUrl(null)
       setUploaded(null)
-      setName('')
       setVariant('')
       setPrice('')
       setStock('')
@@ -360,9 +387,14 @@ function SkuForm({
 
   return (
     <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-4">
-      <div className="flex items-center gap-2">
+      <div className="space-y-0.5">
         <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
           New SKU — <span className="text-identifier font-mono">{identifier}</span>
+        </p>
+        {/* The product title, shown so it is obvious where it comes from and
+            that it is not this form's job to set it. */}
+        <p className="text-xs text-gray-600 truncate">
+          Adding to <span className="text-gray-400">{productTitle}</span>
         </p>
       </div>
 
@@ -378,25 +410,18 @@ function SkuForm({
             disabled={!uploaded || busy !== ''}
             className="text-xs px-3 py-2 rounded-lg bg-purple-600/80 hover:bg-purple-500 disabled:opacity-40 text-white transition-colors"
           >
-            {busy === 'titling' ? 'Reading photo…' : 'Write title from photo'}
+            {busy === 'naming' ? 'Reading photo…' : 'Name it from the photo'}
           </button>
         </div>
       </div>
 
-      <Field label="Product name">
-        <input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Ceramic Serving Bowl White Glaze"
-          className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
-        />
-      </Field>
-
-      <Field label="Variant (optional)">
+      {/* One text field, because one is all a variation has. The product name
+          is the listing's and is shown above, not typed again here. */}
+      <Field label="Variant name">
         <input
           value={variant}
           onChange={(e) => setVariant(e.target.value)}
-          placeholder="e.g. White"
+          placeholder="e.g. Blue Reactive Glaze Mug"
           className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
         />
       </Field>
@@ -424,12 +449,21 @@ function SkuForm({
 
       <div className="bg-sunken rounded-lg px-3 py-2">
         <p className="text-xs text-gray-500 mb-0.5">
-          Title preview — {title.length}/{TITLE_MIN} minimum
+          Buyer sees{variant.trim() ? ` — ${valueName.length}/${VALUE_NAME_MAX} max` : ''}
         </p>
-        <p className="text-sm font-mono text-white break-words no-inflate">{title}</p>
-        {/* The 25-character floor is TikTok's own rule, so it is shown as it is
-            approached rather than discovered on rejection. */}
-        {titleProblems.map((p) => (
+        {/* Before anything is typed this would read as the bare identifier,
+            which misrepresents the preview the operator is trusting — so it
+            says what is missing instead. */}
+        {variant.trim() ? (
+          <p className="text-sm font-mono text-white break-words no-inflate">{valueName}</p>
+        ) : (
+          <p className="text-sm font-mono text-gray-600">
+            {identifier} <span className="not-italic">· name it above</span>
+          </p>
+        )}
+        {/* TikTok's own 50-character ceiling, shown as it is approached rather
+            than discovered on rejection. */}
+        {variantProblems.map((p) => (
           <p key={p.message} className="text-xs text-amber-400 mt-1">
             {p.message}
           </p>
@@ -458,12 +492,3 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-/**
- * The model is asked for a full title, but the identifier is prepended
- * separately — so strip it if the model included one, rather than shipping
- * "A1-A1-Ceramic Bowl".
- */
-function stripIdentifier(title: string, identifier: string): string {
-  const pattern = new RegExp(`^${identifier}[-\\s]*`, 'i')
-  return title.replace(pattern, '').trim()
-}

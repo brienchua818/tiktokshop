@@ -1,10 +1,28 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { z } from 'zod'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
-import { validateTitle, TITLE_MIN, TITLE_MAX } from '../../src/lib/tiktok-rules'
+import {
+  validateTitle,
+  validateVariantName,
+  TITLE_MIN,
+  TITLE_MAX,
+  VALUE_NAME_MAX,
+} from '../../src/lib/tiktok-rules'
 
 /**
- * Photo -> product title, using Claude vision.
+ * Photo -> text, using Claude vision.
+ *
+ * Two different jobs, because a livestream needs two different pieces of text:
+ *
+ *   - a **variant name** for each SKU, which is the hot path. A stream is one
+ *     TikTok product and every SKU is a variation of it, so what each photo
+ *     needs is the short phrase that distinguishes THIS piece from the others
+ *     on the same listing — not another product title.
+ *   - a **product title** for the listing itself, needed once per stream.
+ *
+ * They have different rules and must not be conflated. A title floors at 25
+ * characters; a variant name has no minimum and caps at 50. Reusing the title
+ * validator on variant names rejected every short one.
  *
  * Two constraints have to hold at once, and they are the whole reason this is
  * a model call rather than a template:
@@ -38,6 +56,39 @@ const TitleSchema = z.object({
 })
 
 export type TitleResult = z.infer<typeof TitleSchema>
+
+const VariantSchema = z.object({
+  variant_name: z
+    .string()
+    .describe(
+      `Short English name distinguishing this piece from others in the same listing, at most ${VALUE_NAME_MAX} characters. e.g. "Blue Reactive Glaze Mug".`,
+    ),
+  material: z.string().describe('Primary material if identifiable, e.g. "Ceramic". Empty if not.'),
+})
+
+export type VariantResult = z.infer<typeof VariantSchema>
+
+/**
+ * The variant instruction is a different job from the title one, and saying so
+ * matters: asked for "a title" the model writes a full retail title, which is
+ * both too long for a 50-character field and redundant against the listing it
+ * sits under.
+ */
+const VARIANT_SYSTEM_PROMPT = `You name individual variations of a product for a TikTok Shop in Singapore selling homeware, tableware, rugs and home fragrance.
+
+The shop lists a whole factory run as ONE product with many variations. Your job is to name the ONE piece in the photo so a buyer can pick it out from the others in the same listing, and so the host can call it out on a live broadcast.
+
+Hard requirements, enforced by the TikTok API:
+- At most ${VALUE_NAME_MAX} characters. Shorter is better — aim for two to five words.
+- English only. Never use Chinese characters, other non-Latin scripts, or emoji.
+- No HTML entities, no control characters, and never repeat a character more than nine times.
+
+Name what makes THIS piece different: colour, finish, pattern, shape, or size. Do not repeat the listing's product name back. Do not write a sentence, a full retail title, or marketing copy.
+
+Good: "Blue Reactive Glaze Mug", "Matte Black Side Plate", "Speckled Bowl 20cm".
+Bad: "Beautiful Premium Quality Ceramic Mug For Home Use" (too long, no distinguishing detail).
+
+Write British English. Do not invent measurements, brands or materials you cannot see.`
 
 /**
  * The instruction is deliberately explicit about *how* to reach 25 characters,
@@ -93,6 +144,77 @@ export async function generateTitle(request: TitleRequest): Promise<TitleResult>
   // blocks the push and lets the operator edit, which beats losing the photo
   // and the model's other useful fields.
   return retry
+}
+
+export interface VariantRequest {
+  /** Publicly reachable image URL — a small Cloudinary derivative, not the full photo. */
+  imageUrl: string
+  /**
+   * The listing's product title.
+   *
+   * Passed so the variant name distinguishes rather than repeats: without it
+   * a photo of a mug on a "Katrin BJ ceramic run" listing comes back as
+   * "Ceramic Mug", which tells a buyer nothing they did not already know.
+   */
+  productName?: string
+  /** Anything the operator already typed or said, to steer the answer. */
+  hint?: string
+}
+
+/**
+ * Ask for a variant name, then verify it. One corrective retry naming the
+ * specific problem, for the same reason the title path does it: re-rolling the
+ * same prompt and hoping is markedly less reliable.
+ */
+export async function generateVariantName(request: VariantRequest): Promise<VariantResult> {
+  const first = await askForVariant(request)
+  const violations = validateVariantName(first.variant_name)
+  if (violations.length === 0) return first
+
+  return askForVariant(request, {
+    previous: first.variant_name,
+    problems: violations.map((v) => v.message),
+  })
+}
+
+async function askForVariant(
+  request: VariantRequest,
+  correction?: { previous: string; problems: string[] },
+): Promise<VariantResult> {
+  const context = request.productName
+    ? `This piece is being added to a listing called "${request.productName}". Name what makes it different from the others on that listing.`
+    : 'Name this piece so a buyer can pick it out from similar ones.'
+
+  const instruction = correction
+    ? `Your previous answer was "${correction.previous}" (${correction.previous.length} characters). It was rejected:
+${correction.problems.map((p) => `- ${p}`).join('\n')}
+
+Write a corrected name. If it was too long, cut adjectives before you cut distinguishing detail.`
+    : request.hint
+      ? `${context} The person photographing it said: "${request.hint}". Use that where it is consistent with the photo.`
+      : context
+
+  const response = await client().messages.parse({
+    model: 'claude-opus-5',
+    max_tokens: 1024,
+    system: VARIANT_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'url', url: request.imageUrl } },
+          { type: 'text', text: instruction },
+        ],
+      },
+    ],
+    output_config: { format: zodOutputFormat(VariantSchema) },
+  })
+
+  const parsed = response.parsed_output
+  if (!parsed) {
+    throw new Error('Claude returned no parseable variant name. The photo may be unreadable.')
+  }
+  return parsed
 }
 
 async function askForTitle(

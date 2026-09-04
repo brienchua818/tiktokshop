@@ -35,14 +35,19 @@ import {
   MAX_SKUS_PER_PRODUCT,
   STOCK_MAX,
   STOCK_MIN,
-  VALUE_NAME_MAX,
   VARIANT_ATTRIBUTE_NAME,
-  validateTextCharacters,
+  validateVariantName,
+  variantValueName,
 } from '../../src/lib/tiktok-rules'
 
 // Re-exported so callers of this module get the whole variant vocabulary from
-// one place, even though the constants themselves are shared facts about TikTok.
-export { VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME } from '../../src/lib/tiktok-rules'
+// one place, even though these are shared facts about TikTok and the browser
+// needs them too — the SKU form previews the name before it is ever sent.
+export {
+  VALUE_NAME_MAX,
+  VARIANT_ATTRIBUTE_NAME,
+  variantValueName,
+} from '../../src/lib/tiktok-rules'
 import type { Credentials } from './tiktok-product'
 
 /**
@@ -186,28 +191,6 @@ function parseSku(raw: RawSku): ExistingSku {
     quantity: inventory?.quantity ?? 0,
     warehouseId: inventory?.warehouse_id ?? '',
   }
-}
-
-/**
- * The buyer-visible name for a variation.
- *
- * Leads with the identifier on purpose. In a factory livestream the host says
- * "A7 is the blue one" and the buyer looks for A7 in the variant picker — the
- * identifier is the shared vocabulary of the whole broadcast, so burying it
- * would break the one interaction that matters.
- *
- * Truncated to TikTok's 50-character ceiling at a word boundary where one is
- * available, because a name cut mid-word looks like a bug to a buyer.
- */
-export function variantValueName(identifier: string, variantName: string): string {
-  const name = variantName.trim().replace(/\s+/g, ' ')
-  const combined = name ? `${identifier} ${name}` : identifier
-  if (combined.length <= VALUE_NAME_MAX) return combined
-
-  const clipped = combined.slice(0, VALUE_NAME_MAX)
-  const lastSpace = clipped.lastIndexOf(' ')
-  // Only prefer the word boundary if it does not cost most of the name.
-  return lastSpace > VALUE_NAME_MAX * 0.6 ? clipped.slice(0, lastSpace) : clipped.trimEnd()
 }
 
 /**
@@ -374,17 +357,11 @@ export function validateAddition(addition: VariantAddition): string[] {
     problems.push(`Stock must be a whole number between ${STOCK_MIN} and ${STOCK_MAX}.`)
   }
 
+  // The value name is what the buyer sees, and it is checked as a whole rather
+  // than just the typed half — the identifier is prepended, so a name that fits
+  // on its own can still overflow once "A123 " is in front of it.
   const valueName = variantValueName(addition.identifier ?? '', addition.variantName ?? '')
-  if (valueName.length > VALUE_NAME_MAX) {
-    problems.push(`Variant name must be at most ${VALUE_NAME_MAX} characters.`)
-  }
-  // Attribute values are held to the same character rules as titles — 12052243
-  // rejects Chinese in sales-attribute names, 12052245 invalid characters — but
-  // not to a title's 25-character floor, which is why the character rules live
-  // in their own validator.
-  problems.push(
-    ...validateTextCharacters(valueName, 'variant_name', 'Variant name').map((v) => v.message),
-  )
+  problems.push(...validateVariantName(valueName).map((v) => v.message))
 
   return problems
 }

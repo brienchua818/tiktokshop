@@ -105,11 +105,14 @@ export default function VoiceCapture({
   }
 
   return (
-    <div className="space-y-1">
+    // A flex column with the button stretching, so that when the parent asks
+    // this component to fill a column the BUTTON fills it — not an invisible
+    // wrapper with a normal-sized button sitting at the top of it.
+    <div className="flex flex-col gap-1 h-full">
       <button
         onClick={state === 'recording' ? stop : start}
         disabled={state === 'thinking'}
-        className={`w-full text-xs px-3 py-2 rounded-lg transition-colors ${
+        className={`w-full flex-1 text-xs px-3 py-2 rounded-lg transition-colors ${
           state === 'recording'
             ? 'bg-red-600 hover:bg-red-500 text-white'
             : 'bg-white/10 hover:bg-white/15 text-white disabled:opacity-40'

@@ -187,6 +187,83 @@ export function isTitleValid(title: string): boolean {
 }
 
 /**
+ * The buyer-visible name for a variation.
+ *
+ * Leads with the identifier on purpose. In a factory livestream the host says
+ * "A7 is the blue one" and the buyer looks for A7 in the variant picker — the
+ * identifier is the shared vocabulary of the whole broadcast, so burying it
+ * would break the one interaction that matters.
+ *
+ * Truncated to TikTok's 50-character ceiling at a word boundary where one is
+ * available, because a name cut mid-word looks like a bug to a buyer.
+ */
+export function variantValueName(identifier: string, variantName: string): string {
+  const name = variantName.trim().replace(/\s+/g, ' ')
+  const combined = name ? `${identifier} ${name}` : identifier
+  if (combined.length <= VALUE_NAME_MAX) return combined
+
+  const clipped = combined.slice(0, VALUE_NAME_MAX)
+  const lastSpace = clipped.lastIndexOf(' ')
+  // Only prefer the word boundary if it does not cost most of the name.
+  return lastSpace > VALUE_NAME_MAX * 0.6 ? clipped.slice(0, lastSpace) : clipped.trimEnd()
+}
+
+/**
+ * The title for a continuation listing.
+ *
+ * Singapore caps a product at 100 variations, so a long factory run spills
+ * into a second listing. That listing needs a product title, and the one thing
+ * it must not need is for someone to invent one mid-broadcast — so it is
+ * derived from the listing it continues.
+ *
+ * An existing "(2)" is incremented rather than stacked, because a 300-SKU run
+ * produces a third listing and "Ceramic Run (2) (2)" is nobody's idea of a
+ * product name.
+ */
+export function continuationTitle(parentTitle: string): string {
+  const title = parentTitle.trim()
+  const match = /^(.*?)\s*\((\d+)\)$/.exec(title)
+  const base = match ? match[1]!.trim() : title
+  const next = match ? Number.parseInt(match[2]!, 10) + 1 : 2
+  const suffix = ` (${next})`
+
+  // Trim the base rather than overflow: TikTok rejects anything past 255, and
+  // losing the tail of a long title is better than losing the whole listing.
+  const room = TITLE_MAX - suffix.length
+  return `${base.length > room ? base.slice(0, room).trimEnd() : base}${suffix}`
+}
+
+/**
+ * Validate a variant name — the buyer-visible name of one variation.
+ *
+ * Deliberately NOT `validateTitle`. A product title and a variant name are
+ * different fields with different rules, and conflating them was a real bug:
+ *
+ *   - a title floors at 25 characters; a variant name has no minimum, so
+ *     "Blue Mug" is perfectly valid and was being rejected;
+ *   - a title caps at 255; a variant name caps at 50.
+ *
+ * The character rules are shared, because TikTok polices them identically in
+ * both places — 12052243 rejects Chinese in a sales-attribute name just as
+ * 12052262 rejects it in a product name.
+ */
+export function validateVariantName(raw: string): Violation[] {
+  const name = raw.trim()
+  if (name.length === 0) {
+    return [{ field: 'variant_name', message: 'Variant name is required.' }]
+  }
+  if (name.length > VALUE_NAME_MAX) {
+    return [
+      {
+        field: 'variant_name',
+        message: `Variant name must be at most ${VALUE_NAME_MAX} characters — this is ${name.length}.`,
+      },
+    ]
+  }
+  return validateTextCharacters(name, 'variant_name', 'Variant name')
+}
+
+/**
  * TikTok requires seller_sku to carry no spaces. Our identifiers ("A1") never
  * do, but a hand-edited one might.
  */

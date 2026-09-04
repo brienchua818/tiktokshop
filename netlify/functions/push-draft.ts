@@ -27,6 +27,7 @@ import {
   validatePrice,
   validateStock,
   validateWeight,
+  continuationTitle,
   MAX_SKUS_PER_PRODUCT,
 } from '../../src/lib/tiktok-rules'
 
@@ -54,8 +55,24 @@ interface Body {
   shop_id?: string
   /** The TikTok product id this stream lists against. Absent means start one. */
   listing_id?: string
+  /**
+   * The listing this one continues, when the previous hit TikTok's
+   * 100-variation ceiling.
+   *
+   * Its title is read from TikTok and the new listing's derived from it, so a
+   * continuation needs no product name typed mid-broadcast.
+   */
+  continues_from?: string
   identifier?: string
+  /**
+   * The LISTING's product title.
+   *
+   * Required only when creating a listing. On an append it is carried for the
+   * record and never resent — TikTok already holds it on the product, and a
+   * variation has no title of its own.
+   */
   title?: string
+  /** This variation's buyer-visible name. Required: it is the only text a SKU contributes. */
   variant_name?: string | null
   price?: string
   stock?: number
@@ -84,7 +101,6 @@ export default withAuth(async (request) => {
   for (const field of [
     'shop_id',
     'identifier',
-    'title',
     'price',
     'tiktok_image_uri',
     'idempotency_key',
@@ -92,12 +108,21 @@ export default withAuth(async (request) => {
     if (!body[field]) return json({ error: `${field} is required.` }, 400)
   }
 
+  const wantsNewListing = !body.listing_id || body.start_new_listing === true
+
   const problems = [
-    ...validateTitle(body.title!),
     ...validateSellerSku(body.identifier!),
     ...validatePrice(body.price!),
     ...validateStock(Number(body.stock)),
     ...validateWeight(body.weight_kg ?? ''),
+    // The product title is only sent to TikTok when a listing is CREATED. An
+    // append carries the listing's existing title untouched, so holding a
+    // variation to a 25-character product-title floor was a leftover from
+    // creating one product per SKU — and rejected every short variant.
+    //
+    // A continuation is also exempt: its title is derived from the listing it
+    // continues, read from TikTok, and is therefore not the client's to supply.
+    ...(wantsNewListing && !body.continues_from ? validateTitle(body.title ?? '') : []),
   ]
   if (problems.length > 0) {
     return json({ error: problems[0]!.message, problems: problems.map((p) => p.message) }, 400)
@@ -105,7 +130,7 @@ export default withAuth(async (request) => {
 
   const addition: VariantAddition = {
     identifier: body.identifier!,
-    variantName: body.variant_name ?? '',
+    variantName: (body.variant_name ?? '').trim(),
     price: body.price!,
     stock: Number(body.stock),
     // A variation's photo must be an ATTRIBUTE_IMAGE upload. Falling back to
@@ -119,7 +144,6 @@ export default withAuth(async (request) => {
   }
 
   const creds = await credentialsFor(body.shop_id!)
-  const wantsNewListing = !body.listing_id || body.start_new_listing === true
 
   try {
     return wantsNewListing
@@ -270,8 +294,30 @@ async function startNewListing(
     }
   }
 
+  // A continuation listing takes its title from the listing it continues, read
+  // from TikTok rather than from the client — authoritative, and it means
+  // nobody has to invent a product name mid-broadcast.
+  let title = (body.title ?? '').trim()
+  if (body.continues_from) {
+    const parent = await readProduct(creds, body.continues_from)
+    if (!parent.title) {
+      throw new UnsupportedVariantShapeError(
+        'Could not read the title of the listing this continues, so the new one cannot be named. Try again in a moment.',
+      )
+    }
+    title = continuationTitle(parent.title)
+  }
+
+  const titleProblems = validateTitle(title)
+  if (titleProblems.length > 0) {
+    return json(
+      { error: titleProblems[0]!.message, problems: titleProblems.map((p) => p.message) },
+      400,
+    )
+  }
+
   const input = {
-    title: body.title!,
+    title,
     variantName: body.variant_name ?? null,
     variantValueName: variantValueName(addition.identifier, addition.variantName),
     price: addition.price,

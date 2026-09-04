@@ -91,3 +91,134 @@ function shopById_(id) {
   for (var i = 0; i < SHOPS.length; i++) if (SHOPS[i].id === id) return SHOPS[i];
   return null;
 }
+
+/**
+ * One-click setup check.
+ *
+ * Run this from the Apps Script editor after pasting the code and filling in
+ * the properties. It reports everything the app needs and says which pieces
+ * are missing, so the setup is verified in one run rather than by working
+ * through a checklist and hoping.
+ *
+ * Deliberately reports rather than throws: the first missing property should
+ * not hide the other eight. And it never prints a secret — only whether one is
+ * present — because the execution log is a place things get pasted from.
+ */
+function checkSetup() {
+  var lines = [];
+  var problems = 0;
+
+  function ok(label) { lines.push('  OK    ' + label); }
+  function bad(label) { lines.push('  MISS  ' + label); problems++; }
+  function note(label) { lines.push('        ' + label); }
+
+  lines.push('SHEET');
+  try {
+    var ss = ss_();
+    lines.push('  OK    ' + ss.getName());
+    [TAB_LISTINGS, TAB_SKUS, TAB_LOG, TAB_USERS].forEach(function (tab) {
+      ss.getSheetByName(tab) ? ok('tab ' + tab) : bad('tab ' + tab + ' — run setupSheets()');
+    });
+  } catch (e) {
+    bad('cannot open the data sheet: ' + e.message);
+    note('check DRIVE_ROOT_ID / DATA_SHEET_ID in Config.gs, and that you have access');
+  }
+
+  lines.push('');
+  lines.push('PEOPLE');
+  try {
+    var users = readAll_(TAB_USERS);
+    var owner = users.filter(function (u) {
+      return String(u.email).toLowerCase() === OWNER_EMAIL.toLowerCase();
+    })[0];
+    if (owner && String(owner.role).toLowerCase() === ROLE_ADMIN) {
+      ok(OWNER_EMAIL + ' is admin');
+    } else {
+      bad(OWNER_EMAIL + ' is not admin — run setupSheets()');
+    }
+    var listers = users.filter(function (u) {
+      var r = String(u.role).toLowerCase();
+      return r === ROLE_ADMIN || r === ROLE_LISTER;
+    }).length;
+    note(listers + ' account(s) can list, ' + users.length + ' signed in so far');
+  } catch (e) {
+    bad('cannot read the Users tab: ' + e.message);
+  }
+
+  lines.push('');
+  lines.push('GOOGLE SIGN-IN');
+  prop_('GOOGLE_CLIENT_ID')
+    ? ok('GOOGLE_CLIENT_ID set')
+    : bad('GOOGLE_CLIENT_ID — nobody can sign in without it');
+
+  SHOPS.forEach(function (shop) {
+    lines.push('');
+    lines.push(shop.brand + '  (' + shop.id + ')');
+
+    var missingCreds = false;
+    ['APP_KEY', 'APP_SECRET', 'SERVICE_ID'].forEach(function (k) {
+      if (prop_(shop.id + '_' + k)) {
+        ok(shop.id + '_' + k + ' set');
+      } else {
+        bad(shop.id + '_' + k);
+        missingCreds = true;
+      }
+    });
+    if (missingCreds) {
+      note('from Partner Center, on this shop\'s own custom app');
+      return;
+    }
+
+    // Tokens, and how long they have left. A shop whose refresh token has
+    // lapsed can only be recovered by authorising again, so the warning has to
+    // come before it happens rather than after. TikTok gives both expiries as
+    // absolute epoch SECONDS, not durations.
+    var expiry = Number(prop_(shop.id + '_REFRESH_EXPIRES') || 0);
+    if (!prop_(shop.id + '_ACCESS_TOKEN')) {
+      bad('not authorised — run ttAuthorizeUrl(\'' + shop.id + '\')');
+      return;
+    }
+    ok('authorised');
+    if (expiry) {
+      var days = Math.floor((expiry * 1000 - Date.now()) / 86400000);
+      days > 14 ? note('re-authorisation due in ' + days + ' days')
+                : bad('re-authorise within ' + days + ' days');
+    }
+
+    // Also worth surfacing: the shop_cipher, which nearly every call needs.
+    prop_(shop.id + '_SHOP_CIPHER')
+      ? ok('shop_cipher stored')
+      : bad('no shop_cipher — re-run ttAuthorizeUrl(\'' + shop.id + '\')');
+
+    // The two calls that actually have to work before a livestream.
+    try {
+      var shops = ttAuthorizedShops_(shop.id, ttToken_(shop.id));
+      shops.code === 0 ? ok('TikTok answers') : bad('TikTok: ' + shops.message);
+    } catch (e) {
+      bad('TikTok call failed: ' + e.message);
+      return;
+    }
+    try {
+      ttWarehouseId_(shop.id);
+      ok('sales warehouse found');
+    } catch (e) {
+      // Not the same as the RETURN warehouse, which has no API at all — but a
+      // missing sales warehouse fails every listing, so it is worth catching here.
+      bad(e.message);
+    }
+  });
+
+  lines.push('');
+  lines.push('NOT CHECKABLE FROM HERE');
+  note('Return warehouse per shop — Seller Center only, no API. Error 12052535');
+  note('ANTHROPIC_API_KEY / GEMINI_API_KEY — those live on Netlify, not here');
+
+  lines.push('');
+  lines.push(problems === 0
+    ? 'READY. Nothing missing.'
+    : problems + ' thing(s) to fix. Each is marked MISS above.');
+
+  var report = lines.join('\n');
+  Logger.log(report);
+  return report;
+}

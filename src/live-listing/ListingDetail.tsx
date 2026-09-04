@@ -442,7 +442,7 @@ function SkuForm({
             disabled={!uploaded || busy !== ''}
             className="text-xs px-3 py-2 rounded-lg bg-purple-600/80 hover:bg-purple-500 disabled:opacity-40 text-white transition-colors"
           >
-            {busy === 'naming' ? 'Reading photo…' : 'Name it from the photo'}
+            {busy === 'naming' ? 'Reading image…' : 'AI suggest variant name from image'}
           </button>
         </div>
       </div>

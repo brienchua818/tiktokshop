@@ -112,17 +112,26 @@ export default function VoiceCapture({
       <button
         onClick={state === 'recording' ? stop : start}
         disabled={state === 'thinking'}
-        className={`w-full flex-1 text-xs px-3 py-2 rounded-lg transition-colors ${
+        aria-label={state === 'recording' ? 'Stop recording' : 'Record details'}
+        className={`w-full flex-1 flex flex-col items-center justify-center gap-1.5 text-xs px-3 py-2 rounded-lg transition-colors ${
           state === 'recording'
             ? 'bg-red-600 hover:bg-red-500 text-white'
             : 'bg-white/10 hover:bg-white/15 text-white disabled:opacity-40'
         }`}
       >
-        {state === 'recording'
-          ? 'Stop and use it'
-          : state === 'thinking'
-            ? 'Listening…'
-            : 'Speak the details'}
+        {/* Drawn rather than an emoji: an emoji renders differently on every
+            platform and at 12px it is illegible on some of them. */}
+        {state === 'recording' ? <StopIcon /> : <MicIcon />}
+        <span>
+          {state === 'recording'
+            ? 'Stop recording'
+            : state === 'thinking'
+              ? // Not "Listening…" — by this point the recording has stopped
+                // and the audio is being read. Saying it is still listening
+                // invites someone to keep talking into a closed microphone.
+                'Reading…'
+              : 'Record Details'}
+        </span>
       </button>
 
       {/* Echoed back so a mishearing is visible rather than silently wrong.
@@ -132,5 +141,36 @@ export default function VoiceCapture({
       {notice && <p className="text-xs text-sky-300">{notice}</p>}
       {error && <p className="text-xs text-amber-400">{error}</p>}
     </div>
+  )
+}
+
+/** A microphone. 14px, inherits the button's colour. */
+function MicIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      // Decorative: the button already carries an aria-label.
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+      <path d="M12 19v3" />
+    </svg>
+  )
+}
+
+/** A filled square, the universal stop. */
+function StopIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">
+      <rect x="6" y="6" width="12" height="12" rx="2" />
+    </svg>
   )
 }

@@ -10,3 +10,6 @@ dist-ssr/
 .vite/
 coverage/
 *.tsbuildinfo
+
+# Generated intermediate: the plate with fonts inlined as base64.
+design/tools/plate.html

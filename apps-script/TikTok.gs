@@ -56,6 +56,34 @@ function ttAuthorizeUrl(prefix) {
 }
 
 /**
+ * Zero-argument wrappers, one per shop.
+ *
+ * The Apps Script editor's Run button cannot pass arguments, so calling
+ * ttAuthorizeUrl('HZ') from the toolbar is not possible — you would have to
+ * edit the source to change the shop, which is exactly the kind of fiddling
+ * that gets done wrong at speed. Three named functions make the dropdown the
+ * whole interface.
+ *
+ * Each logs a consent URL. Open it in a browser signed in to THAT shop's
+ * TikTok account, ideally a private window per shop so the sessions do not
+ * collide.
+ */
+function authorizeHOUZE() { return logAuthorizeUrl_('HZ'); }
+function authorizeTableMatters() { return logAuthorizeUrl_('TM'); }
+function authorizePaintingMatters() { return logAuthorizeUrl_('PM'); }
+
+function logAuthorizeUrl_(prefix) {
+  var shop = shopById_(prefix);
+  var url = ttAuthorizeUrl(prefix);
+  Logger.log(
+    'Authorise ' + (shop ? shop.brand : prefix) + ' (' + prefix + ')\n\n' + url +
+    '\n\nOpen that while signed in to ' + (shop ? shop.handle : 'the right shop') +
+    '. A private window avoids clashing with another shop\'s session.'
+  );
+  return url;
+}
+
+/**
  * The OAuth callback. `state` carries which shop began the flow — with three
  * shops, guessing would file one brand's tokens against another.
  */

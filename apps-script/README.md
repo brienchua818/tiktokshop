@@ -18,7 +18,8 @@ of dated exports is unusable after a few months of daily streams.
 
 ## Setup
 
-1. Create a new Apps Script project, or add these files to an existing one.
+1. Create a **new, separate** Apps Script project. Not the delivery one — see
+   the warning below.
 2. Paste the files in: `Config.gs`, `Sheet.gs`, `Auth.gs`, `Api.gs`,
    `TikTok.gs`, `Product.gs`, `Export.gs`, and the `appsscript.json` manifest.
 3. Run `setupSheets()` once. It creates the four tabs and seeds you as admin.
@@ -27,16 +28,28 @@ of dated exports is unusable after a few months of daily streams.
    - `GOOGLE_CLIENT_ID` — the OAuth client the frontend signs in with
    - optionally `{P}_DAILY_CAP` (defaults to 1000)
 5. Deploy as a web app: execute as **me**, access **anyone**.
-6. Set the deployment `/exec` URL as the Redirect URL in Partner Center — or
-   see the warning below.
+6. Register three new custom apps in Partner Center (one per shop) and set
+   this deployment's `/exec` URL as their Redirect URL.
 7. Open `ttAuthorizeUrl('HZ')` once per shop, while signed into that shop.
 8. Run `ttSelfTest()` to confirm all three answer.
 
-> **If you reuse the app registrations that `Sheldon Delivery API` already
-> uses, do NOT repoint their Redirect URL.** That project's `doGet` handles the
-> TikTok callback at its own `/exec`, and changing it breaks delivered-status
-> and POD sync for Painting Matters. Either register separate apps for
-> listing, or add these files to that same project so one callback serves both.
+> **This must be its own Apps Script project. Do not add it to
+> `Sheldon Delivery API`.**
+>
+> That project already defines `doGet`, `doPost`, `handle_`, `json_` and
+> `WRITE_ACTIONS`. So does this one. Apps Script shares a single global scope
+> across files, so combining them collides on all five — and `WRITE_ACTIONS` is
+> a `const` there, which is a hard redeclaration error. Delivered-status and
+> POD sync for Painting Matters would break.
+>
+> A TikTok app registration carries exactly one Redirect URL, and the existing
+> registrations point at the delivery project's `/exec`. So this project needs
+> **its own app registrations** — three new custom apps in Partner Center, one
+> per shop. Custom apps need no review below 25 authorisations, so the only
+> cost is registering them and authorising each shop once.
+>
+> The alternative — repointing the existing registrations at this project —
+> would break the delivery integration. Don't.
 
 ## Who can use it
 

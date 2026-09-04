@@ -188,36 +188,40 @@ function IdentifierSettings({
   return (
     <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-3">
       <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Identifier</p>
-      <div className="flex items-end gap-3">
-        <div className="flex flex-col gap-1">
-          <label htmlFor="prefix" className="text-xs text-gray-400">
-            Prefix
-          </label>
-          <input
-            id="prefix"
-            value={prefix}
-            onChange={(e) => onPrefix(cleanPrefix(e.target.value))}
-            // maxLength as well as the slice in cleanPrefix: the attribute
-            // stops the keystroke, which means no cursor jump, and the slice
-            // catches a paste or an autofill that bypasses it.
-            maxLength={PREFIX_MAX}
-            // The value is upper-cased on every keystroke, so the on-screen
-            // keyboard should offer capitals to match — otherwise iOS shows a
-            // lowercase keyboard while capitals appear in the field.
-            autoCapitalize="characters"
-            autoCorrect="off"
-            autoComplete="off"
-            spellCheck={false}
-            aria-describedby="prefix-help"
-            className="w-24 bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase tracking-widest outline-none focus:border-accent"
-          />
-        </div>
-        <div className="flex-1">
-          <p className="text-xs text-gray-500 mb-0.5">Next SKU</p>
-          {/* Derived, not typed. The old app let you set the next number by
-              hand, which is one more thing to get wrong mid-stream. */}
-          <p className="text-lg font-mono text-identifier">{next}</p>
-        </div>
+      {/* A two-row grid rather than two stacked blocks side by side.
+
+          Bottom-aligning the blocks looked wrong for a reason: the left one is
+          a label plus a 44px input and the right is a label plus a line of
+          text, so aligning their BOTTOMS pushed "Next SKU" forty pixels below
+          "Prefix". The grid puts the two labels in one row and the two values
+          in another, so both line up whatever their heights. */}
+      <div className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-1">
+        <label htmlFor="prefix" className="text-xs text-gray-400">
+          Prefix
+        </label>
+        <p className="text-xs text-gray-500">Next SKU</p>
+
+        <input
+          id="prefix"
+          value={prefix}
+          onChange={(e) => onPrefix(cleanPrefix(e.target.value))}
+          // maxLength as well as the slice in cleanPrefix: the attribute stops
+          // the keystroke, which means no cursor jump, and the slice catches a
+          // paste or an autofill that bypasses it.
+          maxLength={PREFIX_MAX}
+          // The value is upper-cased on every keystroke, so the on-screen
+          // keyboard should offer capitals to match — otherwise iOS shows a
+          // lowercase keyboard while capitals appear in the field.
+          autoCapitalize="characters"
+          autoCorrect="off"
+          autoComplete="off"
+          spellCheck={false}
+          aria-describedby="prefix-help"
+          className="w-24 bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase tracking-widest outline-none focus:border-accent"
+        />
+        {/* Derived, not typed. The old app let you set the next number by
+            hand, which is one more thing to get wrong mid-stream. */}
+        <p className="text-lg font-mono text-identifier leading-none">{next}</p>
       </div>
       <p id="prefix-help" className="text-xs text-gray-600">
         Up to {PREFIX_MAX} letters, capitals. Continues from what is already listed and

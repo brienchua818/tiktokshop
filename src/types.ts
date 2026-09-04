@@ -19,7 +19,14 @@ export interface Shop {
   listings_used_today: number
 }
 
-/** A factory livestream. One row per stream, keyed by the TikTok listing id. */
+/**
+ * A factory livestream.
+ *
+ * `listing_id` is the TikTok **product id**: a stream is one product, and every
+ * SKU called out on air is a variation of it. That is why the field is not
+ * called product_id — it is the identifier the operator pastes in, and the app
+ * it replaces called it a listing id too.
+ */
 export interface Listing {
   listing_id: string
   shop_id: string
@@ -40,7 +47,23 @@ export type DraftStatus = 'queued' | 'uploading' | 'pushed' | 'failed'
 /** A SKU being built. Lives locally first, so a dropout cannot lose it. */
 export interface Draft {
   draft_id: string
-  listing_id: string
+  /**
+   * The TikTok product this SKU becomes a variation of.
+   *
+   * Null until the stream's listing exists. The first SKU of a new stream
+   * creates the product; the rest are back-filled with its id and appended to
+   * it. Two drafts pushing while this is still null would create two products,
+   * which is why the queue only ever pushes one draft per stream at a time.
+   */
+  listing_id: string | null
+  /**
+   * Local grouping key for the stream, assigned on the device.
+   *
+   * Exists because `listing_id` cannot do the job before the listing does —
+   * something has to say "these drafts belong to the same factory run" while
+   * TikTok still knows nothing about it.
+   */
+  stream_id: string
   shop_id: string
   /** Sequential identifier — "A1", "A2". Also becomes the TikTok seller_sku. */
   identifier: string
@@ -54,8 +77,16 @@ export interface Draft {
   include_dims_in_title: boolean
   /** Local object URL or Cloudinary URL for display. */
   image_preview: string | null
-  /** TikTok's own image reference, returned by their upload endpoint. */
+  /** TikTok's own image reference for the product hero, from use_case=MAIN_IMAGE. */
   tiktok_image_uri: string | null
+  /**
+   * The same photo under use_case=ATTRIBUTE_IMAGE.
+   *
+   * A separate field because TikTok issues a uri per use case and refuses one
+   * in the other's place — a MAIN_IMAGE uri used as a variation photo fails at
+   * the point of listing.
+   */
+  tiktok_attribute_image_uri: string | null
   status: DraftStatus
   error: string | null
   /** Guards against a timed-out push creating the product twice. */

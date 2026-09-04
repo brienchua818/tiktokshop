@@ -15,9 +15,30 @@ export class ApiError extends Error {
     message: string,
     /** True when the session has expired and the user must sign in again. */
     readonly isAuthError = false,
+    /**
+     * The machine-readable code from the response, where there is one.
+     *
+     * Some failures are not really failures and the UI has to tell them apart
+     * from the message alone otherwise — `LISTING_FULL` means offer to start a
+     * continuation listing, `LISTING_BUSY` means retry shortly, a TikTok error
+     * code means show TikTok's own words and stop.
+     */
+    readonly code?: string | number,
+    /** The whole parsed body, for codes that carry detail with them. */
+    readonly payload?: Record<string, unknown>,
   ) {
     super(message)
     this.name = 'ApiError'
+  }
+
+  /** True when retrying unchanged is the right response. */
+  get isRetryable(): boolean {
+    return this.status === 0 || this.code === 'LISTING_BUSY' || this.status >= 500
+  }
+
+  /** True when the stream has outgrown this listing and needs a continuation. */
+  get isListingFull(): boolean {
+    return this.code === 'LISTING_FULL'
   }
 }
 
@@ -44,14 +65,40 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
+    const body = (payload ?? {}) as Record<string, unknown>
     const detail =
-      (payload as { error?: string; detail?: string }).error ??
-      (payload as { detail?: string }).detail ??
+      (body.error as string | undefined) ??
+      (body.detail as string | undefined) ??
       response.statusText
-    throw new ApiError(response.status, detail, response.status === 401)
+    throw new ApiError(
+      response.status,
+      detail,
+      response.status === 401,
+      body.code as string | number | undefined,
+      body,
+    )
   }
 
   return payload as T
+}
+
+/** What a successful push reports back. */
+export interface PushResult {
+  mode: 'variation_added' | 'listing_created'
+  listing_id: string
+  product_id: string
+  sku_id?: string | null
+  variant_name?: string
+  /** How many variations the listing now holds, and how many more it can take. */
+  variations_now?: number
+  remaining?: number
+  /**
+   * Present when TikTok has resent the product for review. Existing variations
+   * stay live and buyable; the new one is not purchasable until it clears.
+   */
+  audit?: 'pending'
+  /** True when this identifier was already a variation, so nothing was sent. */
+  deduplicated?: boolean
 }
 
 export const api = {
@@ -85,10 +132,13 @@ export const api = {
     const form = new FormData()
     form.append('shop_id', shopId)
     form.append('photo', photo, 'product.jpg')
-    return request<{ tiktok_image_uri: string; cloudinary_url: string; ai_image_url: string }>(
-      'upload-photo',
-      { method: 'POST', body: form },
-    )
+    return request<{
+      tiktok_image_uri: string
+      /** The same photo under use_case=ATTRIBUTE_IMAGE, for the variation gallery. */
+      tiktok_attribute_image_uri: string
+      cloudinary_url: string | null
+      ai_image_url: string
+    }>('upload-photo', { method: 'POST', body: form })
   },
 
   /** Photo to English title, at least 25 characters. */
@@ -110,12 +160,20 @@ export const api = {
   },
 
   /**
-   * Push one draft to TikTok. `idempotency_key` makes a retry after a timeout
-   * safe — TikTok returns the original product rather than creating a second.
+   * Add one SKU to a livestream.
+   *
+   * Adds a variation to `listing_id` when one is given, and creates the
+   * stream's listing when it is not — the returned `listing_id` is then what
+   * every later SKU appends to.
+   *
+   * A retry is safe either way: a create is guarded by TikTok's own
+   * `idempotency_key`, and an append is guarded by the product itself, which
+   * already knows whether this identifier is one of its variations.
    */
   pushDraft: (body: {
     shop_id: string
-    listing_id: string
+    /** Omit to start the stream's listing with this SKU as its first variation. */
+    listing_id?: string
     identifier: string
     title: string
     variant_name: string | null
@@ -124,9 +182,12 @@ export const api = {
     weight_kg: string
     dimensions: { length: string; width: string; height: string } | null
     tiktok_image_uri: string
+    tiktok_attribute_image_uri?: string
     idempotency_key: string
+    /** Accept a continuation listing after the current one filled up. */
+    start_new_listing?: boolean
   }) =>
-    request<{ product_id: string }>('push-draft', {
+    request<PushResult>('push-draft', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),

@@ -45,6 +45,26 @@ var CATEGORY_VERSION = 'v2';
 var DEFAULT_WEIGHT_KG = '1';
 var DEFAULT_DIMS = { length: '10', width: '10', height: '10' };
 
+/**
+ * A livestream is ONE TikTok product, and each SKU called out on air is a
+ * variation of it.
+ *
+ * TikTok allows variation images on exactly one sales-attribute type per
+ * product, and requires an image for every value of it — so one attribute with
+ * one value per SKU is the shape that works, and it is what the buyer sees as
+ * a gallery of photos to tap.
+ */
+var VARIANT_ATTRIBUTE_NAME = 'Design';   // max 20 chars, English only
+var VALUE_NAME_MAX = 50;                 // sales_attributes.value_name
+
+/**
+ * Variations per product. Singapore gets 100 — "Max SKUs for BR, EU, JP, MX,
+ * UK, US: 300. Max SKUs for other regions: 100" — so a 200-SKU factory run
+ * needs a continuation listing, and finding that out at SKU 101 mid-broadcast
+ * would be the worst possible moment.
+ */
+var MAX_SKUS_PER_PRODUCT = 100;
+
 /** Sheet tab names. */
 var TAB_LISTINGS = 'Listings';
 var TAB_SKUS = 'SKUs';

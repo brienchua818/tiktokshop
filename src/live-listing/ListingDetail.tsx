@@ -195,7 +195,11 @@ function SkuForm({
   const [variant, setVariant] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('')
-  const [uploaded, setUploaded] = useState<{ tiktok_image_uri: string; ai_image_url: string } | null>(
+  const [uploaded, setUploaded] = useState<{
+    tiktok_image_uri: string
+    tiktok_attribute_image_uri: string
+    ai_image_url: string
+  } | null>(
     null,
   )
   const [busy, setBusy] = useState<'' | 'uploading' | 'titling' | 'saving'>('')
@@ -297,6 +301,9 @@ function SkuForm({
       const draft: Draft = {
         draft_id: crypto.randomUUID(),
         listing_id: listing.listing_id,
+        // Groups this SKU with the rest of the same factory run, so the queue
+        // pushes them one at a time against one listing.
+        stream_id: listing.listing_id,
         shop_id: shop.shop_id,
         identifier,
         title,
@@ -308,6 +315,7 @@ function SkuForm({
         include_dims_in_title: false,
         image_preview: photoUrl,
         tiktok_image_uri: uploaded?.tiktok_image_uri ?? null,
+        tiktok_attribute_image_uri: uploaded?.tiktok_attribute_image_uri ?? null,
         status: 'queued',
         error: null,
         // Generated here, before any network call, so a retry after a timeout

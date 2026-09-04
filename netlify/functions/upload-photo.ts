@@ -28,10 +28,26 @@ export default withAuth(async (request) => {
 
   // TikTok first: without its uri nothing can be listed, so a Cloudinary
   // problem must not block the operator.
-  const uploaded = await uploadProductImage(creds, bytes)
+  //
+  // The same JPEG is uploaded twice, under two use cases, because TikTok issues
+  // a uri per use case and will not accept one in the other's place:
+  //
+  //   - MAIN_IMAGE      the product's hero image, used when a listing is created
+  //   - ATTRIBUTE_IMAGE the photo shown against this variation in the buyer's
+  //                     options gallery, which is where every SKU after the
+  //                     first one appears
+  //
+  // Both are needed because the first SKU of a stream creates the product and
+  // every later one adds a variation to it. Uploading once and reusing the uri
+  // is the obvious optimisation and it fails at the point of listing, so the
+  // two calls run in parallel and the cost is latency, not a round trip.
+  const [mainImage, attributeImage] = await Promise.all([
+    uploadProductImage(creds, bytes, 'MAIN_IMAGE'),
+    uploadProductImage(creds, bytes, 'ATTRIBUTE_IMAGE'),
+  ])
 
   let cloudinaryUrl: string | null = null
-  let aiImageUrl = uploaded.url
+  let aiImageUrl = mainImage.url
   try {
     const archived = await archiveToCloudinary(bytes, `${shopId}/${Date.now()}`)
     cloudinaryUrl = archived.secureUrl
@@ -43,7 +59,8 @@ export default withAuth(async (request) => {
   }
 
   return json({
-    tiktok_image_uri: uploaded.uri,
+    tiktok_image_uri: mainImage.uri,
+    tiktok_attribute_image_uri: attributeImage.uri,
     cloudinary_url: cloudinaryUrl,
     ai_image_url: aiImageUrl,
   })

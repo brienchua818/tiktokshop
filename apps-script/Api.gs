@@ -68,24 +68,50 @@ function handle_(e, method) {
       }, 403);
     }
 
+    // One lock for the whole write, taken here and nowhere deeper. Everything
+    // below assumes it is held; see Lock.gs for why nesting it is a trap.
     if (WRITE_ACTIONS[action]) {
-      var lock = LockService.getScriptLock();
-      if (!lock.tryLock(30000)) {
-        return json_({ error: 'The app is busy. Try again in a moment.' }, 503);
-      }
-      try {
+      return withScriptLock_(30000, function () {
         return route_(action, params, body, user);
-      } finally {
-        lock.releaseLock();
-      }
+      });
     }
     return route_(action, params, body, user);
   } catch (err) {
+    var message = String(err && err.message ? err.message : err);
+
+    // Two outcomes reach here that are not failures, and the client has to be
+    // able to tell them apart from a genuine one — retrying a rejected listing
+    // burns the shop's daily allowance, while NOT retrying a busy one loses a
+    // SKU mid-livestream.
+
+    // The listing filled up. Singapore allows 100 variations per product, so a
+    // long factory run simply outgrows one; the client offers a continuation
+    // listing rather than showing an error.
+    if (err && err.code === 'LISTING_FULL') {
+      return json_({
+        error: message, code: 'LISTING_FULL',
+        product_id: err.listingId || '', sku_count: err.skuCount || 0,
+        max_skus: MAX_SKUS_PER_PRODUCT, next: 'start_new_listing'
+      }, 409);
+    }
+
+    // Another write holds the lock. Retryable, and nothing has been lost.
+    if (/^BUSY:/.test(message)) {
+      return json_({
+        error: message.replace(/^BUSY:\s*/, ''), code: 'LISTING_BUSY', retryable: true
+      }, 409);
+    }
+
     // Log the detail, return something safe. A stack trace in a response body
     // is information disclosure.
     console.error(action + ' failed: ' + err + (err && err.stack ? '\n' + err.stack : ''));
-    logEvent_((params && params.actor) || 'unknown', action, '', String(err), 'error');
-    return json_({ error: String(err && err.message ? err.message : err) }, 500);
+    logEvent_((params && params.actor) || 'unknown', action, '', message, 'error');
+
+    // A rejection from TikTok is the operator's to act on, so its own wording
+    // goes through verbatim — "you haven't set the return warehouse" is
+    // actionable, "push failed" is not. 422 rather than 500: the request was
+    // understood and refused, and the client must not retry it.
+    return json_({ error: message }, action === 'pushSku' ? 422 : 500);
   }
 }
 

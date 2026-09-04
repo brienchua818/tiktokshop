@@ -28,6 +28,27 @@ export const MAX_SKUS_PER_PRODUCT = 100
 /** TikTok accepts at most three sales-attribute types per product. */
 export const MAX_SALES_ATTRIBUTE_TYPES = 3
 
+/**
+ * The sales-attribute type that carries variant photos.
+ *
+ * TikTok allows images on exactly one attribute type per product — "You can
+ * attach images to only 1 type of sales attribute, which will serve as the
+ * primary attribute for display. An image must be provided for each value of
+ * the primary attribute." One attribute, one value per variation, one photo per
+ * value is therefore the simplest shape that works, and it is what the buyer
+ * sees as a gallery of photos to tap.
+ *
+ * It lives here beside the other TikTok facts because both the create path and
+ * the append path need it, and importing between those two would be circular.
+ */
+export const VARIANT_ATTRIBUTE_NAME = 'Design'
+
+/** `sales_attributes.name`: max 20 characters. */
+export const ATTRIBUTE_NAME_MAX = 20
+
+/** `sales_attributes.value_name`: max 50 characters, unique within the attribute. */
+export const VALUE_NAME_MAX = 50
+
 /** Inventory quantity range per SKU. */
 export const STOCK_MIN = 1
 export const STOCK_MAX = 99_999
@@ -88,6 +109,52 @@ const TEN_IN_A_ROW = /(.)\1{9,}/
 const HAS_ALPHANUMERIC = /[a-zA-Z0-9]/
 
 /**
+ * The character rules TikTok applies to any buyer-visible product text —
+ * titles, but equally sales-attribute names and values, which error 12052243
+ * and 12052245 police the same way.
+ *
+ * Length is deliberately NOT checked here. Every field has its own limits (a
+ * title floors at 25 characters, a variant value name caps at 50), so mixing
+ * them in would mean a variant name failing a rule that was never about it.
+ *
+ * @param label how the field should be named in the message, e.g. "Title"
+ */
+export function validateTextCharacters(
+  raw: string,
+  field: string,
+  label: string,
+): Violation[] {
+  const violations: Violation[] = []
+  const text = raw.trim()
+
+  if (CONTROL_CHARS.test(text)) {
+    violations.push({ field, message: `${label} contains control characters.` })
+  }
+  if (HTML_ENTITY.test(text)) {
+    violations.push({
+      field,
+      message: `${label} contains an HTML entity such as &nbsp; — write the character itself.`,
+    })
+  }
+  if (NON_LATIN.test(text)) {
+    violations.push({
+      field,
+      message: `${label} must be English. TikTok rejects Chinese characters and emoji here.`,
+    })
+  }
+  if (!HAS_ALPHANUMERIC.test(text)) {
+    violations.push({ field, message: `${label} cannot be only symbols.` })
+  }
+  if (TEN_IN_A_ROW.test(text)) {
+    violations.push({
+      field,
+      message: `${label} repeats one character more than nine times in a row.`,
+    })
+  }
+  return violations
+}
+
+/**
  * Validate a product title against every rule TikTok enforces for Singapore.
  * Returns an empty array when the title is acceptable.
  */
@@ -110,31 +177,7 @@ export function validateTitle(raw: string): Violation[] {
       message: `Title must be at most ${TITLE_MAX} characters — this is ${title.length}.`,
     })
   }
-  if (CONTROL_CHARS.test(title)) {
-    violations.push({ field: 'title', message: 'Title contains control characters.' })
-  }
-  if (HTML_ENTITY.test(title)) {
-    violations.push({
-      field: 'title',
-      message: 'Title contains an HTML entity such as &nbsp; — write the character itself.',
-    })
-  }
-  if (NON_LATIN.test(title)) {
-    violations.push({
-      field: 'title',
-      message:
-        'Title must be English. TikTok rejects Chinese characters and emoji in product names.',
-    })
-  }
-  if (!HAS_ALPHANUMERIC.test(title)) {
-    violations.push({ field: 'title', message: 'Title cannot be only symbols.' })
-  }
-  if (TEN_IN_A_ROW.test(title)) {
-    violations.push({
-      field: 'title',
-      message: 'Title repeats one character more than nine times in a row.',
-    })
-  }
+  violations.push(...validateTextCharacters(title, 'title', 'Title'))
   return violations
 }
 

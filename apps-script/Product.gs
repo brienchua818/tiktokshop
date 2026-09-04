@@ -18,6 +18,17 @@ function validateTitle_(title) {
       t.length + '. TikTok rejects anything shorter.';
   }
   if (t.length > TITLE_MAX) return 'Title must be at most ' + TITLE_MAX + ' characters.';
+  // ASCII control characters, including DEL. Checked before the English rule
+  // so the message names the actual problem — the rule below would also catch
+  // these, but would report them as "not English", which sends someone looking
+  // for a Chinese character that is not there.
+  if (/[\u0000-\u001F\u007F]/.test(t)) return 'Title contains control characters.';
+  // HTML entities such as &nbsp;. Forbidden by 12052931, and invisible to
+  // every other rule here: the characters are all plain ASCII, so without this
+  // check a title carrying one is accepted locally and refused by TikTok.
+  if (/&(?:[a-zA-Z][a-zA-Z0-9]{1,31}|#\d{1,7}|#[xX][0-9a-fA-F]{1,6});/.test(t)) {
+    return 'Title contains an HTML entity such as &nbsp; — write the character itself.';
+  }
   // Anything outside Latin-1 plus common punctuation: catches Chinese, which
   // TikTok refuses in product names, and emoji.
   if (/[^\u0020-\u024F\u2018\u2019\u201C\u201D\u2013\u2014]/.test(t)) {
@@ -28,10 +39,193 @@ function validateTitle_(title) {
   return '';
 }
 
-function ttUploadImage_(prefix, blob) {
-  var r = ttFetch_(prefix, 'post', '/product/202309/images/upload', { use_case: 'MAIN_IMAGE' }, blob);
+/**
+ * Upload a photo and return its TikTok uri.
+ *
+ * The use case matters and is not interchangeable. TikTok issues a separate
+ * uri per use case and refuses one in the other's place:
+ *
+ *   MAIN_IMAGE       the product hero, used when a listing is created
+ *   ATTRIBUTE_IMAGE  the photo shown against a variation in the buyer's
+ *                    options gallery, which is where every SKU after the
+ *                    first appears
+ *
+ * So the same JPEG is uploaded twice on the SKU that creates a listing.
+ */
+function ttUploadImage_(prefix, blob, useCase) {
+  var r = ttFetch_(prefix, 'post', '/product/202309/images/upload',
+    { use_case: useCase || 'MAIN_IMAGE' }, blob);
   if (r.code !== 0) throw new Error('Image upload failed: ' + (r.message || r.code));
   return r.data.uri;
+}
+
+/**
+ * The buyer-visible name for a variation.
+ *
+ * Leads with the identifier on purpose: in a factory livestream the host says
+ * "A7 is the blue one" and the buyer looks for A7 in the variant picker, so the
+ * identifier is the shared vocabulary of the whole broadcast. Capped at
+ * TikTok's 50 characters, at a word boundary where one is available.
+ */
+function variantValueName_(identifier, variantName) {
+  var name = String(variantName || '').trim().replace(/\s+/g, ' ');
+  var combined = name ? identifier + ' ' + name : String(identifier);
+  if (combined.length <= VALUE_NAME_MAX) return combined;
+  var clipped = combined.slice(0, VALUE_NAME_MAX);
+  var lastSpace = clipped.lastIndexOf(' ');
+  return lastSpace > VALUE_NAME_MAX * 0.6 ? clipped.slice(0, lastSpace) : clipped.replace(/\s+$/, '');
+}
+
+/**
+ * Read a product and its variations.
+ *
+ * Called immediately before every edit, and its result is the only safe basis
+ * for one — see buildAppendPayload_ for why a cached snapshot is worse than
+ * no snapshot at all.
+ *
+ * Note the price translation. Get Product returns `price.sale_price`; every
+ * write endpoint takes `price.amount`. Reading one and writing the other
+ * blanks the price of every existing variation, so it happens once, here.
+ */
+function ttGetProduct_(prefix, productId) {
+  var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
+    { category_version: CATEGORY_VERSION }, null);
+  if (r.code !== 0 || !r.data) {
+    throw new Error('Could not read the listing: ' + (r.message || r.code));
+  }
+  var skus = (r.data.skus || []).map(function (raw) {
+    var attribute = (raw.sales_attributes || [])[0] || {};
+    var inventory = (raw.inventory || [])[0] || {};
+    return {
+      id: raw.id || '',
+      sellerSku: raw.seller_sku || '',
+      attributeId: attribute.id || '',
+      attributeName: attribute.name || '',
+      valueId: attribute.value_id || '',
+      valueName: attribute.value_name || '',
+      skuImgUri: (attribute.sku_img && attribute.sku_img.uri) || '',
+      priceAmount: String((raw.price && (raw.price.sale_price || raw.price.amount)) || ''),
+      quantity: Number(inventory.quantity || 0),
+      warehouseId: inventory.warehouse_id || ''
+    };
+  });
+  return { productId: r.data.id || productId, title: r.data.title || '', skus: skus };
+}
+
+/**
+ * Build the payload that adds a variation to an existing product.
+ *
+ * The single most dangerous fact about TikTok's edit API, quoted from the
+ * Partial Edit Product reference:
+ *
+ *   "You must pass in all existing SKUs. Any existing SKU IDs not listed here
+ *    will result in the deletion of those SKUs. For example, if this product
+ *    contains 5 SKUs and you only provide 2 SKU IDs, the remaining 3 will be
+ *    deleted."
+ *
+ * So there is no "append" call. Adding the 51st variation means sending all 51
+ * — the 50 existing ones carrying their `id`, the new one with its `id` left
+ * blank. Send only the new one and the livestream's entire back catalogue is
+ * deleted, silently, with a success response.
+ *
+ * Throws 'LISTING_FULL' when the ceiling is reached, so the caller can offer a
+ * continuation listing rather than reporting a failure.
+ */
+function buildAppendPayload_(snapshot, addition) {
+  if (!snapshot.skus.length) {
+    throw new Error('This listing has no variations to extend. TikTok requires at least one ' +
+      'sales attribute on a product, so the first variation has to be created with the product.');
+  }
+  for (var i = 0; i < snapshot.skus.length; i++) {
+    // Without an id we cannot say "keep this one", and TikTok would treat it as
+    // a new SKU — duplicating it while deleting the original.
+    if (!snapshot.skus[i].id) {
+      throw new Error('TikTok returned a variation without an ID for this listing. Adding to ' +
+        'it now would duplicate it, so nothing was sent. Try again in a moment.');
+    }
+    // 12052533: "Removal, addition, and change of warehouses are not
+    // permitted. Please specify the original warehouses for the SKUs."
+    if (!snapshot.skus[i].warehouseId) {
+      throw new Error('TikTok did not return a warehouse for every existing variation. ' +
+        'Editing this listing would drop their stock, so nothing was sent.');
+    }
+  }
+  if (snapshot.skus.length + 1 > MAX_SKUS_PER_PRODUCT) {
+    throw new Error('LISTING_FULL');
+  }
+
+  var first = snapshot.skus[0];
+  // "Provide either a built-in ID or a custom name; if both are provided, the
+  // ID takes priority." So sending our own name against an established id
+  // would be silently ignored.
+  var identity = first.attributeId
+    ? { id: first.attributeId }
+    : { name: first.attributeName || VARIANT_ATTRIBUTE_NAME };
+  var warehouseId = first.warehouseId;
+
+  var valueName = variantValueName_(addition.identifier, addition.variantName);
+  var taken = {};
+  var skus = snapshot.skus.map(function (sku) {
+    if (sku.valueName) taken[String(sku.valueName).toLowerCase()] = true;
+    var attribute = sku.attributeId ? { id: sku.attributeId }
+                                    : { name: sku.attributeName || VARIANT_ATTRIBUTE_NAME };
+    if (sku.valueId) {
+      // Re-sending value_name for a value that already has an id would create
+      // a second value rather than reference the existing one.
+      attribute.value_id = sku.valueId;
+    } else {
+      attribute.value_name = sku.valueName;
+    }
+    // An image is mandatory for every value of the primary attribute, so
+    // dropping one existing photo fails the whole edit.
+    if (sku.skuImgUri) attribute.sku_img = { uri: sku.skuImgUri };
+    return {
+      id: sku.id,
+      seller_sku: sku.sellerSku || undefined,
+      price: { amount: sku.priceAmount, currency: CURRENCY },
+      inventory: [{ warehouse_id: sku.warehouseId, quantity: sku.quantity }],
+      sales_attributes: [attribute]
+    };
+  });
+
+  // "No duplicates allowed under the same attribute." The identifier makes
+  // this all but impossible, so hitting it means an identifier repeated.
+  if (taken[valueName.toLowerCase()]) {
+    throw new Error('A variation called "' + valueName + '" is already on this listing. ' +
+      'Identifier ' + addition.identifier + ' looks to have been used twice.');
+  }
+
+  var added = {
+    // No `id`: "To create new SKUs, leave the SKU ID blank and complete the
+    // other fields."
+    seller_sku: addition.identifier,
+    price: { amount: String(addition.price), currency: CURRENCY },
+    inventory: [{ warehouse_id: warehouseId, quantity: Number(addition.stock) }],
+    sales_attributes: [{
+      name: identity.name, id: identity.id,
+      value_name: valueName,
+      sku_img: { uri: addition.imageUri }
+    }]
+  };
+  // Drop the undefined half of the identity so TikTok sees one or the other.
+  if (!added.sales_attributes[0].id) delete added.sales_attributes[0].id;
+  if (!added.sales_attributes[0].name) delete added.sales_attributes[0].name;
+  skus.push(added);
+
+  // Last line of defence. Everything above is meant to guarantee this, so a
+  // failure here is a bug — but the cost of being wrong is a deleted
+  // livestream, so it is checked anyway.
+  var kept = {};
+  skus.forEach(function (s) { if (s.id) kept[s.id] = true; });
+  for (var j = 0; j < snapshot.skus.length; j++) {
+    if (!kept[snapshot.skus[j].id]) {
+      throw new Error('Refusing to edit: variation ' +
+        (snapshot.skus[j].sellerSku || snapshot.skus[j].id) +
+        ' would have been deleted. This is a bug — nothing was sent to TikTok.');
+    }
+  }
+
+  return { skus: skus, category_version: CATEGORY_VERSION };
 }
 
 function ttRecommendCategory_(prefix, title, imageUri) {
@@ -104,7 +298,19 @@ function buildPayload_(input, categoryId, warehouseId, attributes) {
     skus: [{
       seller_sku: input.identifier,
       price: { amount: String(input.price), currency: CURRENCY },
-      inventory: [{ warehouse_id: warehouseId, quantity: Number(input.stock) }]
+      inventory: [{ warehouse_id: warehouseId, quantity: Number(input.stock) }],
+      // The sales attribute every later variation joins. Named rather than
+      // referenced by id, because a custom attribute has no id until TikTok
+      // generates one on create.
+      //
+      // This is the step that makes the rest of the stream possible: a product
+      // created without a sales attribute can never gain one, since "You must
+      // retain at least 1 sales attribute" cuts both ways.
+      sales_attributes: [{
+        name: VARIANT_ATTRIBUTE_NAME,
+        value_name: variantValueName_(input.identifier, input.variantName),
+        sku_img: { uri: input.attributeImageUri || input.imageUri }
+      }]
     }],
     save_mode: 'LISTING',
     // Makes a timed-out create safe to retry without duplicating the product.
@@ -115,7 +321,19 @@ function buildPayload_(input, categoryId, warehouseId, attributes) {
 }
 
 /**
- * Push one SKU. Validates, files the photo, lists, records and logs.
+ * Push one SKU into a livestream.
+ *
+ * A factory stream is ONE TikTok product, and each SKU called out on air is a
+ * *variation* of it. So the normal path is not "create a product", it is "add a
+ * variation to the product this stream lists against". Creating a product
+ * happens twice in a stream at most: once at the start, and again if the run
+ * outgrows Singapore's 100-variation ceiling.
+ *
+ * Everything runs under the script lock. Adding a variation is a
+ * read-modify-write of the product's whole SKU list, and two of those at once
+ * is a lost update whose consequence is a *deleted* variation rather than an
+ * overwritten one — TikTok returns success to both callers. LockService makes
+ * that unreachable.
  *
  * Validation runs here as well as in the browser: the client checks are for
  * fast feedback, these are the ones that actually protect the shop.
@@ -135,40 +353,178 @@ function pushSku_(body, user) {
   if (!(stock >= 1 && stock <= 99999)) throw new Error('Stock must be between 1 and 99,999.');
   if (!body.photo_base64 && !body.tiktok_image_uri) throw new Error('A photo is required.');
 
-  // A retry after a timeout arrives with the same key. Returning the original
-  // product is what makes the offline queue safe.
-  if (body.idempotency_key) {
-    var prior = findByIdempotencyKey_(body.idempotency_key);
-    if (prior) {
-      return { product_id: prior.tiktok_product_id, deduplicated: true };
+  // A variation's name is buyer-visible, so it is held to the same
+  // character rules as a title — 12052243 rejects Chinese in sales-attribute
+  // names — but not to a title's 25-character floor.
+  var valueName = variantValueName_(body.identifier, body.variant_name);
+  if (/[^\u0020-\u024F\u2018\u2019\u201C\u201D\u2013\u2014]/.test(valueName)) {
+    throw new Error('Variant name must be English. TikTok rejects Chinese characters and emoji.');
+  }
+
+  // NO LOCK IS TAKEN HERE, deliberately.
+  //
+  // `pushSku` is in Api.gs's WRITE_ACTIONS, so the router already holds the
+  // script lock for the whole call. Apps Script locks are not re-entrant —
+  // LockService.getScriptLock() hands back a fresh Lock object, and a second
+  // tryLock inside the same execution contends with the one the router holds
+  // and fails. Locking again here would make every push report itself busy.
+  //
+  // The router's lock is what makes the read-modify-write below safe: adding a
+  // variation reads the product's whole SKU list and sends it back, and two of
+  // those at once is a lost update whose consequence is a *deleted* variation
+  // rather than an overwritten one, with TikTok returning success to both. If
+  // this function is ever called from somewhere that is not the router, that
+  // caller must take the script lock itself.
+  {
+    // A retry after a timeout arrives with the same key. Returning the original
+    // product is what makes the offline queue safe.
+    if (body.idempotency_key) {
+      var prior = findByIdempotencyKey_(body.idempotency_key);
+      if (prior) {
+        return {
+          mode: prior.tiktok_product_id === body.listing_id ? 'variation_added' : 'listing_created',
+          listing_id: prior.tiktok_product_id,
+          product_id: prior.tiktok_product_id,
+          deduplicated: true
+        };
+      }
+    }
+
+    // Archive the photo under the creator's name, then hand copies to TikTok —
+    // it refuses external image URLs, so it needs its own uploads.
+    var photoUrl = '';
+    var imageUri = body.tiktok_image_uri || '';
+    var attributeImageUri = body.tiktok_attribute_image_uri || '';
+    if (body.photo_base64) {
+      photoUrl = savePhoto_(prefix, body.identifier, body.photo_base64,
+                            body.photo_mime || 'image/jpeg', user.name);
+      var blob = Utilities.newBlob(
+        Utilities.base64Decode(body.photo_base64),
+        body.photo_mime || 'image/jpeg', 'product.jpg'
+      );
+      // Only the SKU that creates a listing needs a MAIN_IMAGE; every other
+      // one is a variation and needs only the attribute image. Uploading just
+      // what is needed halves the calls on the common path.
+      attributeImageUri = ttUploadImage_(prefix, blob, 'ATTRIBUTE_IMAGE');
+      if (!body.listing_id) imageUri = ttUploadImage_(prefix, blob, 'MAIN_IMAGE');
+      else if (!imageUri) imageUri = attributeImageUri;
+    }
+
+    var addition = {
+      identifier: body.identifier,
+      variantName: body.variant_name || '',
+      price: body.price,
+      stock: stock,
+      imageUri: attributeImageUri || imageUri
+    };
+
+    return body.listing_id
+      ? addVariation_(body, user, prefix, shop, addition, photoUrl)
+      : startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl);
+  }
+}
+
+/** Add a variation to the listing this stream is already using. */
+function addVariation_(body, user, prefix, shop, addition, photoUrl) {
+  var listingId = String(body.listing_id);
+  var snapshot = ttGetProduct_(prefix, listingId);
+
+  // Idempotency from the snapshot rather than from the Sheet.
+  //
+  // TikTok's `idempotency_key` only exists on Create Product, so an append that
+  // times out on factory Wi-Fi has no server-side guard. It does not need one:
+  // the product itself records whether this identifier is already a variation,
+  // and that answer is authoritative.
+  for (var i = 0; i < snapshot.skus.length; i++) {
+    if (snapshot.skus[i].sellerSku === addition.identifier) {
+      return {
+        mode: 'variation_added', deduplicated: true,
+        listing_id: listingId, product_id: snapshot.productId,
+        sku_id: snapshot.skus[i].id,
+        variations_now: snapshot.skus.length,
+        remaining: MAX_SKUS_PER_PRODUCT - snapshot.skus.length
+      };
     }
   }
 
-  // Archive the photo under the creator's name, then hand a copy to TikTok —
-  // it refuses external image URLs, so it needs its own upload.
-  var photoUrl = '';
-  var imageUri = body.tiktok_image_uri || '';
-  if (body.photo_base64) {
-    photoUrl = savePhoto_(prefix, body.identifier, body.photo_base64,
-                          body.photo_mime || 'image/jpeg', user.name);
-    var blob = Utilities.newBlob(
-      Utilities.base64Decode(body.photo_base64),
-      body.photo_mime || 'image/jpeg', 'product.jpg'
-    );
-    imageUri = ttUploadImage_(prefix, blob);
+  var payload;
+  try {
+    payload = buildAppendPayload_(snapshot, addition);
+  } catch (e) {
+    if (String(e.message) === 'LISTING_FULL') {
+      // Not a failure — the run has outgrown one product. Say so in a way the
+      // client can act on, and record nothing: the SKU is still to be listed.
+      var full = new Error('This listing is full at ' + MAX_SKUS_PER_PRODUCT +
+        ' variations, which is TikTok\'s limit for Singapore. Start a continuation ' +
+        'listing to carry on.');
+      full.code = 'LISTING_FULL';
+      full.listingId = listingId;
+      full.skuCount = snapshot.skus.length;
+      throw full;
+    }
+    throw e;
   }
 
+  var edited = ttFetch_(prefix, 'post',
+    '/product/202509/products/' + listingId + '/partial_edit', {}, payload);
+  if (edited.code !== 0) {
+    recordFailure_(body, user, prefix, shop, photoUrl, addition.imageUri, '', edited.message);
+    // TikTok's own wording, verbatim. "You haven't set the return warehouse" is
+    // actionable; "push failed" is not.
+    throw new Error(edited.message || 'TikTok refused the variation.');
+  }
+
+  var skuId = '';
+  var returned = (edited.data && edited.data.skus) || [];
+  for (var j = 0; j < returned.length; j++) {
+    if (returned[j].seller_sku === addition.identifier) skuId = returned[j].id || '';
+  }
+
+  var variationsNow = snapshot.skus.length + 1;
+  recordSku_(skuRow_(body, user, prefix, shop, addition, photoUrl, '', snapshot.productId));
+  logEvent_(user.name, 'add_variation', shop.brand,
+    addition.identifier + ' -> ' + listingId + ' (' + variationsNow + '/' +
+    MAX_SKUS_PER_PRODUCT + ')', 'ok');
+
+  return {
+    mode: 'variation_added',
+    listing_id: listingId, product_id: snapshot.productId, sku_id: skuId,
+    variant_name: variantValueName_(addition.identifier, addition.variantName),
+    variations_now: variationsNow,
+    remaining: MAX_SKUS_PER_PRODUCT - variationsNow,
+    // Adding a variation resends the product for review. The existing
+    // variations stay live and buyable throughout — "If the audit passes, v2 is
+    // published to the shop, otherwise the existing product stays live and
+    // remains unchanged" — but the new one is not purchasable until it clears.
+    // Saying so is the difference between a confusing wait and an expected one.
+    audit: 'pending'
+  };
+}
+
+/**
+ * Create the listing this stream will add variations to.
+ *
+ * Order of operations matters — it is what avoids the two commonest failures:
+ *   1. resolve a LEAF category (products cannot be created in a branch),
+ *   2. fetch that category's mandatory attributes and fill them,
+ *   3. dry-run with listing_check, so problems are named before they cost a
+ *      slot against the daily upload cap,
+ *   4. create.
+ */
+function startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl) {
   var input = {
     title: String(body.title).trim(),
-    identifier: body.identifier,
-    price: body.price,
-    stock: stock,
+    identifier: addition.identifier,
+    variantName: addition.variantName,
+    price: addition.price,
+    stock: addition.stock,
     weightKg: body.weight_kg || DEFAULT_WEIGHT_KG,
     imageUri: imageUri,
+    attributeImageUri: attributeImageUri,
     idempotencyKey: body.idempotency_key || Utilities.getUuid()
   };
 
-  var categoryId = ttRecommendCategory_(prefix, input.title, imageUri);
+  var categoryId = ttRecommendCategory_(prefix, input.title, input.imageUri);
   var attributes = ttRequiredAttributes_(prefix, categoryId);
   var warehouseId = ttWarehouseId_(prefix);
   var payload = buildPayload_(input, categoryId, warehouseId, attributes);
@@ -177,36 +533,54 @@ function pushSku_(body, user) {
   // allowance, and during a livestream that allowance is the scarce resource.
   var check = ttFetch_(prefix, 'post', '/product/202309/products/listing_check', {}, payload);
   if (check.code !== 0) {
-    recordFailure_(body, user, prefix, shop, photoUrl, imageUri, categoryId, check.message);
+    recordFailure_(body, user, prefix, shop, photoUrl, input.imageUri, categoryId, check.message);
     throw new Error(check.message || 'Listing check failed.');
   }
 
   var created = ttFetch_(prefix, 'post', '/product/202309/products', {}, payload);
   if (created.code !== 0 || !created.data || !created.data.product_id) {
-    recordFailure_(body, user, prefix, shop, photoUrl, imageUri, categoryId,
+    recordFailure_(body, user, prefix, shop, photoUrl, input.imageUri, categoryId,
       created.message || 'no product id returned');
-    // TikTok's own wording, verbatim. "You haven't set the return warehouse"
-    // is actionable; "push failed" is not.
     throw new Error(created.message || 'TikTok returned no product ID.');
   }
 
-  recordSku_({
-    sku_id: Utilities.getUuid(), listing_id: body.listing_id, shop_id: prefix,
-    brand: shop.brand, identifier: input.identifier, title: input.title,
-    variant: body.variant_name || '', price: input.price, stock: input.stock,
-    weight_kg: input.weightKg,
+  var productId = created.data.product_id;
+  recordSku_(skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, productId));
+  // Register the new product as this stream's listing, so it appears in the
+  // picker and every later SKU can be appended to it.
+  addListing_(prefix, productId, user.name);
+  logEvent_(user.name, 'create_listing', shop.brand,
+    input.identifier + ' ' + input.title + ' -> ' + productId, 'ok');
+
+  return {
+    mode: 'listing_created',
+    // The new product id IS the listing id for everything that follows, which
+    // is why it is returned under both names: the client stores it as the
+    // stream's listing, and every later SKU appends to it.
+    listing_id: productId, product_id: productId,
+    variant_name: variantValueName_(input.identifier, input.variantName),
+    variations_now: 1, remaining: MAX_SKUS_PER_PRODUCT - 1,
+    photo_url: photoUrl, audit: 'pending'
+  };
+}
+
+/** One SKU row for the Sheet, so the two success paths cannot drift. */
+function skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, productId) {
+  var now = new Date().toISOString();
+  return {
+    sku_id: Utilities.getUuid(),
+    listing_id: productId, shop_id: prefix, brand: shop.brand,
+    identifier: addition.identifier, title: String(body.title).trim(),
+    variant: variantValueName_(addition.identifier, addition.variantName),
+    price: addition.price, stock: addition.stock,
+    weight_kg: body.weight_kg || DEFAULT_WEIGHT_KG,
     dims_cm: DEFAULT_DIMS.length + 'x' + DEFAULT_DIMS.width + 'x' + DEFAULT_DIMS.height,
-    tiktok_image_uri: imageUri, photo_url: photoUrl, category_id: categoryId,
-    status: 'pushed', error: '', tiktok_product_id: created.data.product_id,
-    idempotency_key: input.idempotencyKey,
-    created_at: new Date().toISOString(), pushed_at: new Date().toISOString(),
-    created_by: user.name
-  });
-
-  logEvent_(user.name, 'push_sku', shop.brand,
-    input.identifier + ' ' + input.title + ' -> ' + created.data.product_id, 'ok');
-
-  return { product_id: created.data.product_id, photo_url: photoUrl };
+    tiktok_image_uri: addition.imageUri, photo_url: photoUrl,
+    category_id: categoryId || '',
+    status: 'pushed', error: '', tiktok_product_id: productId,
+    idempotency_key: body.idempotency_key || '',
+    created_at: now, pushed_at: now, created_by: user.name
+  };
 }
 
 /** Record a rejection, so the SKU is not lost and the reason is visible. */

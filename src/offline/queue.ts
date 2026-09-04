@@ -135,6 +135,59 @@ export function dueForPush(drafts: readonly QueuedDraft[], now: number = Date.no
     .sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
+/**
+ * The drafts to push right now: at most one per stream.
+ *
+ * A stream is one TikTok product, and adding a variation to it is a
+ * read-modify-write of its whole SKU list. Two of those in flight at once is a
+ * lost update whose consequence is a *deleted* variation, not just an
+ * overwritten one. The server holds a lease that refuses the second push, but
+ * relying on that alone would mean every parallel attempt burning a round trip
+ * and a retry, so the client does not start them in the first place.
+ *
+ * It also settles a problem the lease cannot: before a stream's listing exists,
+ * there is no listing id to take a lease on. Two drafts pushing then would each
+ * create a product, and the factory run would be split across two listings for
+ * no reason. One at a time per stream makes that unreachable — the first draft
+ * creates the product, and its id is back-filled onto the rest.
+ *
+ * A stream with a push already in flight yields nothing, which is what makes
+ * this safe to call on every reconnect.
+ */
+export function nextBatch(drafts: readonly QueuedDraft[], now: number = Date.now()): QueuedDraft[] {
+  const inFlight = new Set(
+    drafts.filter((d) => d.status === 'uploading').map((d) => d.stream_id),
+  )
+
+  const chosen = new Map<string, QueuedDraft>()
+  for (const draft of dueForPush(drafts, now)) {
+    if (inFlight.has(draft.stream_id)) continue
+    // dueForPush is already oldest-first, so the first one seen per stream is
+    // the one that should go — which for a new stream is the draft that creates
+    // the listing.
+    if (!chosen.has(draft.stream_id)) chosen.set(draft.stream_id, draft)
+  }
+  return [...chosen.values()]
+}
+
+/**
+ * Stamp a newly created listing id onto every other draft of the same stream.
+ *
+ * Called once, after the first draft of a stream creates the product. Without
+ * it the next draft would create a second product instead of adding to the
+ * first. Drafts already settled are left alone — their work is done, and
+ * rewriting history on them would only confuse the queue view.
+ */
+export function backfillListingId(
+  drafts: readonly QueuedDraft[],
+  streamId: string,
+  listingId: string,
+): QueuedDraft[] {
+  return drafts
+    .filter((d) => d.stream_id === streamId && d.listing_id === null && !d.settled)
+    .map((d) => ({ ...d, listing_id: listingId }))
+}
+
 /** Items a person needs to look at: out of automatic attempts. */
 export function needsAttention(drafts: readonly QueuedDraft[]): QueuedDraft[] {
   return drafts.filter((d) => !d.settled && d.status === 'failed' && d.attempts >= MAX_AUTO_ATTEMPTS)
@@ -154,13 +207,25 @@ export function retryDelayMs(attempts: number): number {
   return Math.min(2000 * 2 ** Math.max(0, attempts - 1), 300_000)
 }
 
+/**
+ * How long to wait after losing a race for the listing's lease.
+ *
+ * Short, because the holder is mid-push and will be done in a second or two,
+ * and jittered so two devices that collided do not collide again on the
+ * rebound.
+ */
+export function contendedDelayMs(random: () => number = Math.random): number {
+  return 750 + Math.floor(random() * 1250)
+}
+
 /** Next state after an attempt. Kept pure for the same reason as dueForPush. */
 export function afterAttempt(
   draft: QueuedDraft,
   outcome:
-    | { ok: true; tiktokProductId: string }
-    | { ok: false; error: string; retryable: boolean },
+    | { ok: true; tiktokProductId: string; listingId?: string }
+    | { ok: false; error: string; retryable: boolean; contended?: boolean },
   now: number = Date.now(),
+  random: () => number = Math.random,
 ): QueuedDraft {
   if (outcome.ok) {
     return {
@@ -169,8 +234,26 @@ export function afterAttempt(
       settled: true,
       error: null,
       tiktok_image_uri: draft.tiktok_image_uri,
+      // A create returns the listing id the rest of the stream appends to, so
+      // it is recorded here as well as back-filled onto the stream's siblings.
+      listing_id: outcome.listingId ?? draft.listing_id,
       attempts: draft.attempts + 1,
       retryAfter: 0,
+    }
+  }
+
+  // Contention is not a failure of this SKU, so it must not consume one of its
+  // five automatic attempts. Five quick collisions on a busy stream would
+  // otherwise park a perfectly good SKU and make someone push it by hand
+  // mid-broadcast — the exact opposite of what the queue is for.
+  if (outcome.contended) {
+    return {
+      ...draft,
+      status: 'queued' satisfies DraftStatus,
+      error: null,
+      attempts: draft.attempts,
+      retryAfter: now + contendedDelayMs(random),
+      settled: false,
     }
   }
 

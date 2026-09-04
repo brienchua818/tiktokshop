@@ -114,9 +114,11 @@ export default function BulkAdd({
       // Upload each photo as we go rather than all at once: on a factory
       // connection a dozen parallel uploads is how you get a dozen timeouts.
       let imageUri: string | null = null
+      let attributeImageUri: string | null = null
       try {
         const uploaded = await api.uploadPhoto(shop.shop_id, photo.blob)
         imageUri = uploaded.tiktok_image_uri
+        attributeImageUri = uploaded.tiktok_attribute_image_uri
       } catch (e: unknown) {
         // Not fatal — the photo is kept locally and the queue retries it.
         if (!(e instanceof ApiError)) throw e
@@ -125,6 +127,7 @@ export default function BulkAdd({
       const draft: Draft = {
         draft_id: crypto.randomUUID(),
         listing_id: listing.listing_id,
+        stream_id: listing.listing_id,
         shop_id: shop.shop_id,
         identifier,
         title: buildTitle({ identifier, productName: name, includeDims: false }),
@@ -136,6 +139,7 @@ export default function BulkAdd({
         include_dims_in_title: false,
         image_preview: photo.url,
         tiktok_image_uri: imageUri,
+        tiktok_attribute_image_uri: attributeImageUri,
         status: 'queued',
         error: null,
         idempotency_key: crypto.randomUUID(),

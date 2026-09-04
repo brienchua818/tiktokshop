@@ -49,18 +49,21 @@ function setupSheets() {
   return 'Sheets ready: ' + ss_().getUrl();
 }
 
-/** Append rows under a lock, so concurrent writers cannot clobber each other. */
+/**
+ * Append rows under the script lock, so concurrent writers cannot clobber
+ * each other.
+ *
+ * Goes through withScriptLock_ rather than taking the lock directly, because
+ * this is almost always called from inside a write action that already holds
+ * it — see Lock.gs for why nesting the lock is a trap.
+ */
 function appendRows_(name, rows) {
   if (!rows.length) return;
-  var lock = LockService.getScriptLock();
-  lock.waitLock(30000);
-  try {
+  withScriptLock_(30000, function () {
     var sh = sheet_(name);
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
     SpreadsheetApp.flush();
-  } finally {
-    lock.releaseLock();
-  }
+  });
 }
 
 function readAll_(name) {

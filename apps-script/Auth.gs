@@ -102,9 +102,9 @@ function resolveUser_(identity) {
 }
 
 function touchLastSeen_(email) {
-  var lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) return; // Best effort; never block a request on it.
-  try {
+  // Best effort: skipped rather than blocking a livestream push to record a
+  // timestamp. See Lock.gs for why this does not take the lock directly.
+  withScriptLockOptional_(5000, function () {
     var sh = sheet_(TAB_USERS);
     var last = sh.getLastRow();
     if (last < 2) return;
@@ -116,9 +116,7 @@ function touchLastSeen_(email) {
         return;
       }
     }
-  } finally {
-    lock.releaseLock();
-  }
+  });
 }
 
 function canList_(user) {

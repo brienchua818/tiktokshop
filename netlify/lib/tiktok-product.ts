@@ -4,6 +4,7 @@ import {
   CURRENCY,
   WEIGHT_UNIT,
   DIMENSION_UNIT,
+  VARIANT_ATTRIBUTE_NAME,
 } from '../../src/lib/tiktok-rules'
 
 /**
@@ -134,7 +135,28 @@ export interface ProductInput {
   stock: number
   weightKg: string
   dimensions: { length: string; width: string; height: string } | null
+  /**
+   * The product hero image, from `images/upload` with `use_case=MAIN_IMAGE`.
+   */
   imageUri: string
+  /**
+   * The same photo, uploaded again with `use_case=ATTRIBUTE_IMAGE`.
+   *
+   * TikTok issues a uri per use case and will not accept a MAIN_IMAGE uri as a
+   * variation photo, so the one JPEG is uploaded twice. Falls back to
+   * `imageUri` only so an older client cannot fail outright.
+   */
+  attributeImageUri?: string
+  /**
+   * The buyer-visible name of this variation, from `variantValueName`.
+   *
+   * Every product this app creates is variant-shaped from birth: it starts with
+   * one variation and grows by adding more. A product created without a sales
+   * attribute cannot have one added later — "You must retain at least 1 sales
+   * attribute" cuts both ways — so getting this right at creation is what makes
+   * the whole livestream model possible.
+   */
+  variantValueName: string
   sellerSku: string
   idempotencyKey: string
 }
@@ -170,6 +192,16 @@ function buildPayload(
         seller_sku: input.sellerSku,
         price: { amount: input.price, currency: CURRENCY },
         inventory: [{ warehouse_id: warehouseId, quantity: input.stock }],
+        // The sales attribute that every later variation will join. Named
+        // rather than referenced by id, because a custom attribute has no id
+        // until TikTok generates one on create.
+        sales_attributes: [
+          {
+            name: VARIANT_ATTRIBUTE_NAME,
+            value_name: input.variantValueName,
+            sku_img: { uri: input.attributeImageUri ?? input.imageUri },
+          },
+        ],
       },
     ],
     // TikTok holds the draft itself, so our queue and their state cannot drift.

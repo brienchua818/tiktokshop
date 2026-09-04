@@ -20,8 +20,11 @@ of dated exports is unusable after a few months of daily streams.
 
 1. Create a **new, separate** Apps Script project. Not the delivery one — see
    the warning below.
-2. Paste the files in: `Config.gs`, `Sheet.gs`, `Auth.gs`, `Api.gs`,
+2. Paste the files in: `Config.gs`, `Lock.gs`, `Sheet.gs`, `Auth.gs`, `Api.gs`,
    `TikTok.gs`, `Product.gs`, `Export.gs`, and the `appsscript.json` manifest.
+   Order does not matter — Apps Script shares one global scope — but all eight
+   must be there. `Lock.gs` in particular: without it every write action fails
+   on an undefined `withScriptLock_`.
 3. Run `setupSheets()` once. It creates the four tabs and seeds you as admin.
 4. Add Script Properties, per shop, `{P}` being `HZ`, `TM` or `PM`:
    - `{P}_APP_KEY`, `{P}_APP_SECRET`, `{P}_SERVICE_ID`
@@ -92,6 +95,62 @@ photos carry the creator's name in the filename.
 | `addListing` | Add a stream by TikTok listing ID |
 | `skus` | SKUs for a stream |
 | `allowance` | Uploads used and remaining today |
-| `pushSku` | Validate, file the photo, list on TikTok, record |
+| `pushSku` | Validate, file the photo, add the variation, record |
 | `exportListing` | Write an xlsx into today's dated folder |
 | `users` / `setRole` | Admins only |
+
+### How `pushSku` behaves
+
+A livestream is **one TikTok product**, and each SKU called out on air is a
+**variation** of it. So `pushSku` does one of two things:
+
+- **`listing_id` given** → adds a variation to that product. Returns
+  `mode: "variation_added"` with `variations_now` and `remaining`.
+- **`listing_id` omitted** → creates the stream's listing with this SKU as its
+  first variation. Returns `mode: "listing_created"`, and its `listing_id` is
+  what every later SKU in the stream must be sent with.
+
+Two responses are **not failures** and the client must treat them differently
+from an error:
+
+| HTTP | `code` | What it means | What to do |
+| --- | --- | --- | --- |
+| 409 | `LISTING_FULL` | The listing holds 100 variations, TikTok's Singapore limit | Offer to start a continuation listing; do not retry as-is |
+| 409 | `LISTING_BUSY` | Another write holds the script lock | Retry in a second or two; nothing was lost |
+| 422 | — | TikTok refused the SKU, with its own wording | Show the message; **do not** retry — each attempt costs daily allowance |
+
+`audit: "pending"` on a success means TikTok has resent the product for review.
+Existing variations stay live and buyable throughout; the new one is not
+purchasable until it clears.
+
+## Tests
+
+```
+node apps-script/test/run.cjs
+```
+
+Apps Script has no test runner and its editor cannot be driven from a
+terminal, so the pure logic is loaded into plain node instead. That covers the
+parts where a mistake is expensive and silent — the payload that edits a live
+listing, the title rules, and the lock — and mirrors
+`netlify/lib/tiktok-variants.test.ts` case for case, because the same
+livestream can be served by either backend and the two must not drift.
+
+It does **not** cover anything touching `SpreadsheetApp`, `DriveApp`,
+`UrlFetchApp` or `LockService` for real; those are stubbed. Use `ttSelfTest()`
+in the editor for the integration side.
+
+## Two things that will bite if changed
+
+**Never nest the script lock.** `Api.gs` takes it once per write action and
+everything below assumes it is held. `Lock.gs` tracks per-execution ownership
+so a nested `withScriptLock_` is a no-op rather than a second acquisition —
+because whether Apps Script's script lock is re-entrant within one execution
+is undocumented, and the two possible failures are a thirty-second hang on
+every push or a silently skipped write. Always go through `withScriptLock_`.
+
+**Never send a partial SKU list to `partial_edit`.** From TikTok's own
+reference: *"You must pass in all existing SKUs. Any existing SKU IDs not
+listed here will result in the deletion of those SKUs."* There is no append
+call. `buildAppendPayload_` reads the product first and refuses to emit a
+payload that would drop one — leave that check in place.

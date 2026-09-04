@@ -9,6 +9,8 @@ import {
   validateVariantName,
   variantValueName,
   continuationTitle,
+  cleanPrefix,
+  validatePrefix,
   TITLE_MIN,
   TITLE_MAX,
 } from './tiktok-rules'
@@ -277,5 +279,110 @@ describe('continuationTitle', () => {
     expect(continuationTitle('  Katrin BJ Ceramic Factory Run  ')).toBe(
       'Katrin BJ Ceramic Factory Run (2)',
     )
+  })
+})
+
+/**
+ * The SKU prefix.
+ *
+ * Not a TikTok rule — `seller_sku` allows 50 characters. This is our own
+ * ceiling, and it exists for a human reason: the prefix is spoken aloud on air
+ * and read off a product by someone holding it, so it has to stay short enough
+ * to say and to scan. The app it replaces allowed exactly one letter; three is
+ * the deliberate widening.
+ */
+describe('cleanPrefix', () => {
+  it('upper-cases, because the identifier is always capitals', () => {
+    expect(cleanPrefix('hze')).toBe('HZE')
+  })
+
+  it('caps at three letters', () => {
+    expect(cleanPrefix('CERAMIC')).toBe('CER')
+  })
+
+  it('accepts one, two or three letters unchanged', () => {
+    expect(cleanPrefix('A')).toBe('A')
+    expect(cleanPrefix('HZ')).toBe('HZ')
+    expect(cleanPrefix('HZE')).toBe('HZE')
+  })
+
+  it('drops digits — the sequence number is derived, never typed', () => {
+    expect(cleanPrefix('A1')).toBe('A')
+    expect(cleanPrefix('2024')).toBe('')
+  })
+
+  it('drops spaces and punctuation, which seller_sku forbids anyway', () => {
+    expect(cleanPrefix('H Z')).toBe('HZ')
+    expect(cleanPrefix('H-Z_E')).toBe('HZE')
+    expect(cleanPrefix('  hz  ')).toBe('HZ')
+  })
+
+  it('strips before it truncates, so punctuation cannot eat the allowance', () => {
+    // "H-Z-E-X" naively sliced to three characters gives "H-Z"; stripping
+    // first gives "HZE", which is what was meant.
+    expect(cleanPrefix('H-Z-E-X')).toBe('HZE')
+  })
+
+  it('survives a paste of something entirely unsuitable', () => {
+    expect(cleanPrefix('SUPPLIER-2024-001')).toBe('SUP')
+    expect(cleanPrefix('')).toBe('')
+    expect(cleanPrefix('白釉')).toBe('')
+  })
+
+  it('is idempotent — cleaning a clean prefix changes nothing', () => {
+    expect(cleanPrefix(cleanPrefix('CERAMIC'))).toBe('CER')
+  })
+})
+
+describe('validatePrefix', () => {
+  it('accepts one to three capitals', () => {
+    for (const p of ['A', 'HZ', 'HZE']) expect(validatePrefix(p)).toEqual([])
+  })
+
+  it('accepts lower case, since it is upper-cased on the way in', () => {
+    expect(validatePrefix('hze')).toEqual([])
+  })
+
+  it('requires something', () => {
+    expect(validatePrefix('')[0]!.message).toMatch(/required/)
+    expect(validatePrefix('   ')[0]!.message).toMatch(/required/)
+  })
+
+  it('rejects four letters', () => {
+    expect(validatePrefix('CERA')[0]!.message).toMatch(/one to three letters/)
+  })
+
+  it('rejects digits and punctuation', () => {
+    expect(validatePrefix('A1')[0]!.message).toMatch(/one to three letters/)
+    expect(validatePrefix('H-Z')[0]!.message).toMatch(/one to three letters/)
+  })
+
+  it('quotes the offending value back, so the message is actionable', () => {
+    expect(validatePrefix('CERAMIC')[0]!.message).toContain('"CERAMIC"')
+  })
+
+  it('agrees with cleanPrefix: anything cleaned is valid', () => {
+    // The two must not disagree, or the input would produce a value its own
+    // validator rejects.
+    for (const raw of ['hze', 'CERAMIC', 'H-Z-E-X', 'A1', '  hz  ']) {
+      const cleaned = cleanPrefix(raw)
+      if (cleaned) expect(validatePrefix(cleaned)).toEqual([])
+    }
+  })
+})
+
+describe('the prefix and the identifier together', () => {
+  it('a three-letter prefix still produces a legal seller_sku', () => {
+    // seller_sku: 1-50 characters, no spaces. "HZE100" is nowhere near.
+    expect(validateSellerSku('HZE100')).toEqual([])
+  })
+
+  it('a three-letter prefix leaves room in the variant name', () => {
+    // The identifier is prepended to the buyer-visible name, so a longer
+    // prefix eats into the 50-character ceiling. Four characters of "HZE " is
+    // affordable; it is worth asserting rather than assuming.
+    const name = variantValueName('HZE100', 'Blue Reactive Glaze Mug')
+    expect(name).toBe('HZE100 Blue Reactive Glaze Mug')
+    expect(validateVariantName(name)).toEqual([])
   })
 })

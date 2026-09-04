@@ -22,6 +22,55 @@ export const TITLE_MAX = 255
 /** seller_sku: 1–50 characters, "Text without spaces". Our A1/A2 scheme fits. */
 export const SELLER_SKU_MAX = 50
 
+/**
+ * Letters allowed in a SKU prefix — the "A" in "A1", or "HZE" in "HZE1".
+ *
+ * Not a TikTok rule. `seller_sku` allows 50 characters, so this is our own
+ * ceiling and it exists for a human reason: the prefix is spoken aloud on air
+ * and read off a product by someone holding it, so it has to stay short enough
+ * to say and to scan. Three letters is enough to encode a factory or a
+ * category; more and the identifier stops being glanceable.
+ *
+ * The old app allowed exactly one letter. Three is the deliberate widening.
+ */
+export const PREFIX_MAX = 3
+
+/** A prefix, once cleaned: one to three capital letters. */
+const PREFIX_SHAPE = new RegExp(`^[A-Z]{1,${PREFIX_MAX}}$`)
+
+/**
+ * Clean a typed prefix into the only shape the scheme accepts.
+ *
+ * Applied on every keystroke rather than validated on submit, because a prefix
+ * that silently refuses the fourth letter is self-explanatory, whereas an
+ * error message appearing mid-livestream is not. Digits and punctuation are
+ * dropped for the same reason: the sequence number is derived, so a digit in
+ * the prefix could only ever be a mistake.
+ */
+export function cleanPrefix(raw: string): string {
+  return raw
+    .replace(/[^A-Za-z]/g, '')
+    .toUpperCase()
+    .slice(0, PREFIX_MAX)
+}
+
+/** Validate a prefix. Empty is a violation: every identifier needs one. */
+export function validatePrefix(raw: string): Violation[] {
+  const prefix = raw.trim().toUpperCase()
+  if (prefix.length === 0) {
+    return [{ field: 'prefix', message: 'A prefix is required — one to three letters.' }]
+  }
+  if (!PREFIX_SHAPE.test(prefix)) {
+    return [
+      {
+        field: 'prefix',
+        message: `Prefix must be one to three letters, no digits or spaces — "${raw}" is not.`,
+      },
+    ]
+  }
+  return []
+}
+
 /** Singapore caps a product at 100 SKUs; 300 is US/UK/EU/JP/BR/MX only. */
 export const MAX_SKUS_PER_PRODUCT = 100
 

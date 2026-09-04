@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseIdentifier, formatIdentifier, nextIdentifier, buildTitle } from './identifiers'
+import { activePrefixFrom, parseIdentifier, formatIdentifier, nextIdentifier, buildTitle } from './identifiers'
 
 describe('parseIdentifier', () => {
   it('parses the A1 scheme', () => {
@@ -58,8 +58,35 @@ describe('nextIdentifier', () => {
     expect(nextIdentifier(['A9', 'A2', 'A5'], [])).toEqual({ prefix: 'A', seq: 10 })
   })
 
-  it('keeps the prefix of the highest entry when the stream has moved on', () => {
-    expect(nextIdentifier(['A1', 'A2'], ['B1'])).toEqual({ prefix: 'B', seq: 2 })
+  it('uses the prefix it is given, not one inferred from the work', () => {
+    // The prefix input is the operator's explicit control. Inferring it from
+    // the drafts made that input decorative — typing a new prefix while A1-A7
+    // sat in the queue still produced A8.
+    expect(nextIdentifier(['A1', 'A2'], ['B1'], 'B')).toEqual({ prefix: 'B', seq: 2 })
+    expect(nextIdentifier(['A1', 'A2'], ['B1'], 'A')).toEqual({ prefix: 'A', seq: 3 })
+  })
+
+  it('starts a switched-to prefix at 1, however high the old series went', () => {
+    // A stream that has done A1-A50 and switches to HZE starts at HZE1. That
+    // is the entire point of switching.
+    const listed = Array.from({ length: 50 }, (_, i) => `A${i + 1}`)
+    expect(nextIdentifier(listed, [], 'HZE')).toEqual({ prefix: 'HZE', seq: 1 })
+  })
+
+  it('continues a three-letter series from its own highest number', () => {
+    expect(nextIdentifier(['HZE1', 'HZE2'], ['HZE7'], 'HZE')).toEqual({ prefix: 'HZE', seq: 8 })
+  })
+
+  it('is not confused by another prefix sharing the same numbers', () => {
+    expect(nextIdentifier(['A1', 'A2', 'A3'], ['TMX1'], 'TMX')).toEqual({ prefix: 'TMX', seq: 2 })
+  })
+
+  it('upper-cases and trims whatever prefix it is handed', () => {
+    expect(nextIdentifier([], [], ' hze ')).toEqual({ prefix: 'HZE', seq: 1 })
+  })
+
+  it('falls back to A rather than producing a prefixless identifier', () => {
+    expect(nextIdentifier([], [], '')).toEqual({ prefix: 'A', seq: 1 })
   })
 
   it('ignores unparseable identifiers rather than restarting', () => {
@@ -113,5 +140,53 @@ describe('buildTitle', () => {
 
   it('falls back to the identifier alone when the name is blank', () => {
     expect(buildTitle({ identifier: 'A1', productName: '   ', includeDims: false })).toBe('A1')
+  })
+})
+
+
+/**
+ * Seeding the prefix input.
+ *
+ * The prefix is the operator's once they touch it, but it has to start
+ * somewhere — and starting at "A" every time would reset a deliberately chosen
+ * prefix whenever the screen remounted, orphaning the series in progress.
+ */
+describe('activePrefixFrom', () => {
+  it('defaults to A when there is nothing to go on', () => {
+    expect(activePrefixFrom([], [])).toBe('A')
+  })
+
+  it('honours an explicit fallback', () => {
+    expect(activePrefixFrom([], [], 'C')).toBe('C')
+  })
+
+  it('recovers the prefix from what is already live', () => {
+    expect(activePrefixFrom(['HZE1', 'HZE2'], [])).toBe('HZE')
+  })
+
+  it('lets unpushed drafts win, as the more recent signal of intent', () => {
+    // The operator switched to B and queued one. Coming back to the screen
+    // must not drop them into A again.
+    expect(activePrefixFrom(['A1', 'A2'], ['B1'])).toBe('B')
+  })
+
+  it('takes the highest-numbered series when drafts mix prefixes', () => {
+    expect(activePrefixFrom([], ['A1', 'B4'])).toBe('B')
+  })
+
+  it('ignores junk rather than falling back', () => {
+    expect(activePrefixFrom(['SUPPLIER-2024-001', ''], ['HZE3'])).toBe('HZE')
+  })
+
+  it('upper-cases what it finds', () => {
+    expect(activePrefixFrom(['hze1'], [])).toBe('HZE')
+  })
+
+  it('together with nextIdentifier, continues rather than collides', () => {
+    // The pairing the screen actually uses.
+    const listed = ['A1', 'A2']
+    const drafts = ['B1']
+    const prefix = activePrefixFrom(listed, drafts)
+    expect(nextIdentifier(listed, drafts, prefix)).toEqual({ prefix: 'B', seq: 2 })
   })
 })

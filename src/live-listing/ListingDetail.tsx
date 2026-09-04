@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError } from '../lib/api'
-import { formatIdentifier, nextIdentifier } from '../lib/identifiers'
+import { activePrefixFrom, formatIdentifier, nextIdentifier } from '../lib/identifiers'
 import {
   validateVariantName,
   validatePrice,
   validateStock,
   validateWeight,
   variantValueName,
+  cleanPrefix,
   DEFAULT_WEIGHT_KG,
   DEFAULT_DIMENSIONS,
   VALUE_NAME_MAX,
+  PREFIX_MAX,
 } from '../lib/tiktok-rules'
 import { allDrafts, enqueue, removeDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
@@ -38,7 +40,11 @@ export default function ListingDetail({
   onBack: () => void
   onQueueChange: () => void
 }) {
+  // The operator's choice, and authoritative once made. Seeded from the work
+  // already in play so that leaving a stream and coming back does not reset a
+  // deliberately chosen prefix and orphan the series in progress.
   const [prefix, setPrefix] = useState('A')
+  const [prefixSeeded, setPrefixSeeded] = useState(false)
   const [listedSkus, setListedSkus] = useState<string[]>([])
   const [drafts, setDrafts] = useState<QueuedDraft[]>([])
   const [allowance, setAllowance] = useState<{
@@ -73,11 +79,24 @@ export default function ListingDetail({
       .catch(() => setAllowance(null))
   }, [shop.shop_id])
 
-  // The next identifier, considering both what is live and what is queued —
-  // ignoring either is how two SKUs end up sharing an identifier.
+  const draftIdentifiers = useMemo(() => drafts.map((d) => d.identifier), [drafts])
+
+  // Seed the prefix once, from whatever is already in play. Only once: after
+  // that the input is the operator's and must not be overwritten by data
+  // arriving late, which would silently change the prefix under their hands.
+  useEffect(() => {
+    if (prefixSeeded) return
+    if (listedSkus.length === 0 && draftIdentifiers.length === 0) return
+    setPrefix(activePrefixFrom(listedSkus, draftIdentifiers))
+    setPrefixSeeded(true)
+  }, [prefixSeeded, listedSkus, draftIdentifiers])
+
+  // The next identifier: the prefix is the operator's, the NUMBER considers
+  // both what is live and what is queued — ignoring either is how two SKUs end
+  // up sharing an identifier.
   const next = useMemo(
-    () => nextIdentifier(listedSkus, drafts.map((d) => d.identifier), prefix),
-    [listedSkus, drafts, prefix],
+    () => nextIdentifier(listedSkus, draftIdentifiers, prefix),
+    [listedSkus, draftIdentifiers, prefix],
   )
 
   return (
@@ -177,8 +196,20 @@ function IdentifierSettings({
           <input
             id="prefix"
             value={prefix}
-            onChange={(e) => onPrefix(e.target.value.replace(/[^A-Za-z]/g, '').toUpperCase())}
-            className="w-20 bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono outline-none focus:border-accent"
+            onChange={(e) => onPrefix(cleanPrefix(e.target.value))}
+            // maxLength as well as the slice in cleanPrefix: the attribute
+            // stops the keystroke, which means no cursor jump, and the slice
+            // catches a paste or an autofill that bypasses it.
+            maxLength={PREFIX_MAX}
+            // The value is upper-cased on every keystroke, so the on-screen
+            // keyboard should offer capitals to match — otherwise iOS shows a
+            // lowercase keyboard while capitals appear in the field.
+            autoCapitalize="characters"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            aria-describedby="prefix-help"
+            className="w-24 bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase tracking-widest outline-none focus:border-accent"
           />
         </div>
         <div className="flex-1">
@@ -188,8 +219,9 @@ function IdentifierSettings({
           <p className="text-lg font-mono text-identifier">{next}</p>
         </div>
       </div>
-      <p className="text-xs text-gray-600">
-        Continues from what is already listed and queued, so it cannot repeat.
+      <p id="prefix-help" className="text-xs text-gray-600">
+        Up to {PREFIX_MAX} letters, capitals. Continues from what is already listed and
+        queued, so it cannot repeat.
       </p>
     </div>
   )

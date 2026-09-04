@@ -11,19 +11,26 @@
  * live on TikTok — the next one continues the sequence instead of colliding.
  */
 
+import { PREFIX_MAX } from './tiktok-rules'
+
 export interface ParsedIdentifier {
   prefix: string
   seq: number
 }
 
 /**
- * Parse "A12" into `{ prefix: 'A', seq: 12 }`. Returns null for anything that
- * is not letters followed by digits, so a hand-typed SKU cannot corrupt the
- * sequence.
+ * Parse "A12" or "HZE12" into `{ prefix, seq }`. Returns null for anything that
+ * is not one to three letters followed by digits, so a hand-typed or foreign
+ * SKU cannot corrupt the sequence.
+ *
+ * The prefix length is bounded here as well as in the input, because this is
+ * what reads SKUs back from TikTok: a product carrying some other naming
+ * scheme entirely — "SUPPLIER-2024-001" — must be ignored rather than
+ * misparsed into a sequence the counter then tries to continue.
  */
 export function parseIdentifier(value: string | null | undefined): ParsedIdentifier | null {
   if (!value) return null
-  const match = /^([A-Za-z]+)(\d+)$/.exec(value.trim())
+  const match = new RegExp(`^([A-Za-z]{1,${PREFIX_MAX}})(\\d+)$`).exec(value.trim())
   if (!match) return null
   const seq = Number.parseInt(match[2]!, 10)
   if (!Number.isSafeInteger(seq) || seq < 1) return null
@@ -36,46 +43,64 @@ export function formatIdentifier(prefix: string, seq: number): string {
 }
 
 /**
- * Work out the next identifier from everything already in play.
+ * The prefix to start the operator off with.
  *
- * Considers identifiers from both sources the original app used — SKUs already
- * listed on TikTok, and drafts not yet pushed — because ignoring either is how
- * you end up with two A7s. Falls back to A1 when there is nothing to continue
- * from.
+ * Seeds the prefix input, and only that. It exists so that leaving a stream
+ * and coming back does not reset a deliberately chosen prefix to "A" and
+ * orphan the series already in progress — the component remounts, this reads
+ * the state back off the work in play, and the operator carries on.
+ *
+ * Unpushed drafts are the more recent signal of intent than what is already
+ * live, so they win when they contain anything parseable.
+ */
+export function activePrefixFrom(
+  listed: readonly (string | null | undefined)[],
+  drafts: readonly (string | null | undefined)[],
+  fallback = 'A',
+): string {
+  const parse = (values: readonly (string | null | undefined)[]) =>
+    values.map(parseIdentifier).filter((p): p is ParsedIdentifier => p !== null)
+
+  const source = parse(drafts).length > 0 ? parse(drafts) : parse(listed)
+  if (source.length === 0) return fallback.toUpperCase()
+
+  // The highest-numbered one, because that is the series being worked on.
+  return source.reduce((best, current) => (current.seq > best.seq ? current : best)).prefix
+}
+
+/**
+ * Work out the next identifier.
+ *
+ * The prefix is the operator's, not inferred. It used to be read back off the
+ * drafts, which made the prefix input decorative: typing "HZE" while A1–A7 sat
+ * in the queue still produced A8. The input is the explicit control, so it
+ * decides — `activePrefixFrom` seeds it, and after that what is typed wins.
+ *
+ * The NUMBER is still derived, from both sources the original app used: SKUs
+ * already live on TikTok, and drafts not yet pushed. Ignoring either is how you
+ * end up with two A7s.
  *
  * @param listed identifiers of variations already live on TikTok
  * @param drafts identifiers of local drafts not yet pushed
+ * @param prefix the operator's chosen prefix
  */
 export function nextIdentifier(
   listed: readonly (string | null | undefined)[],
   drafts: readonly (string | null | undefined)[],
-  fallbackPrefix = 'A',
+  prefix = 'A',
 ): ParsedIdentifier {
-  const parsed = [...listed, ...drafts]
+  const active = prefix.trim().toUpperCase() || 'A'
+
+  // Only identifiers sharing the active prefix can constrain the next number.
+  // A stream that has done A1–A50 and switches to "HZE" starts at HZE1, which
+  // is the point of switching.
+  const highest = [...listed, ...drafts]
     .map(parseIdentifier)
     .filter((p): p is ParsedIdentifier => p !== null)
-
-  if (parsed.length === 0) {
-    return { prefix: fallbackPrefix.toUpperCase(), seq: 1 }
-  }
-
-  // Which prefix is in play matters as much as which number. If the operator
-  // has started a "B" series, the next SKU is a B even though the "A" numbers
-  // are higher. Unpushed drafts are the more recent signal of intent, so they
-  // decide the prefix whenever they contain one.
-  const draftsParsed = drafts.map(parseIdentifier).filter((p): p is ParsedIdentifier => p !== null)
-  const source = draftsParsed.length > 0 ? draftsParsed : parsed
-  const activePrefix = source.reduce((best, current) => (current.seq > best.seq ? current : best))
-    .prefix
-
-  // Then continue from the highest number used for that prefix in EITHER
-  // source. Considering only one of them is how two SKUs end up sharing an
-  // identifier once the drafts push.
-  const highestForPrefix = parsed
-    .filter((p) => p.prefix === activePrefix)
+    .filter((p) => p.prefix === active)
     .reduce((max, current) => Math.max(max, current.seq), 0)
 
-  return { prefix: activePrefix, seq: highestForPrefix + 1 }
+  return { prefix: active, seq: highest + 1 }
 }
 
 /**

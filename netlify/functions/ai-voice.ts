@@ -32,5 +32,10 @@ export default withAuth(async (request) => {
     // silently written into a listing.
     transcript_english: result.transcript_english,
     unintelligible: result.unintelligible,
+    // Set when a text field could not be rendered in English even after a
+    // corrective retry. The numbers still came through, so this is a partial
+    // success and must not read as a failure — the operator types the name and
+    // keeps the price and quantity they just spoke.
+    dropped: fields.dropped ?? null,
   })
 })

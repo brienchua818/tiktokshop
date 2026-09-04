@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai'
+import { validateTextCharacters } from '../../src/lib/tiktok-rules'
 
 /**
  * Voice -> product fields, using Gemini.
@@ -11,6 +12,18 @@ import { GoogleGenAI, Type } from '@google/genai'
  * The important subtlety: this is a TRANSLATION, not a transcription. Someone
  * may describe a product entirely in Mandarin, but TikTok rejects Chinese
  * characters in product names, so every text field must come back in English.
+ *
+ * Instructing that is not the same as getting it. A model asked to translate
+ * will occasionally hand back the source language anyway, and the consequence
+ * here is specific: the Chinese name lands in the form, the push is refused,
+ * and the operator retypes by hand mid-broadcast a field the AI had just
+ * filled — which is the exact friction this feature exists to remove.
+ *
+ * So English is checked, not assumed: one corrective retry naming the problem,
+ * and if that still comes back non-English the text is DROPPED rather than
+ * passed through. The numbers survive either way, because a price and a
+ * quantity are digits and cannot be in the wrong language. Half the work
+ * saved beats a field that has to be cleared before it can be used.
  */
 
 const PROMPT = `You are helping list homeware products on TikTok Shop Singapore during a live broadcast at a factory.
@@ -63,6 +76,30 @@ export interface VoiceResult {
   unintelligible: boolean
 }
 
+/**
+ * The text fields that reach TikTok, and must therefore be English.
+ *
+ * `transcript_english` is deliberately not one of them: it is shown to the
+ * operator so they can see what was heard, and never sent anywhere. If it
+ * comes back in Chinese that is a useful signal, not a fault to correct.
+ */
+const ENGLISH_FIELDS = ['product_name', 'variant_name'] as const
+
+/**
+ * Which text fields came back in something other than English.
+ *
+ * Uses the same character rules TikTok itself enforces — the ones that reject
+ * Chinese (12052262) and non-English characters (12052266) — rather than a
+ * separate guess about what counts as English.
+ */
+export function nonEnglishFields(result: VoiceResult): string[] {
+  return ENGLISH_FIELDS.filter((field) => {
+    const value = result[field]
+    if (!value?.trim()) return false
+    return validateTextCharacters(value, field, field).length > 0
+  })
+}
+
 let cached: GoogleGenAI | undefined
 
 function client(): GoogleGenAI {
@@ -85,6 +122,28 @@ export async function extractFromVoice(
   audioBase64: string,
   mimeType: string,
 ): Promise<VoiceResult> {
+  const first = await askGemini(audioBase64, mimeType)
+
+  const wrongLanguage = nonEnglishFields(first)
+  if (wrongLanguage.length === 0) return first
+
+  // Naming the specific field that came back wrong is far more reliable than
+  // re-rolling the same prompt and hoping — the same reason the photo-to-title
+  // path retries with the violation spelled out.
+  return askGemini(
+    audioBase64,
+    mimeType,
+    `Your previous answer put non-English text in: ${wrongLanguage.join(', ')}. ` +
+      'The speaker may have used Mandarin — TRANSLATE it into English. ' +
+      'Return English words only in every text field. Never return Chinese characters.',
+  )
+}
+
+async function askGemini(
+  audioBase64: string,
+  mimeType: string,
+  correction?: string,
+): Promise<VoiceResult> {
   const response = await client().models.generateContent({
     model: 'gemini-2.5-flash',
     contents: [
@@ -92,7 +151,7 @@ export async function extractFromVoice(
         role: 'user',
         parts: [
           { inlineData: { mimeType, data: audioBase64 } },
-          { text: PROMPT },
+          { text: correction ? `${PROMPT}\n\n${correction}` : PROMPT },
         ],
       },
     ],
@@ -132,11 +191,28 @@ export function normaliseVoiceResult(result: VoiceResult): {
   stock?: number
   weightKg?: string
   dimensions?: { length: string; width: string; height: string }
+  /**
+   * Text fields withheld because they were not English after a retry.
+   *
+   * Surfaced rather than swallowed so the operator is told what to type,
+   * instead of wondering why the name field stayed empty when they clearly
+   * described the product.
+   */
+  dropped?: string[]
 } {
   const out: ReturnType<typeof normaliseVoiceResult> = {}
 
-  if (result.product_name?.trim()) out.name = result.product_name.trim()
-  if (result.variant_name?.trim()) out.variant = result.variant_name.trim()
+  // Anything still not English is withheld. Passing it through would fill the
+  // form with text that cannot be pushed, which is worse than an empty field:
+  // it has to be noticed and cleared before it can be replaced.
+  const dropped = nonEnglishFields(result)
+  if (dropped.length > 0) out.dropped = dropped
+
+  const name = result.product_name?.trim()
+  if (name && !dropped.includes('product_name')) out.name = name
+
+  const variant = result.variant_name?.trim()
+  if (variant && !dropped.includes('variant_name')) out.variant = variant
 
   const price = cleanDecimal(result.price)
   if (price) out.price = price

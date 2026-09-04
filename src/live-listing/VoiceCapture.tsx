@@ -28,12 +28,17 @@ export default function VoiceCapture({
   const [state, setState] = useState<'idle' | 'recording' | 'thinking'>('idle')
   const [error, setError] = useState('')
   const [heard, setHeard] = useState('')
+  // A partial success, not a failure: the numbers came through but a text
+  // field could not be rendered in English. Kept separate from `error` so it
+  // reads as "type this bit" rather than "that did not work".
+  const [notice, setNotice] = useState('')
   const recorderRef = useRef<MediaRecorder | null>(null)
   const chunksRef = useRef<Blob[]>([])
 
   async function start() {
     setError('')
     setHeard('')
+    setNotice('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       // Let the browser pick the container. Chrome gives webm, iOS Safari mp4,
@@ -58,6 +63,18 @@ export default function VoiceCapture({
             setError('Could not make that out. Try again, or type it in.')
           } else {
             setHeard(result.transcript_english)
+            if (result.dropped?.length) {
+              // Say which field, because "type the name" is actionable and
+              // "something went wrong" is not.
+              const what = result.dropped.includes('product_name')
+                ? result.dropped.length > 1
+                  ? 'the name and variant'
+                  : 'the name'
+                : 'the variant'
+              setNotice(
+                `Got the numbers. Couldn't put ${what} into English — type it in, or say it in English.`,
+              )
+            }
             onFields({
               ...(result.title ? { name: result.title } : {}),
               ...(result.variant_name ? { variant: result.variant_name } : {}),
@@ -105,8 +122,11 @@ export default function VoiceCapture({
             : 'Speak the details'}
       </button>
 
-      {/* Echoed back so a mishearing is visible rather than silently wrong. */}
+      {/* Echoed back so a mishearing is visible rather than silently wrong.
+          Shown even when a field was dropped — seeing that Mandarin was
+          understood correctly is what makes the notice below make sense. */}
       {heard && <p className="text-xs text-gray-500 italic">Heard: {heard}</p>}
+      {notice && <p className="text-xs text-sky-300">{notice}</p>}
       {error && <p className="text-xs text-amber-400">{error}</p>}
     </div>
   )

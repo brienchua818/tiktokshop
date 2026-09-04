@@ -153,10 +153,17 @@ export const api = {
   fieldsFromVoice: async (audio: Blob) => {
     const form = new FormData()
     form.append('audio', audio, 'note.webm')
-    return request<ExtractedFields & { transcript_english: string; unintelligible: boolean }>(
-      'ai-voice',
-      { method: 'POST', body: form },
-    )
+    return request<
+      ExtractedFields & {
+        transcript_english: string
+        unintelligible: boolean
+        /**
+         * Text fields withheld because they came back in Chinese even after a
+         * retry. Price and quantity are unaffected — digits have no language.
+         */
+        dropped: string[] | null
+      }
+    >('ai-voice', { method: 'POST', body: form })
   },
 
   /**

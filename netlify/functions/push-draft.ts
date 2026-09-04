@@ -1,5 +1,7 @@
 import { withAuth, json, methodNotAllowed } from '../lib/http'
-import { shopCredentials, recordPush, findPushByIdempotencyKey } from '../lib/db'
+import { credentialsFor } from '../lib/credentials'
+import { hasDatabase } from '../lib/store'
+import { recordPush, findPushByIdempotencyKey } from '../lib/db'
 import {
   recommendCategory,
   requiredAttributes,
@@ -52,12 +54,19 @@ export default withAuth(async (request) => {
   // A retry after a timeout arrives with the same key. Returning the original
   // product is what makes the offline queue safe — otherwise a dropped
   // connection quietly creates the same product twice.
-  const existing = await findPushByIdempotencyKey(body.idempotency_key!)
-  if (existing?.tiktok_product_id) {
-    return json({ product_id: existing.tiktok_product_id, deduplicated: true })
+  //
+  // Without a database this check is skipped, and TikTok's own
+  // `idempotency_key` carries the guarantee instead — it honours the key
+  // server-side and returns the original product. This is a second layer, not
+  // the only one.
+  if (hasDatabase()) {
+    const existing = await findPushByIdempotencyKey(body.idempotency_key!)
+    if (existing?.tiktok_product_id) {
+      return json({ product_id: existing.tiktok_product_id, deduplicated: true })
+    }
   }
 
-  const creds = await shopCredentials(body.shop_id!)
+  const creds = await credentialsFor(body.shop_id!)
 
   const input = {
     title: body.title!,
@@ -91,7 +100,10 @@ export default withAuth(async (request) => {
 
     const productId = await createProduct(creds, input, categoryId, warehouseId, attributes)
 
-    await recordPush({
+    // Recorded for the daily-allowance count. Skipped without a database; the
+    // allowance endpoint then reports what TikTok itself says.
+    if (hasDatabase()) {
+      await recordPush({
       draftId: crypto.randomUUID(),
       listingId: body.listing_id!,
       shopId: body.shop_id!,
@@ -105,7 +117,8 @@ export default withAuth(async (request) => {
       tiktokImageUri: input.imageUri,
       idempotencyKey: input.idempotencyKey,
       tiktokProductId: productId,
-    })
+      })
+    }
 
     return json({ product_id: productId })
   } catch (error) {

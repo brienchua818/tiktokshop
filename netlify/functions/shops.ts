@@ -1,23 +1,27 @@
 import { withAuth, json } from '../lib/http'
-import { listShopsForClient, listingsUsedToday } from '../lib/db'
+import { SHOPS } from '../lib/shops-config'
+import { isAuthorised } from '../lib/credentials'
 
 /**
  * The shops the UI may show, labelled by brand.
  *
- * Deliberately excludes every credential column — the browser has no business
- * receiving an app secret or a TikTok token even in a form it cannot read.
+ * Served from configuration rather than a table, so the app works with nothing
+ * provisioned. Deliberately excludes every credential — the browser has no
+ * business receiving an app secret or a TikTok token even in a form it cannot
+ * read.
  */
 export default withAuth(async () => {
-  const shops = await listShopsForClient()
-
-  // Attach today's usage so the UI can warn before the daily cap bites.
-  const withUsage = await Promise.all(
-    shops.map(async (shop) => ({
-      ...shop,
+  const shops = await Promise.all(
+    SHOPS.map(async (shop) => ({
+      shop_id: shop.shop_id,
+      brand: shop.brand,
+      tiktok_handle: shop.tiktok_handle,
+      entity: shop.entity,
       shop_cipher: null,
-      listings_used_today: await listingsUsedToday(shop.shop_id),
+      authorised: await isAuthorised(shop.shop_id),
+      daily_listing_cap: shop.daily_listing_cap,
+      listings_used_today: 0,
     })),
   )
-
-  return json(withUsage)
+  return json(shops)
 })

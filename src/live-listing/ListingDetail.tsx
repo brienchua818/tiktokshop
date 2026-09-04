@@ -40,9 +40,11 @@ export default function ListingDetail({
   const [prefix, setPrefix] = useState('A')
   const [listedSkus, setListedSkus] = useState<string[]>([])
   const [drafts, setDrafts] = useState<QueuedDraft[]>([])
-  const [allowance, setAllowance] = useState<{ used: number; cap: number; remaining: number } | null>(
-    null,
-  )
+  const [allowance, setAllowance] = useState<{
+    used: number | null
+    cap: number
+    remaining: number | null
+  } | null>(null)
 
   const refreshDrafts = useCallback(async () => {
     const all = await allDrafts().catch(() => [] as QueuedDraft[])
@@ -93,7 +95,10 @@ export default function ListingDetail({
 
       {/* The daily cap is surfaced before it bites. New shops are limited to
           100 uploads a day, which a 200-SKU stream would hit at item 101. */}
-      {allowance && allowance.remaining <= 25 && (
+      {/* Only warn on a number we actually know. Without server-side push
+          tracking the figure is null, and inventing a confident one would be
+          worse than showing none — it would be trusted. */}
+      {allowance && allowance.remaining !== null && allowance.remaining <= 25 && (
         <p
           className={`text-sm rounded-lg px-4 py-2 border ${
             allowance.remaining === 0

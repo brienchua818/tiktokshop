@@ -134,7 +134,7 @@ export const api = {
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>
-    request<{ used: number; cap: number; remaining: number }>(
+    request<{ used: number | null; cap: number; remaining: number | null; tracked: boolean }>(
       `allowance?shop_id=${encodeURIComponent(shopId)}`,
     ),
 }

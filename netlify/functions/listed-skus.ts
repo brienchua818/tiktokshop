@@ -1,5 +1,5 @@
 import { withAuth, json, requireParam, toResponse } from '../lib/http'
-import { shopCredentials } from '../lib/db'
+import { credentialsFor } from '../lib/credentials'
 import { call, TikTokApiError } from '../lib/tiktok-api'
 import { CATEGORY_VERSION } from '../../src/lib/tiktok-rules'
 
@@ -12,7 +12,7 @@ import { CATEGORY_VERSION } from '../../src/lib/tiktok-rules'
 export default withAuth(async (request) => {
   try {
     const shopId = requireParam(request, 'shop_id')
-    const creds = await shopCredentials(shopId)
+    const creds = await credentialsFor(shopId)
 
     const result = await call<{
       products: { id: string; title: string; skus: { seller_sku: string | null }[] }[]

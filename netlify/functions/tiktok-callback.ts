@@ -1,8 +1,9 @@
 import { exchangeAuthCode } from '../lib/tiktok-auth'
 import { verifyState } from '../lib/oauth-state'
-import { saveShopTokens, getShop } from '../lib/db'
+import { saveShopTokens } from '../lib/db'
+import { hasDatabase, saveTokens } from '../lib/store'
+import { appCredentials, findShop, isConfigured } from '../lib/shops-config'
 import { call } from '../lib/tiktok-api'
-import { decryptSecret } from '../lib/crypto'
 
 /**
  * Where TikTok sends the shop owner back after they approve the app.
@@ -33,15 +34,13 @@ export default async (request: Request): Promise<Response> => {
   }
 
   try {
-    const shop = await getShop(shopId)
-    if (!shop?.app_key || !shop.app_secret_enc) {
+    if (!findShop(shopId) || !isConfigured(shopId)) {
       return redirect('/?tiktok=unconfigured')
     }
-
-    const appSecret = decryptSecret(shop.app_secret_enc)
+    const { appKey, appSecret } = appCredentials(shopId)
 
     const tokens = await exchangeAuthCode({
-      appKey: shop.app_key,
+      appKey,
       appSecret,
       // Single-use, and expires 30 minutes after issue.
       authCode: code,
@@ -52,21 +51,34 @@ export default async (request: Request): Promise<Response> => {
     const shops = await call<{ shops: { cipher: string; id: string; name: string }[] }>({
       path: '/authorization/202309/shops',
       method: 'GET',
-      appKey: shop.app_key,
+      appKey,
       appSecret,
       accessToken: tokens.access_token,
     })
 
     const cipher = shops.shops[0]?.cipher ?? null
 
-    await saveShopTokens(shopId, {
-      accessToken: tokens.access_token,
-      refreshToken: tokens.refresh_token,
-      // TikTok returns absolute epoch SECONDS, not durations.
-      accessTokenExpiresAt: new Date(tokens.access_token_expire_in * 1000),
-      refreshTokenExpiresAt: new Date(tokens.refresh_token_expire_in * 1000),
-      shopCipher: cipher,
-    })
+    // TikTok returns absolute epoch SECONDS, not durations.
+    const accessExpiry = new Date(tokens.access_token_expire_in * 1000)
+    const refreshExpiry = new Date(tokens.refresh_token_expire_in * 1000)
+
+    if (hasDatabase()) {
+      await saveShopTokens(shopId, {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        accessTokenExpiresAt: accessExpiry,
+        refreshTokenExpiresAt: refreshExpiry,
+        shopCipher: cipher,
+      })
+    } else {
+      await saveTokens(shopId, {
+        accessToken: tokens.access_token,
+        refreshToken: tokens.refresh_token,
+        accessTokenExpiresAt: accessExpiry.toISOString(),
+        refreshTokenExpiresAt: refreshExpiry.toISOString(),
+        shopCipher: cipher,
+      })
+    }
 
     return redirect('/?tiktok=connected')
   } catch (cause) {

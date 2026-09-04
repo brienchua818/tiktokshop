@@ -1,5 +1,5 @@
 import { withAuth, json, methodNotAllowed } from '../lib/http'
-import { shopCredentials } from '../lib/db'
+import { credentialsFor } from '../lib/credentials'
 import { uploadProductImage } from '../lib/tiktok-images'
 import { archiveToCloudinary } from '../lib/cloudinary'
 
@@ -24,7 +24,7 @@ export default withAuth(async (request) => {
   if (photo.size === 0) return json({ error: 'The photo was empty.' }, 400)
 
   const bytes = Buffer.from(await photo.arrayBuffer())
-  const creds = await shopCredentials(shopId)
+  const creds = await credentialsFor(shopId)
 
   // TikTok first: without its uri nothing can be listed, so a Cloudinary
   // problem must not block the operator.

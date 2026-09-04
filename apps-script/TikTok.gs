@@ -1,0 +1,207 @@
+/**
+ * TikTok Shop integration.
+ *
+ * The signing algorithm and token handling follow the same shape as
+ * Sheldon Delivery API, which has been running them in production. Two
+ * independent implementations of this signer agreed step for step, which is
+ * the best evidence available that it is right.
+ *
+ * Script Properties per shop, {P} being HZ | TM | PM:
+ *   {P}_APP_KEY, {P}_APP_SECRET, {P}_SERVICE_ID   (set by hand once)
+ *   {P}_ACCESS_TOKEN, {P}_ACCESS_EXPIRES,
+ *   {P}_REFRESH_TOKEN, {P}_REFRESH_EXPIRES,
+ *   {P}_SHOP_CIPHER                                (written by the callback)
+ */
+
+function ttCreds_(prefix) {
+  var key = prop_(prefix + '_APP_KEY');
+  var secret = prop_(prefix + '_APP_SECRET');
+  if (!key || !secret) {
+    throw new Error('No app credentials for ' + prefix +
+      '. Add ' + prefix + '_APP_KEY and ' + prefix + '_APP_SECRET in Script Properties.');
+  }
+  return { key: key, secret: secret };
+}
+
+/**
+ * Request signature.
+ *
+ * Sort the query minus sign/access_token, join as key+value with NO
+ * separators, prefix the path, append the exact body string (skipped for
+ * multipart), wrap in the app secret, HMAC-SHA256, lowercase hex.
+ */
+function ttSign_(path, query, bodyString, secret) {
+  var keys = Object.keys(query).filter(function (k) {
+    return k !== 'sign' && k !== 'access_token';
+  }).sort();
+  var input = path;
+  keys.forEach(function (k) { input += k + query[k]; });
+  if (bodyString) input += bodyString;
+  var raw = Utilities.computeHmacSha256Signature(secret + input + secret, secret);
+  return raw.map(function (b) { return ('0' + (b & 0xff).toString(16)).slice(-2); }).join('');
+}
+
+function ttQuery_(q) {
+  return Object.keys(q).map(function (k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(q[k]);
+  }).join('&');
+}
+
+/** Consent URL for one shop. */
+function ttAuthorizeUrl(prefix) {
+  var serviceId = prop_(prefix + '_SERVICE_ID');
+  if (!serviceId) throw new Error('Set ' + prefix + '_SERVICE_ID in Script Properties first.');
+  return 'https://services.tiktokshop.com/open/authorize?service_id=' +
+    encodeURIComponent(serviceId) + '&state=' + encodeURIComponent(prefix);
+}
+
+/**
+ * The OAuth callback. `state` carries which shop began the flow — with three
+ * shops, guessing would file one brand's tokens against another.
+ */
+function ttHandleAuthCallback_(e) {
+  var code = e.parameter.code;
+  var prefix = String(e.parameter.state || '').toUpperCase();
+  if (!shopById_(prefix)) {
+    return HtmlService.createHtmlOutput('<p>Unknown shop in callback state.</p>');
+  }
+  try {
+    var c = ttCreds_(prefix);
+    var url = TT_AUTH_HOST + '/api/v2/token/get?' + ttQuery_({
+      app_key: c.key, app_secret: c.secret, auth_code: code,
+      // Not the OAuth-standard 'authorization_code'. TikTok deviates here and
+      // the standard spelling fails.
+      grant_type: 'authorized_code'
+    });
+    var body = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText() || '{}');
+    if (body.code !== 0) throw new Error(body.message || 'token exchange failed');
+
+    var d = body.data;
+    var set = {};
+    set[prefix + '_ACCESS_TOKEN'] = d.access_token;
+    set[prefix + '_ACCESS_EXPIRES'] = String(d.access_token_expire_in || 0);
+    set[prefix + '_REFRESH_TOKEN'] = d.refresh_token;
+    set[prefix + '_REFRESH_EXPIRES'] = String(d.refresh_token_expire_in || 0);
+    setProps_(set);
+
+    // Ask TikTok which shops the token covers, and keep the cipher. Never
+    // hardcode it — the docs say so explicitly.
+    var shops = ttAuthorizedShops_(prefix, d.access_token);
+    if (shops.code === 0 && shops.data && shops.data.shops && shops.data.shops.length) {
+      var s = {};
+      s[prefix + '_SHOP_CIPHER'] = shops.data.shops[0].cipher;
+      s[prefix + '_SHOP_ID'] = shops.data.shops[0].id;
+      setProps_(s);
+    }
+
+    logEvent_('system', 'tiktok_authorised', shopById_(prefix).brand, prefix, 'ok');
+    return HtmlService.createHtmlOutput(
+      '<p>' + shopById_(prefix).brand + ' connected. You can close this window.</p>'
+    );
+  } catch (err) {
+    logEvent_('system', 'tiktok_authorise_failed', prefix, String(err), 'error');
+    return HtmlService.createHtmlOutput('<p>Could not connect: ' + err + '</p>');
+  }
+}
+
+/** Refresh, storing BOTH tokens — TikTok issues a new refresh token too. */
+function ttRefresh_(prefix) {
+  var c = ttCreds_(prefix);
+  var rt = prop_(prefix + '_REFRESH_TOKEN');
+  if (!rt) throw new Error(prefix + ' is not authorised yet.');
+  var url = TT_AUTH_HOST + '/api/v2/token/refresh?' + ttQuery_({
+    app_key: c.key, app_secret: c.secret, refresh_token: rt, grant_type: 'refresh_token'
+  });
+  var body = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText() || '{}');
+  if (body.code !== 0) throw new Error(prefix + ' refresh failed: ' + body.message);
+  var d = body.data, set = {};
+  set[prefix + '_ACCESS_TOKEN'] = d.access_token;
+  set[prefix + '_ACCESS_EXPIRES'] = String(d.access_token_expire_in || 0);
+  if (d.refresh_token) {
+    set[prefix + '_REFRESH_TOKEN'] = d.refresh_token;
+    set[prefix + '_REFRESH_EXPIRES'] = String(d.refresh_token_expire_in || 0);
+  }
+  setProps_(set);
+  return d.access_token;
+}
+
+/** A live access token, refreshed inside 24h of expiry. */
+function ttToken_(prefix) {
+  var tok = prop_(prefix + '_ACCESS_TOKEN');
+  var exp = Number(prop_(prefix + '_ACCESS_EXPIRES') || 0);
+  if (!tok) throw new Error(shopById_(prefix).brand + ' is not connected to TikTok yet.');
+  // Refresh early: discovering an expired token mid-livestream is the
+  // expensive case.
+  if (exp && exp - Math.floor(Date.now() / 1000) < 86400) return ttRefresh_(prefix);
+  return tok;
+}
+
+/** Signed call. `payload` is an object (JSON) or a Blob (multipart). */
+function ttFetch_(prefix, method, path, extraQuery, payload) {
+  var c = ttCreds_(prefix);
+  var token = ttToken_(prefix);
+  var cipher = prop_(prefix + '_SHOP_CIPHER');
+
+  var query = { app_key: c.key, timestamp: String(Math.floor(Date.now() / 1000)) };
+  if (cipher) query.shop_cipher = cipher;
+  Object.keys(extraQuery || {}).forEach(function (k) { query[k] = extraQuery[k]; });
+
+  var isBlob = payload && typeof payload.getBytes === 'function';
+  // Stringified ONCE, and that exact string is both signed and sent.
+  var bodyString = (payload && !isBlob) ? JSON.stringify(payload) : '';
+  query.sign = ttSign_(path, query, bodyString, c.secret);
+
+  var opts = { method: method, muteHttpExceptions: true,
+               headers: { 'x-tts-access-token': token } };
+  if (isBlob) {
+    opts.payload = { data: payload };  // multipart; body is not signed
+  } else if (bodyString) {
+    opts.contentType = 'application/json';
+    opts.payload = bodyString;
+  }
+
+  var url = TT_HOST + path + '?' + ttQuery_(query);
+  var res = UrlFetchApp.fetch(url, opts);
+  var parsed = ttParse_(res);
+
+  // Throttling is HTTP 429 or business code 36009002. At three shops we sit
+  // near one write per second, so one backoff is worth it.
+  if (res.getResponseCode() === 429 || parsed.code === 36009002) {
+    Utilities.sleep(5000);
+    parsed = ttParse_(UrlFetchApp.fetch(url, opts));
+  }
+  return parsed;
+}
+
+function ttParse_(res) {
+  var txt = res.getContentText() || '';
+  try { return JSON.parse(txt); }
+  catch (e) { return { code: -1, message: 'Non-JSON response: ' + txt.slice(0, 200) }; }
+}
+
+function ttAuthorizedShops_(prefix, accessToken) {
+  var c = ttCreds_(prefix);
+  var path = '/authorization/202309/shops';
+  var query = { app_key: c.key, timestamp: String(Math.floor(Date.now() / 1000)) };
+  query.sign = ttSign_(path, query, '', c.secret);
+  return ttParse_(UrlFetchApp.fetch(TT_HOST + path + '?' + ttQuery_(query), {
+    method: 'get', muteHttpExceptions: true,
+    headers: { 'x-tts-access-token': accessToken }
+  }));
+}
+
+/** Check every shop answers. Run by hand after setting up credentials. */
+function ttSelfTest() {
+  var out = [];
+  SHOPS.forEach(function (s) {
+    try {
+      var r = ttAuthorizedShops_(s.id, ttToken_(s.id));
+      out.push(s.brand + ': ' + (r.code === 0 ? 'OK' : 'code ' + r.code + ' ' + r.message));
+    } catch (e) {
+      out.push(s.brand + ': ' + e.message);
+    }
+  });
+  var report = out.join('\n');
+  Logger.log(report);
+  return report;
+}

@@ -50,9 +50,14 @@ export function withAuth(
   handler: (request: Request, ctx: Authed) => Promise<Response>,
 ): (request: Request) => Promise<Response> {
   return async (request: Request) => {
-    const user = currentUser(request)
-    if (!user) return unauthorised()
+    // currentUser() is INSIDE the try. It can throw — a missing SESSION_SECRET
+    // makes it throw — and an escaped throw is handled by the platform, which
+    // returns the full stack trace and server file paths to the caller. That
+    // is information disclosure, and it is precisely the class of mistake this
+    // app exists to stop making.
     try {
+      const user = currentUser(request)
+      if (!user) return unauthorised()
       return await handler(request, { user })
     } catch (error) {
       return serverError(error)

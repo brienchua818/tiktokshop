@@ -47,10 +47,33 @@ function ttQuery_(q) {
   }).join('&');
 }
 
-/** Consent URL for one shop. */
+/**
+ * Consent URL for one shop.
+ *
+ * The service_id identifies the APP the seller is being asked to authorise, and
+ * it is generated per app registration — so it is not interchangeable with the
+ * one in Sheldon Delivery API. Reusing that one would send the seller to
+ * authorise the delivery app, and TikTok would then redirect to the delivery
+ * project's callback, not this one: the tokens would land in the wrong place
+ * and this project would simply never receive them.
+ *
+ * Find it in Partner Center on the app's own page, alongside the App Key and
+ * App Secret. If the label is not obvious, open the authorisation link Partner
+ * Center generates for the app — the number after `service_id=` is it.
+ */
 function ttAuthorizeUrl(prefix) {
   var serviceId = prop_(prefix + '_SERVICE_ID');
-  if (!serviceId) throw new Error('Set ' + prefix + '_SERVICE_ID in Script Properties first.');
+  if (!serviceId) {
+    throw new Error(
+      'Set ' + prefix + '_SERVICE_ID in Script Properties first.\n\n' +
+      'It comes from THIS project\'s ' + prefix + ' app in TikTok Partner Center — ' +
+      'next to the App Key and App Secret, or as the number after "service_id=" in ' +
+      'the authorisation link Partner Center shows for that app.\n\n' +
+      'Do NOT copy it from Sheldon Delivery API. That is a different app ' +
+      'registration, and its callback points at the delivery project — the ' +
+      'tokens would never arrive here.'
+    );
+  }
   return 'https://services.tiktokshop.com/open/authorize?service_id=' +
     encodeURIComponent(serviceId) + '&state=' + encodeURIComponent(prefix);
 }

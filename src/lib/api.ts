@@ -1,84 +1,67 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
+import { call, getIdToken, ScriptError } from './script-api'
 
 /**
- * Client for our own backend.
+ * The app's backend, from the browser's point of view.
  *
- * Every call goes to /api/*, which is a Netlify Function. The browser holds no
- * TikTok token and no API secret — that separation is the whole point of the
- * rebuild, since the app it replaces shipped a working API token inside its
- * public JavaScript.
+ * Two servers sit behind this, split by what each one has that the other does
+ * not:
+ *
+ *   - **Apps Script** holds the TikTok tokens, the Sheet, the allowlist and the
+ *     Drive folders. Everything about listings, shops and people goes there.
+ *   - **Netlify Functions** hold the Anthropic and Gemini API keys, and nothing
+ *     else. Only the two AI calls go there.
+ *
+ * Both authenticate with the same Google ID token, and neither ever hands the
+ * browser a TikTok credential. That separation is the whole point of the
+ * rebuild: the app this replaces shipped a working API token inside its public
+ * JavaScript.
  */
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-    /** True when the session has expired and the user must sign in again. */
-    readonly isAuthError = false,
-    /**
-     * The machine-readable code from the response, where there is one.
-     *
-     * Some failures are not really failures and the UI has to tell them apart
-     * from the message alone otherwise — `LISTING_FULL` means offer to start a
-     * continuation listing, `LISTING_BUSY` means retry shortly, a TikTok error
-     * code means show TikTok's own words and stop.
-     */
-    readonly code?: string | number,
-    /** The whole parsed body, for codes that carry detail with them. */
-    readonly payload?: Record<string, unknown>,
-  ) {
-    super(message)
-    this.name = 'ApiError'
-  }
+/** Re-exported so callers catch one error type regardless of which server answered. */
+export { ScriptError as ApiError } from './script-api'
 
-  /** True when retrying unchanged is the right response. */
-  get isRetryable(): boolean {
-    return this.status === 0 || this.code === 'LISTING_BUSY' || this.status >= 500
-  }
+/** Netlify Functions base. Same origin, so no CORS and no preflight to worry about. */
+const FN = '/api'
 
-  /** True when the stream has outgrown this listing and needs a continuation. */
-  get isListingFull(): boolean {
-    return this.code === 'LISTING_FULL'
-  }
-}
+/**
+ * Call a Netlify AI function.
+ *
+ * The ID token goes in the body rather than a header, for symmetry with the
+ * Apps Script client — there are only two of these functions, and two
+ * different conventions would be two things to remember.
+ */
+async function fn<T>(name: string, body: Record<string, unknown>): Promise<T> {
+  const token = getIdToken()
+  if (!token) throw new ScriptError(401, 'Sign in with Google to continue.')
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   let response: Response
   try {
-    response = await fetch(`/api/${path}`, {
-      // The session is an HTTP-only cookie, so it must be sent explicitly.
-      credentials: 'same-origin',
-      ...init,
+    response = await fetch(`${FN}/${name}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...body, id_token: token }),
     })
   } catch (cause) {
-    // Distinguish "no signal" from "server said no": the first is what the
-    // offline queue exists to absorb, and the UI must not show it as an error.
-    throw new ApiError(0, `No connection: ${(cause as Error).message}`)
+    throw new ScriptError(0, `No connection: ${(cause as Error).message}`)
   }
 
   const text = await response.text()
-  let payload: unknown
+  let payload: Record<string, unknown>
   try {
-    payload = text ? JSON.parse(text) : {}
+    payload = text ? (JSON.parse(text) as Record<string, unknown>) : {}
   } catch {
-    throw new ApiError(response.status, `Unexpected response from the server: ${text.slice(0, 200)}`)
+    throw new ScriptError(response.status, `Unexpected response: ${text.slice(0, 200)}`)
   }
 
   if (!response.ok) {
-    const body = (payload ?? {}) as Record<string, unknown>
-    const detail =
-      (body.error as string | undefined) ??
-      (body.detail as string | undefined) ??
-      response.statusText
-    throw new ApiError(
+    throw new ScriptError(
       response.status,
-      detail,
-      response.status === 401,
-      body.code as string | number | undefined,
-      body,
+      (payload.error as string) ?? response.statusText,
+      payload.code as string | number | undefined,
+      payload,
     )
   }
-
   return payload as T
 }
 
@@ -99,111 +82,55 @@ export interface PushResult {
   audit?: 'pending'
   /** True when this identifier was already a variation, so nothing was sent. */
   deduplicated?: boolean
+  /** Where the photo was filed in Drive, under the creator's name. */
+  photo_url?: string
 }
 
+/** Identity plus what the allowlist says this person may do. */
+export type Me = SignedInUser & { role: string; approved: boolean; admin: boolean }
+
 export const api = {
-  me: () => request<SignedInUser>('me'),
+  /** Who the backend thinks you are, and whether you may act yet. */
+  me: () => call<Me>('whoami'),
 
-  signOut: () => request<{ ok: true }>('sign-out', { method: 'POST' }),
+  shops: () => call<Shop[]>('shops'),
 
-  shops: () => request<Shop[]>('shops'),
-
-  listings: (shopId: string) =>
-    request<Listing[]>(`listings?shop_id=${encodeURIComponent(shopId)}`),
+  listings: (shopId: string) => call<Listing[]>('listings', { body: { shop_id: shopId } }),
 
   addListing: (shopId: string, listingId: string) =>
-    request<Listing>('listings', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ shop_id: shopId, listing_id: listingId }),
-    }),
-
-  /** Variations already live on TikTok, used to continue the A1/A2 sequence. */
-  listedSkus: (shopId: string, listingId: string) =>
-    request<{ seller_sku: string | null; title: string | null }[]>(
-      `listed-skus?shop_id=${encodeURIComponent(shopId)}&listing_id=${encodeURIComponent(listingId)}`,
-    ),
+    call<Listing>('addListing', { body: { shop_id: shopId, listing_id: listingId } }),
 
   /**
-   * Upload a photo. The function forwards it to TikTok for a `uri` and
-   * archives a copy to Cloudinary.
-   */
-  uploadPhoto: async (shopId: string, photo: Blob) => {
-    const form = new FormData()
-    form.append('shop_id', shopId)
-    form.append('photo', photo, 'product.jpg')
-    return request<{
-      tiktok_image_uri: string
-      /** The same photo under use_case=ATTRIBUTE_IMAGE, for the variation gallery. */
-      tiktok_attribute_image_uri: string
-      cloudinary_url: string | null
-      ai_image_url: string
-    }>('upload-photo', { method: 'POST', body: form })
-  },
-
-  /**
-   * Photo to variant name — the name of one variation within a listing.
+   * Variations already live on TikTok, used to continue the A1/A2 sequence.
    *
-   * This is what the SKU form uses. `product_name` is the listing's own title,
-   * passed so the answer distinguishes this piece rather than repeating what
-   * the listing already says.
+   * The shop id is unused — the backend resolves the shop from the listing —
+   * but kept in the signature so callers do not have to know that, and so
+   * adding it back later is not a change at every call site.
    */
-  variantFromPhoto: (imageUrl: string, productName?: string, hint?: string) =>
-    request<{ variant_name: string; material: string | null; problems: string[] }>('ai-variant', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ image_url: imageUrl, product_name: productName, hint }),
+  listedSkus: (_shopId: string, listingId: string) =>
+    call<{ seller_sku: string | null; title: string | null }[]>('skus', {
+      body: { listing_id: listingId },
     }),
 
-  /**
-   * Photo to English product title, at least 25 characters.
-   *
-   * For naming a listing, not a SKU — a stream needs one title and many
-   * variant names.
-   */
-  titleFromPhoto: (imageUrl: string, hint?: string) =>
-    request<ExtractedFields & { material?: string; problems: string[] }>('ai-title', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ image_url: imageUrl, hint }),
+  /** Remaining product uploads for today, against the shop's daily cap. */
+  listingAllowance: (shopId: string) =>
+    call<{ used: number | null; cap: number; remaining: number | null }>('allowance', {
+      body: { shop_id: shopId },
     }),
-
-  /** Recording to fields. Accepts English, Mandarin or both; returns English. */
-  fieldsFromVoice: async (audio: Blob) => {
-    const form = new FormData()
-    form.append('audio', audio, 'note.webm')
-    return request<
-      ExtractedFields & {
-        transcript_english: string
-        unintelligible: boolean
-        /**
-         * Text fields withheld because they came back in Chinese even after a
-         * retry. Price and quantity are unaffected — digits have no language.
-         */
-        dropped: string[] | null
-      }
-    >('ai-voice', { method: 'POST', body: form })
-  },
 
   /**
    * Add one SKU to a livestream.
    *
-   * Adds a variation to `listing_id` when one is given, and creates the
-   * stream's listing when it is not — the returned `listing_id` is then what
-   * every later SKU appends to.
-   *
-   * A retry is safe either way: a create is guarded by TikTok's own
-   * `idempotency_key`, and an append is guarded by the product itself, which
-   * already knows whether this identifier is one of its variations.
+   * The photo travels with it as base64 rather than being uploaded separately.
+   * The backend files it in Drive under the creator's name AND uploads it to
+   * TikTok, and doing both in one call means there is no half-finished state to
+   * reconcile when the connection drops between two of them.
    */
   pushDraft: (body: {
     shop_id: string
     /** Omit to start the stream's listing with this SKU as its first variation. */
     listing_id?: string
-    /**
-     * The listing this one continues, when the previous filled up. The server
-     * reads that product's title and derives this listing's from it.
-     */
+    /** The listing this one continues, when the previous filled up. */
     continues_from?: string
     identifier: string
     title: string
@@ -211,22 +138,33 @@ export const api = {
     price: string
     stock: number
     weight_kg: string
-    dimensions: { length: string; width: string; height: string } | null
-    tiktok_image_uri: string
-    tiktok_attribute_image_uri?: string
+    photo_base64?: string
+    photo_mime?: string
+    tiktok_image_uri?: string
     idempotency_key: string
-    /** Accept a continuation listing after the current one filled up. */
-    start_new_listing?: boolean
-  }) =>
-    request<PushResult>('push-draft', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+  }) => call<PushResult>('pushSku', { body }),
+
+  /**
+   * Photo to variant name — the name of one variation within a listing.
+   *
+   * `productName` is the listing's own title, passed so the answer
+   * distinguishes this piece rather than repeating what the listing says.
+   */
+  variantFromPhoto: (imageBase64: string, productName?: string, hint?: string) =>
+    fn<{ variant_name: string; material: string | null; problems: string[] }>('ai-variant', {
+      image_base64: imageBase64,
+      image_mime: 'image/jpeg',
+      product_name: productName,
+      hint,
     }),
 
-  /** Remaining product uploads for today, against the shop's daily cap. */
-  listingAllowance: (shopId: string) =>
-    request<{ used: number | null; cap: number; remaining: number | null; tracked: boolean }>(
-      `allowance?shop_id=${encodeURIComponent(shopId)}`,
-    ),
+  /** Recording to fields. Accepts English, Mandarin or both; returns English. */
+  fieldsFromVoice: (audioBase64: string, audioMime: string) =>
+    fn<
+      ExtractedFields & {
+        transcript_english: string
+        unintelligible: boolean
+        dropped: string[] | null
+      }
+    >('ai-voice', { audio_base64: audioBase64, audio_mime: audioMime }),
 }

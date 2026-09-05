@@ -1,5 +1,5 @@
-import { withAuth, json, methodNotAllowed } from '../lib/http'
-import { generateTitle } from '../lib/ai-title'
+import { withIdToken, json, methodNotAllowed } from '../lib/http'
+import { generateTitle, type InlineMediaType } from '../lib/ai-title'
 import { validateTitle } from '../../src/lib/tiktok-rules'
 
 /**
@@ -9,14 +9,24 @@ import { validateTitle } from '../../src/lib/tiktok-rules'
  * hidden: if the model could not reach 25 characters even after its retry, the
  * UI needs to say so and let the operator finish it, not fail silently.
  */
-export default withAuth(async (request) => {
+export default withIdToken(async (request, _ctx, raw) => {
   if (request.method !== 'POST') return methodNotAllowed('POST')
 
-  const body = (await request.json()) as { image_url?: string; hint?: string }
-  if (!body.image_url) return json({ error: 'image_url is required.' }, 400)
+  const body = raw as {
+    image_base64?: string
+    image_mime?: InlineMediaType
+    image_url?: string
+    hint?: string
+  }
+  const image = body.image_base64
+    ? ({ kind: 'base64', mediaType: body.image_mime ?? 'image/jpeg', data: body.image_base64 } as const)
+    : body.image_url
+      ? ({ kind: 'url', url: body.image_url } as const)
+      : null
+  if (!image) return json({ error: 'A photo is required — send image_base64.' }, 400)
 
   const result = await generateTitle({
-    imageUrl: body.image_url,
+    image,
     ...(body.hint ? { hint: body.hint } : {}),
   })
 

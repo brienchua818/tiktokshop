@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api, ApiError } from '../lib/api'
+import { api } from '../lib/api'
 import { activePrefixFrom, formatIdentifier, nextIdentifier } from '../lib/identifiers'
 import {
   validateVariantName,
@@ -13,6 +13,7 @@ import {
   VALUE_NAME_MAX,
   PREFIX_MAX,
 } from '../lib/tiktok-rules'
+import { toBase64 } from '../lib/bytes'
 import { allDrafts, enqueue, removeDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import type { Draft, Listing, Shop } from '../types'
@@ -251,13 +252,10 @@ function SkuForm({
   const [variant, setVariant] = useState('')
   const [price, setPrice] = useState('')
   const [stock, setStock] = useState('')
-  const [uploaded, setUploaded] = useState<{
-    tiktok_image_uri: string
-    tiktok_attribute_image_uri: string
-    ai_image_url: string
-  } | null>(
-    null,
-  )
+  // The photo, base64-encoded once when it is taken. Encoding here rather
+  // than at push time means the cost is paid while the operator is still
+  // framing the next product, not while they are waiting for a queue to drain.
+  const [photoBase64, setPhotoBase64] = useState<string | null>(null)
   const [busy, setBusy] = useState<'' | 'uploading' | 'naming' | 'saving'>('')
   const [error, setError] = useState('')
   const objectUrl = useRef<string | null>(null)
@@ -283,31 +281,25 @@ function SkuForm({
     objectUrl.current = URL.createObjectURL(blob)
     setPhoto(blob)
     setPhotoUrl(objectUrl.current)
-    setUploaded(null)
+    setPhotoBase64(null)
     setError('')
 
-    // Upload straight away rather than at save time: it needs a connection,
-    // and finding that out while the operator is still holding the product is
-    // far better than at the end.
+    // Encoded immediately, not uploaded. Nothing leaves the device until the
+    // SKU is saved, so a photo taken with no signal is not a failure — it is
+    // just a photo, waiting with the rest of the draft.
     setBusy('uploading')
     try {
-      const result = await api.uploadPhoto(shop.shop_id, blob)
-      setUploaded(result)
+      setPhotoBase64(await toBase64(blob))
     } catch (e: unknown) {
-      // Not fatal. The photo is kept locally and the queue uploads it later.
-      setError(
-        e instanceof ApiError && e.status === 0
-          ? 'Photo saved on this device — it will upload when the connection returns.'
-          : `Photo upload failed: ${e instanceof Error ? e.message : String(e)}`,
-      )
+      setError(`Could not read the photo from this device: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setBusy('')
     }
   }
 
   async function fillFromPhoto() {
-    if (!uploaded) {
-      setError('The photo has not uploaded yet, so it cannot be read.')
+    if (!photoBase64) {
+      setError('The photo is still being read. Try again in a moment.')
       return
     }
     setBusy('naming')
@@ -315,11 +307,7 @@ function SkuForm({
     try {
       // The listing's title goes along so the answer distinguishes this piece
       // rather than repeating what the listing already says.
-      const result = await api.variantFromPhoto(
-        uploaded.ai_image_url,
-        productTitle,
-        variant || undefined,
-      )
+      const result = await api.variantFromPhoto(photoBase64, productTitle, variant || undefined)
       if (result.variant_name) setVariant(result.variant_name)
       // Said plainly rather than left for the operator to discover on save.
       if (result.problems.length > 0) setError(result.problems[0]!)
@@ -394,8 +382,8 @@ function SkuForm({
         dimensions: { ...DEFAULT_DIMENSIONS },
         include_dims_in_title: false,
         image_preview: photoUrl,
-        tiktok_image_uri: uploaded?.tiktok_image_uri ?? null,
-        tiktok_attribute_image_uri: uploaded?.tiktok_attribute_image_uri ?? null,
+        tiktok_image_uri: null,
+        tiktok_attribute_image_uri: null,
         status: 'queued',
         error: null,
         // Generated here, before any network call, so a retry after a timeout
@@ -410,7 +398,7 @@ function SkuForm({
       // constants now, so there is nothing to preserve between SKUs.
       setPhoto(null)
       setPhotoUrl(null)
-      setUploaded(null)
+      setPhotoBase64(null)
       setVariant('')
       setPrice('')
       setStock('')
@@ -443,7 +431,7 @@ function SkuForm({
           <VoiceCapture onFields={applyVoice} />
           <button
             onClick={fillFromPhoto}
-            disabled={!uploaded || busy !== ''}
+            disabled={!photoBase64 || busy !== ''}
             className="text-xs px-3 py-2 rounded-lg bg-purple-600/80 hover:bg-purple-500 disabled:opacity-40 text-white transition-colors"
           >
             {busy === 'naming' ? 'Reading image…' : 'AI suggest variant name from image'}

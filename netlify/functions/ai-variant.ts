@@ -1,5 +1,5 @@
-import { withAuth, json, methodNotAllowed } from '../lib/http'
-import { generateVariantName } from '../lib/ai-title'
+import { withIdToken, json, methodNotAllowed } from '../lib/http'
+import { generateVariantName, type InlineMediaType } from '../lib/ai-title'
 import { validateVariantName } from '../../src/lib/tiktok-rules'
 
 /**
@@ -15,18 +15,28 @@ import { validateVariantName } from '../../src/lib/tiktok-rules'
  * the model could not produce a usable one even after its retry, the UI needs
  * to say so and let the operator type it, not fail silently mid-stream.
  */
-export default withAuth(async (request) => {
+export default withIdToken(async (request, _ctx, raw) => {
   if (request.method !== 'POST') return methodNotAllowed('POST')
 
-  const body = (await request.json()) as {
+  const body = raw as {
+    image_base64?: string
+    image_mime?: InlineMediaType
     image_url?: string
     product_name?: string
     hint?: string
   }
-  if (!body.image_url) return json({ error: 'image_url is required.' }, 400)
+  // Inline bytes are the normal path: the photo lives on the device and in
+  // Apps Script, and there is no public URL for it unless Cloudinary is
+  // configured — which it does not have to be.
+  const image = body.image_base64
+    ? ({ kind: 'base64', mediaType: body.image_mime ?? 'image/jpeg', data: body.image_base64 } as const)
+    : body.image_url
+      ? ({ kind: 'url', url: body.image_url } as const)
+      : null
+  if (!image) return json({ error: 'A photo is required — send image_base64.' }, 400)
 
   const result = await generateVariantName({
-    imageUrl: body.image_url,
+    image,
     // The listing's own name, so the answer distinguishes rather than repeats.
     ...(body.product_name ? { productName: body.product_name } : {}),
     ...(body.hint ? { hint: body.hint } : {}),

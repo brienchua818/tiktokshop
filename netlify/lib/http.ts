@@ -1,4 +1,5 @@
 import { currentUser, type SessionPayload } from './session'
+import { verifyIdToken } from './google-auth'
 
 /**
  * Shared HTTP helpers for the functions.
@@ -59,6 +60,123 @@ export function withAuth(
       const user = currentUser(request)
       if (!user) return unauthorised()
       return await handler(request, { user })
+    } catch (error) {
+      return serverError(error)
+    }
+  }
+}
+
+/** Identity established from a Google ID token, rather than a session cookie. */
+export interface IdentifiedUser {
+  email: string
+  name: string
+}
+
+/**
+ * How long an allowlist answer is trusted before it is checked again.
+ *
+ * Short enough that revoking someone takes effect within a livestream, long
+ * enough that a burst of pushes does not make a round trip each time. Cached
+ * per Lambda instance, so it is at worst a few minutes stale on one warm
+ * instance.
+ */
+const APPROVAL_TTL_MS = 5 * 60_000
+const approvals = new Map<string, { approved: boolean; checked: number }>()
+
+function appsScriptUrl(): string | undefined {
+  // VITE_ prefixed so the frontend build sees it too; read under both names so
+  // renaming one does not silently break the other.
+  return process.env.APPS_SCRIPT_URL || process.env.VITE_APPS_SCRIPT_URL
+}
+
+/**
+ * Is this person allowed to act, according to the Apps Script allowlist?
+ *
+ * The allowlist lives in the Sheet and is the single authority on who may do
+ * anything — so these functions ask it rather than keeping a second copy that
+ * could drift.
+ *
+ * It matters here specifically because these are the AI endpoints. A valid
+ * Google ID token proves only that someone has a Google account, and every
+ * one of these calls costs real money: without this check, anyone who found
+ * the URL could run up the model bill.
+ */
+async function isApproved(idToken: string, email: string): Promise<boolean> {
+  const cached = approvals.get(email)
+  if (cached && Date.now() - cached.checked < APPROVAL_TTL_MS) return cached.approved
+
+  const base = appsScriptUrl()
+  if (!base) {
+    // Fails CLOSED, for the same reason the audience check does: a backend
+    // that cannot check permission must not assume it.
+    console.error('[tikshop] APPS_SCRIPT_URL is unset; cannot check the allowlist')
+    return false
+  }
+
+  try {
+    const response = await fetch(`${base}?action=whoami`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({ id_token: idToken }),
+      redirect: 'follow',
+    })
+    const payload = (await response.json()) as { approved?: boolean; _status?: number }
+    const approved = payload._status === undefined && payload.approved === true
+    approvals.set(email, { approved, checked: Date.now() })
+    return approved
+  } catch (error) {
+    console.error('[tikshop] allowlist check failed', error)
+    return false
+  }
+}
+
+/**
+ * Authenticate with a Google ID token, and require an approved account.
+ *
+ * The Apps Script backend is the app's identity authority. These functions are
+ * the AI calls, which live here only because the model API keys do — so they
+ * verify the token themselves and then defer to the allowlist for permission.
+ *
+ * The token arrives in the body rather than a header, for the same reason the
+ * Apps Script client puts it there: a header would trigger a CORS preflight,
+ * and the two clients should not diverge over something so easy to forget.
+ */
+export function withIdToken(
+  handler: (
+    request: Request,
+    ctx: { user: IdentifiedUser },
+    body: Record<string, unknown>,
+  ) => Promise<Response>,
+): (request: Request) => Promise<Response> {
+  return async (request: Request) => {
+    // Everything inside the try, including reading the body: an escaped throw
+    // is handled by the platform, which returns the stack trace and server
+    // paths to the caller.
+    try {
+      let body: Record<string, unknown> = {}
+      try {
+        const text = await request.text()
+        if (text) body = JSON.parse(text) as Record<string, unknown>
+      } catch {
+        return json({ error: 'Expected a JSON body.' }, 400)
+      }
+
+      const idToken = body.id_token as string | undefined
+      const user = await verifyIdToken(idToken)
+      if (!user || !idToken) return unauthorised()
+
+      if (!(await isApproved(idToken, user.email))) {
+        // Deliberately explicit: someone waiting for approval should know that
+        // is what is happening, not see a generic refusal.
+        return json(
+          {
+            error: `${user.email} is not approved to use this app yet. Ask Brien to approve the account.`,
+          },
+          403,
+        )
+      }
+
+      return await handler(request, { user }, body)
     } catch (error) {
       return serverError(error)
     }

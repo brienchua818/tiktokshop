@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { toBase64 } from '../lib/bytes'
 import { describeMediaError } from '../capture/camera'
 
 /**
@@ -58,7 +59,7 @@ export default function VoiceCapture({
         }
         setState('thinking')
         try {
-          const result = await api.fieldsFromVoice(audio)
+          const result = await api.fieldsFromVoice(await toBase64(audio), recorder.mimeType)
           if (result.unintelligible) {
             setError('Could not make that out. Try again, or type it in.')
           } else {

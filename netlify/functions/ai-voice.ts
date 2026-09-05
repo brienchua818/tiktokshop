@@ -1,4 +1,4 @@
-import { withAuth, json, methodNotAllowed } from '../lib/http'
+import { withIdToken, json, methodNotAllowed } from '../lib/http'
 import { extractFromVoice, normaliseVoiceResult } from '../lib/ai-voice'
 
 /**
@@ -8,18 +8,18 @@ import { extractFromVoice, normaliseVoiceResult } from '../lib/ai-voice'
  * rejects Chinese characters in product names, so this step translates rather
  * than transcribes.
  */
-export default withAuth(async (request) => {
+export default withIdToken(async (request, _ctx, raw) => {
   if (request.method !== 'POST') return methodNotAllowed('POST')
 
-  const form = await request.formData()
-  const audio = form.get('audio')
-  if (!(audio instanceof File)) return json({ error: 'No audio was uploaded.' }, 400)
-  if (audio.size === 0) return json({ error: 'The recording was empty.' }, 400)
+  // JSON with base64 rather than multipart, so the recording and the ID token
+  // travel together — a multipart body cannot carry the token without either a
+  // custom header or a second field the CORS rules would complicate.
+  const body = raw as { audio_base64?: string; audio_mime?: string }
+  if (!body.audio_base64) return json({ error: 'No audio was uploaded.' }, 400)
 
-  const base64 = Buffer.from(await audio.arrayBuffer()).toString('base64')
   // MediaRecorder gives webm on Chrome and mp4 on iOS Safari; Gemini takes
   // both, so the browser's own type is passed straight through.
-  const result = await extractFromVoice(base64, audio.type || 'audio/webm')
+  const result = await extractFromVoice(body.audio_base64, body.audio_mime || 'audio/webm')
 
   const fields = normaliseVoiceResult(result)
 

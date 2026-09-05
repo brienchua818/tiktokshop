@@ -89,3 +89,53 @@ export async function exchangeCodeForProfile(
 
   return (await profileResponse.json()) as GoogleProfile
 }
+
+/**
+ * Verify a Google ID token and return who it belongs to.
+ *
+ * Mirrors the Apps Script backend's check, because both accept the same token
+ * from the same frontend and the two must not disagree about who is signed in.
+ *
+ * Verified against Google rather than decoded locally: a JWT's payload is
+ * base64, not encryption, so reading `email` out of an unverified token proves
+ * nothing at all. `tokeninfo` validates the signature and the expiry for us.
+ */
+export async function verifyIdToken(
+  idToken: string | undefined | null,
+): Promise<{ email: string; name: string } | null> {
+  if (!idToken) return null
+
+  // Fails CLOSED. If the deployment cannot say which client it expects, it
+  // must refuse everyone — otherwise a Google ID token minted against any
+  // other app on the internet would be accepted as a signed-in user.
+  const expected = process.env.GOOGLE_CLIENT_ID
+  if (!expected) {
+    console.error('[tikshop] GOOGLE_CLIENT_ID is unset; refusing every token')
+    return null
+  }
+
+  let response: Response
+  try {
+    response = await fetch(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`,
+    )
+  } catch (error) {
+    console.error('[tikshop] could not reach Google to verify a token', error)
+    return null
+  }
+  // Google answers 400 for an expired or malformed token, so this covers
+  // expiry without a separate clock comparison.
+  if (!response.ok) return null
+
+  let info: { aud?: string; email?: string; email_verified?: string; name?: string }
+  try {
+    info = (await response.json()) as typeof info
+  } catch {
+    return null
+  }
+
+  if (info.aud !== expected) return null
+  if (!info.email || info.email_verified === 'false') return null
+
+  return { email: info.email.toLowerCase(), name: info.name || info.email }
+}

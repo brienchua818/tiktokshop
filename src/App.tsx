@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { api, ApiError } from './lib/api'
+import { api } from './lib/api'
+import { getIdToken, setIdToken } from './lib/script-api'
+import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { allDrafts, pendingCount } from './offline/queue'
 import type { Shop, SignedInUser } from './types'
@@ -15,13 +17,24 @@ export default function App() {
   const [pending, setPending] = useState(0)
   const online = useOnlineStatus()
 
-  // The session lives in an HTTP-only cookie the browser cannot read, so the
-  // only way to know whether we are signed in is to ask the server.
+  // A token kept from an earlier visit may still be good. Ask the backend
+  // rather than trusting it: only the backend knows whether the account is
+  // still approved, and an unapproved one must land on the sign-in screen with
+  // its explanation, not inside the app with everything failing.
   useEffect(() => {
+    if (!getIdToken()) {
+      setCheckingSession(false)
+      return
+    }
     api
       .me()
-      .then(setUser)
-      .catch(() => setUser(null))
+      .then((me) => setUser(me.approved ? me : null))
+      .catch(() => {
+        // Expired or revoked. Drop it, rather than retrying with a token that
+        // will fail every call from here on.
+        setIdToken(null)
+        setUser(null)
+      })
       .finally(() => setCheckingSession(false))
   }, [])
 
@@ -62,12 +75,11 @@ export default function App() {
   }
 
   async function signOut() {
-    try {
-      await api.signOut()
-    } catch (error) {
-      // Signing out locally still matters even if the call fails.
-      if (!(error instanceof ApiError)) throw error
-    }
+    // Nothing to revoke server-side: the backend holds no session, only a
+    // token we chose to send it. Dropping the token IS signing out, and
+    // forgetting the account stops Google silently signing us straight back in.
+    setIdToken(null)
+    await forgetAccount()
     setUser(null)
   }
 

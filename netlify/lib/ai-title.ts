@@ -119,8 +119,7 @@ function client(): Anthropic {
 }
 
 export interface TitleRequest {
-  /** Publicly reachable image URL — a small Cloudinary derivative, not the full photo. */
-  imageUrl: string
+  image: ImageSource
   /** Anything the operator already typed or said, to steer the title. */
   hint?: string
 }
@@ -146,9 +145,35 @@ export async function generateTitle(request: TitleRequest): Promise<TitleResult>
   return retry
 }
 
+/**
+ * The photo, either as a URL Claude can fetch or as inline bytes.
+ *
+ * Inline is the normal path now: the Apps Script backend holds the photo and
+ * there is no public URL for it unless Cloudinary is configured, which it is
+ * not required to be.
+ */
+export type ImageSource =
+  | { kind: 'url'; url: string }
+  | { kind: 'base64'; mediaType: InlineMediaType; data: string }
+
+/**
+ * The image types Claude accepts inline.
+ *
+ * Narrowed to a literal union rather than `string` because the SDK's own type
+ * is a union — and the app only ever produces JPEG anyway, since the camera
+ * encodes to it deliberately to sidestep iPhone HEIC.
+ */
+export type InlineMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
+
+/** Claude's own shape for whichever source was given. */
+function imageBlock(image: ImageSource): Anthropic.ImageBlockParam {
+  return image.kind === 'url'
+    ? { type: 'image', source: { type: 'url', url: image.url } }
+    : { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.data } }
+}
+
 export interface VariantRequest {
-  /** Publicly reachable image URL — a small Cloudinary derivative, not the full photo. */
-  imageUrl: string
+  image: ImageSource
   /**
    * The listing's product title.
    *
@@ -201,10 +226,7 @@ Write a corrected name. If it was too long, cut adjectives before you cut distin
     messages: [
       {
         role: 'user',
-        content: [
-          { type: 'image', source: { type: 'url', url: request.imageUrl } },
-          { type: 'text', text: instruction },
-        ],
+        content: [imageBlock(request.image), { type: 'text', text: instruction }],
       },
     ],
     output_config: { format: zodOutputFormat(VariantSchema) },
@@ -238,10 +260,7 @@ Write a corrected title. If it was too short, add genuine detail about material,
     messages: [
       {
         role: 'user',
-        content: [
-          { type: 'image', source: { type: 'url', url: request.imageUrl } },
-          { type: 'text', text: instruction },
-        ],
+        content: [imageBlock(request.image), { type: 'text', text: instruction }],
       },
     ],
     output_config: { format: zodOutputFormat(TitleSchema) },

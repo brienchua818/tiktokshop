@@ -46,10 +46,16 @@ function verifyIdToken_(idToken) {
   var info;
   try { info = JSON.parse(res.getContentText()); } catch (e) { return null; }
 
-  // The token must have been issued for our own client, or any Google ID
-  // token from any app would be accepted.
+  // The token must have been issued for OUR client.
+  //
+  // This check fails CLOSED. It used to be skipped when GOOGLE_CLIENT_ID was
+  // unset, which meant a half-configured deployment accepted a Google ID token
+  // from any app on the internet — anyone could mint one against their own
+  // client and be treated as a signed-in user. A backend that cannot say who
+  // it is must refuse everyone, not everyone's token.
   var expectedClient = prop_('GOOGLE_CLIENT_ID');
-  if (expectedClient && info.aud !== expectedClient) return null;
+  if (!expectedClient) return null;
+  if (info.aud !== expectedClient) return null;
   if (!info.email || info.email_verified === 'false') return null;
 
   return { email: String(info.email).toLowerCase(), name: info.name || info.email };

@@ -1,37 +1,85 @@
-import { useEffect, useState } from 'react'
-import { api } from '../lib/api'
-import type { SignedInUser } from '../types'
+import { useEffect, useRef, useState } from 'react'
+import { api, ApiError, type Me } from '../lib/api'
+import { setIdToken } from '../lib/script-api'
+import {
+  isConfigured,
+  onToken,
+  promptSilently,
+  renderSignInButton,
+  SignInUnavailable,
+} from './google'
 
 /**
  * Sign-in.
  *
- * Google Workspace, restricted to sheldonglobal.com. There is deliberately no
- * password field: the app this replaces compared a hardcoded password in the
- * browser and set a localStorage flag, so anyone could read the password out
- * of the public bundle or skip the check entirely. Access here is granted and
- * revoked by adding or removing the Workspace user.
+ * Any Google account may sign in. Signing in is **not** permission to act — a
+ * first-time account lands on the allowlist as `pending` and can do nothing
+ * until it is approved. Those are two separate things and this screen says so,
+ * because "signed in but nothing works" is otherwise indistinguishable from
+ * broken.
  *
- * The redirect is handled server-side, so this component only starts the flow.
+ * There is deliberately no password field. The app this replaces compared a
+ * hardcoded password in the browser and set a localStorage flag, so anyone
+ * could read the password out of the public bundle or skip the check entirely.
  */
-export default function SignIn({ onSignedIn }: { onSignedIn: (user: SignedInUser) => void }) {
+export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void }) {
   const [error, setError] = useState('')
+  const [pendingApproval, setPendingApproval] = useState('')
+  const [busy, setBusy] = useState(false)
+  const buttonRef = useRef<HTMLDivElement>(null)
 
-  // Coming back from Google, the function has already set the session cookie
-  // and redirected here with ?signed_in=1. Ask who we are and get on with it.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    if (params.get('error')) {
+    if (!isConfigured()) {
       setError(
-        params.get('error') === 'domain'
-          ? 'That account is not a sheldonglobal.com account.'
-          : 'Sign-in did not complete. Try again.',
+        'Sign-in is not configured on this deployment. Not something you can fix from here — tell Brien.',
       )
-      window.history.replaceState({}, '', window.location.pathname)
       return
     }
-    if (params.get('signed_in')) {
-      window.history.replaceState({}, '', window.location.pathname)
-      api.me().then(onSignedIn).catch(() => setError('Sign-in did not complete. Try again.'))
+
+    // One listener for both routes in: the button, and the silent prompt that
+    // signs a returning account straight back in.
+    const stop = onToken((token) => {
+      setIdToken(token)
+      setBusy(true)
+      setError('')
+      api
+        .me()
+        .then((me) => {
+          if (me.approved) {
+            onSignedIn(me)
+            return
+          }
+          // Signed in, but the allowlist has not cleared them. The token is
+          // kept — it is perfectly valid — and the screen says exactly what has
+          // to happen next.
+          setPendingApproval(me.email)
+        })
+        .catch((e: unknown) => {
+          setIdToken(null)
+          setError(
+            e instanceof ApiError
+              ? e.message
+              : 'Signed in with Google, but the app could not confirm it. Try again.',
+          )
+        })
+        .finally(() => setBusy(false))
+    })
+
+    let cancelled = false
+    void (async () => {
+      try {
+        if (buttonRef.current) await renderSignInButton(buttonRef.current)
+        if (!cancelled) await promptSilently()
+      } catch (e: unknown) {
+        if (!cancelled) {
+          setError(e instanceof SignInUnavailable ? e.message : 'Could not load Google sign-in.')
+        }
+      }
+    })()
+
+    return () => {
+      cancelled = true
+      stop()
     }
   }, [onSignedIn])
 
@@ -40,7 +88,9 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: SignedInUser
       <div className="w-full max-w-sm bg-surface border border-white/10 rounded-2xl p-8 space-y-6">
         <div className="text-center space-y-1">
           <p className="text-accent font-bold text-2xl tracking-tight">TikShop</p>
-          <p className="text-xs text-gray-500">Live listing for HOUZE, Table Matters and Painting Matters</p>
+          <p className="text-xs text-gray-500">
+            Live listing for HOUZE, Table Matters and Painting Matters
+          </p>
         </div>
 
         {error && (
@@ -49,41 +99,32 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: SignedInUser
           </p>
         )}
 
-        <a
-          href="/api/auth-google"
-          className="flex items-center justify-center gap-2 w-full bg-white text-gray-900 text-sm font-medium py-2.5 rounded-lg hover:bg-gray-100 transition-colors"
-        >
-          <GoogleMark />
-          Sign in with Google
-        </a>
+        {/* Not an error, and styled so it does not read as one: the account is
+            fine, it simply has not been let in yet. */}
+        {pendingApproval && (
+          <div className="text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2.5 space-y-1">
+            <p className="text-amber-200">
+              Signed in as <span className="font-medium">{pendingApproval}</span>, waiting for
+              approval.
+            </p>
+            <p className="text-amber-200/70">
+              Ask Brien to set this account to <span className="font-mono">lister</span> in the
+              Users tab. Nothing else is needed.
+            </p>
+          </div>
+        )}
+
+        {/* Google's own button. The credential only reaches us through their
+            flow, so drawing our own would misrepresent what is happening. */}
+        <div ref={buttonRef} className="flex justify-center min-h-11" aria-busy={busy} />
+
+        {busy && <p className="text-xs text-gray-500 text-center">Checking your access…</p>}
 
         <p className="text-xs text-gray-600 text-center">
-          Use your @sheldonglobal.com account.
+          Any Google account can sign in. Being approved to list is separate, and is how access is
+          granted and revoked.
         </p>
       </div>
     </div>
-  )
-}
-
-function GoogleMark() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 48 48" aria-hidden="true">
-      <path
-        fill="#EA4335"
-        d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.6 30.2.5 24 .5 14.6.5 6.5 5.8 2.6 13.6l7.8 6c1.9-5.6 7.2-10.1 13.6-10.1z"
-      />
-      <path
-        fill="#4285F4"
-        d="M46.5 24c0-1.6-.1-2.8-.4-4H24v8.5h12.8c-.3 2.1-1.6 5.2-4.6 7.3l7.6 5.9C44.3 37.5 46.5 31.4 46.5 24z"
-      />
-      <path
-        fill="#FBBC05"
-        d="M10.4 28.4c-.5-1.4-.8-2.9-.8-4.4s.3-3 .8-4.4l-7.8-6C1 16.6 0 20.2 0 24s1 7.4 2.6 10.4l7.8-6z"
-      />
-      <path
-        fill="#34A853"
-        d="M24 47.5c6.2 0 11.4-2 15.2-5.6l-7.6-5.9c-2 1.4-4.7 2.4-7.6 2.4-6.4 0-11.7-4.5-13.6-10.1l-7.8 6C6.5 42.2 14.6 47.5 24 47.5z"
-      />
-    </svg>
   )
 }

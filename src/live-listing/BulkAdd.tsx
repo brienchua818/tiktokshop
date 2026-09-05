@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError } from '../lib/api'
 import { toSquareJpeg } from '../capture/camera'
 import { formatIdentifier, parseIdentifier } from '../lib/identifiers'
 import {
@@ -117,16 +116,9 @@ export default function BulkAdd({
 
       // Upload each photo as we go rather than all at once: on a factory
       // connection a dozen parallel uploads is how you get a dozen timeouts.
-      let imageUri: string | null = null
-      let attributeImageUri: string | null = null
-      try {
-        const uploaded = await api.uploadPhoto(shop.shop_id, photo.blob)
-        imageUri = uploaded.tiktok_image_uri
-        attributeImageUri = uploaded.tiktok_attribute_image_uri
-      } catch (e: unknown) {
-        // Not fatal — the photo is kept locally and the queue retries it.
-        if (!(e instanceof ApiError)) throw e
-      }
+      // Nothing is uploaded here. The blob goes to IndexedDB with the draft and
+      // is encoded at push time, so a gallery added with no signal is not a
+      // failure — it is just work waiting.
 
       const draft: Draft = {
         draft_id: crypto.randomUUID(),
@@ -146,8 +138,8 @@ export default function BulkAdd({
         dimensions: { ...DEFAULT_DIMENSIONS },
         include_dims_in_title: false,
         image_preview: photo.url,
-        tiktok_image_uri: imageUri,
-        tiktok_attribute_image_uri: attributeImageUri,
+        tiktok_image_uri: null,
+        tiktok_attribute_image_uri: null,
         status: 'queued',
         error: null,
         idempotency_key: crypto.randomUUID(),

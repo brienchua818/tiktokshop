@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../lib/api'
+import { toBase64 } from '../lib/bytes'
 import { afterAttempt, backfillListingId, allDrafts, MAX_AUTO_ATTEMPTS, nextBatch, getPhoto, needsAttention, updateDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
@@ -208,21 +209,13 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
   await updateDraft(draft.draft_id, { status: 'uploading' })
 
   try {
-    let imageUri = draft.tiktok_image_uri
-    let attributeImageUri = draft.tiktok_attribute_image_uri
-
-    // The photo may not have uploaded yet — it was taken with no signal.
-    if (!imageUri || !attributeImageUri) {
-      const photo = await getPhoto(draft.draft_id)
-      if (!photo) throw new Error('The photo for this SKU is missing from this device.')
-      const uploaded = await api.uploadPhoto(draft.shop_id, photo)
-      imageUri = uploaded.tiktok_image_uri
-      attributeImageUri = uploaded.tiktok_attribute_image_uri
-      await updateDraft(draft.draft_id, {
-        tiktok_image_uri: imageUri,
-        tiktok_attribute_image_uri: attributeImageUri,
-      })
-    }
+    // The photo lives in IndexedDB beside the draft and is encoded here, at
+    // push time. One call carries the SKU and its photo together, so there is
+    // no half-finished state to reconcile when the connection drops between
+    // an upload and a push — which on factory Wi-Fi is exactly when it drops.
+    const photo = await getPhoto(draft.draft_id)
+    if (!photo) throw new Error('The photo for this SKU is missing from this device.')
+    const photoBase64 = await toBase64(photo)
 
     const result = await api.pushDraft({
       shop_id: draft.shop_id,
@@ -235,9 +228,8 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
       price: draft.price,
       stock: draft.stock,
       weight_kg: draft.weight_kg,
-      dimensions: draft.dimensions,
-      tiktok_image_uri: imageUri,
-      tiktok_attribute_image_uri: attributeImageUri,
+      photo_base64: photoBase64,
+      photo_mime: photo.type || 'image/jpeg',
       idempotency_key: draft.idempotency_key,
     })
 

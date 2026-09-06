@@ -16,8 +16,8 @@ HEADERS[TAB_LISTINGS] = ['listing_id', 'shop_id', 'brand', 'product_name', 'supp
 HEADERS[TAB_SKUS] = [
   'sku_id', 'listing_id', 'shop_id', 'brand', 'identifier', 'title', 'variant',
   'price', 'stock', 'weight_kg', 'dims_cm', 'tiktok_image_uri', 'photo_url',
-  'category_id', 'status', 'error', 'tiktok_product_id', 'idempotency_key',
-  'created_at', 'pushed_at', 'created_by'
+  'category_id', 'status', 'error', 'tiktok_product_id', 'tiktok_sku_id',
+  'idempotency_key', 'created_at', 'pushed_at', 'created_by'
 ];
 HEADERS[TAB_ORDERS] = [
   'order_id', 'shop_id', 'brand', 'status', 'created_at_sgt', 'created_epoch',

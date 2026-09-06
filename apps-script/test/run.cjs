@@ -97,7 +97,7 @@ ${src}
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     verifyIdToken_, shortClient_, prop_, SHOPS,
     cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
-    sgtEpoch_, summariseItems_, listingOrders_,
+    sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
@@ -850,6 +850,97 @@ check('variations group on sku_id, not on a name that can be blank', () => {
     byKey[key] = (byKey[key] || 0) + 1
   })
   eq(Object.keys(byKey).length, 2, 'two sku ids must stay two rows')
+})
+
+// ---------------------------------------------------------------------------
+// Carrying an under-review variation forward.
+//
+// This is the path that lost a real SKU. B1 was pushed; eighteen minutes later
+// B2 went up, TikTok's read did not include B1 because it was still under
+// review, and the append rebuilt the product from that read — deleting it.
+// TikTok removes any SKU whose id is absent from a partial_edit payload, so
+// omitting one is not a no-op.
+// ---------------------------------------------------------------------------
+console.log('\nbuildAppendPayload_ — variations TikTok is not returning')
+
+const keep = (o) =>
+  Object.assign(
+    { id: 'tt-b1', sellerSku: 'B1', valueName: 'B1 Blue Mug',
+      skuImgUri: 'img-b1', priceAmount: '199', quantity: 1 },
+    o,
+  )
+
+check('a carried-forward variation is in the payload, by its TikTok id', () => {
+  const p = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition, [keep()])
+  const ids = p.skus.map((s) => s.id)
+  if (!ids.includes('tt-b1')) throw new Error('B1 was dropped: ' + JSON.stringify(ids))
+})
+
+check('it keeps its price, stock and photo', () => {
+  const p = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition, [keep()])
+  const b1 = p.skus.find((s) => s.id === 'tt-b1')
+  eq(b1.price.amount, '199')
+  eq(b1.inventory[0].quantity, 1)
+  // An image is mandatory for every value of the primary attribute, so losing
+  // it fails the whole edit rather than just that row.
+  eq(b1.sales_attributes[0].sku_img.uri, 'img-b1')
+})
+
+check('the new variation is still added alongside it', () => {
+  const p = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition, [keep()])
+  eq(p.skus.length, 3, 'existing + carried forward + new')
+  const added = p.skus.filter((s) => !s.id)
+  eq(added.length, 1, 'exactly one SKU has no id')
+  eq(added[0].seller_sku, addition.identifier)
+})
+
+check('nothing existing loses its id', () => {
+  const p = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition, [keep()])
+  const existing = p.skus.find((s) => s.seller_sku === 'A1')
+  eq(existing.id, 'x')
+})
+
+check('with nothing to carry forward the payload is unchanged', () => {
+  const withNone = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition, [])
+  const withUndef = gs.buildAppendPayload_({ productId: 'p1', skus: [sku()] }, addition)
+  eq(withNone.skus.length, 2)
+  eq(JSON.stringify(withNone), JSON.stringify(withUndef), 'omitting the argument must not differ')
+})
+
+check('a carried-forward variation counts against the 100 cap', () => {
+  // Otherwise the cap is measured against a number smaller than what is being
+  // sent, and TikTok refuses the whole edit at 101.
+  const many = []
+  for (let i = 0; i < 99; i++) many.push(sku({ id: 'id' + i, sellerSku: 'A' + i, valueName: 'A' + i }))
+  throws(
+    () => gs.buildAppendPayload_({ productId: 'p1', skus: many }, addition, [keep()]),
+    /LISTING_FULL/,
+  )
+})
+
+check('one already visible is not carried forward twice', () => {
+  // Guards the case where TikTok starts returning it between the read and the
+  // decision to restore: two SKUs with the same value name fail the edit.
+  const p = gs.buildAppendPayload_(
+    { productId: 'p1', skus: [sku(), sku({ id: 'tt-b1', sellerSku: 'B1', valueName: 'B1 Blue Mug' })] },
+    addition,
+    [keep()],
+  )
+  eq(p.skus.filter((s) => s.id === 'tt-b1').length, 1)
+})
+
+check('a repeated identifier is still refused', () => {
+  // The duplicate check must see carried-forward value names too, or an
+  // identifier reused after a restore slips through.
+  throws(
+    () =>
+      gs.buildAppendPayload_(
+        { productId: 'p1', skus: [sku()] },
+        { identifier: 'B1', variantName: 'Blue Mug', price: '9', stock: 1, imageUri: 'i' },
+        [keep()],
+      ),
+    /already on this listing/,
+  )
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -102,8 +102,15 @@ export interface LiveVariant {
   variant: string
   price: string
   status: string
-  /** False means the push never landed, whatever this device recorded. */
+  /** False means TikTok is not returning it — see `under_review` before alarming. */
   on_tiktok: boolean
+  /**
+   * TikTok issued an id for it but is not returning it yet.
+   *
+   * Get Product omits a variation under review, so absence is not proof of
+   * loss. Only a variation with no TikTok id is genuinely unaccounted for.
+   */
+  under_review: boolean
   stock_set: number
   /** Null when TikTok has no such variation. */
   stock_available: number | null

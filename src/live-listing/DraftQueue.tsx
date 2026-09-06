@@ -395,8 +395,17 @@ function ReviewBanner({ live }: { live: ListingState }) {
 
 function StockLine({ v }: { v: LiveVariant }) {
   if (!v.on_tiktok) {
-    // The device thinks this was sent and TikTok has never heard of it. Worth
-    // saying loudly: it is the one failure the queue cannot detect by itself.
+    // Absence is not loss. TikTok omits a variation still under review, so a
+    // SKU it has issued an id for is waiting, not gone — B5 read as missing
+    // and went live minutes later. Calling that "retry this SKU" invites a
+    // second copy of something already on its way.
+    if (v.under_review) {
+      return (
+        <p className="text-xs text-amber-400/90 mt-0.5">
+          Under review — not shown by TikTok yet. Nothing to do.
+        </p>
+      )
+    }
     return <p className="text-xs text-red-400 mt-0.5">Not on TikTok — retry this SKU.</p>
   }
   return (
@@ -428,7 +437,13 @@ function StatusBadge({
   productStatus: string | null
 }) {
   if (draft.status === 'pushed') {
-    if (live && !live.on_tiktok) return <span className="text-xs text-red-400">Missing</span>
+    if (live && !live.on_tiktok) {
+      return live.under_review ? (
+        <span className="text-xs text-amber-400">Reviewing</span>
+      ) : (
+        <span className="text-xs text-red-400">Missing</span>
+      )
+    }
     // Buyable requires two things: TikTok has the variation, and the product
     // it belongs to has cleared review. A variation can exist while the
     // product is still PENDING, and it is not purchasable then.

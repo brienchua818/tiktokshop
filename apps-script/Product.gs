@@ -249,6 +249,16 @@ function listingState_(listingId) {
       price: String(r.price || ''),
       status: String(r.status || ''),
       on_tiktok: Boolean(match),
+      /**
+       * TikTok acknowledged this variation, but is not returning it.
+       *
+       * Get Product omits a variation still under review, so absence alone
+       * does not mean gone — B5 read as missing and went live shortly after.
+       * Having TikTok's own sku id is the difference: it was issued when the
+       * variation was created, so it proves TikTok took it. Without one, the
+       * variation really is unaccounted for.
+       */
+      under_review: !match && Boolean(String(r.tiktok_sku_id || '')),
       stock_set: set,
       stock_available: available,
       // Never negative: someone raising stock in Seller Center would otherwise
@@ -288,7 +298,7 @@ function listingState_(listingId) {
  * Throws 'LISTING_FULL' when the ceiling is reached, so the caller can offer a
  * continuation listing rather than reporting a failure.
  */
-function buildAppendPayload_(snapshot, addition) {
+function buildAppendPayload_(snapshot, addition, alsoKeep) {
   if (!snapshot.skus.length) {
     throw new Error('This listing has no variations to extend. TikTok requires at least one ' +
       'sales attribute on a product, so the first variation has to be created with the product.');
@@ -307,7 +317,8 @@ function buildAppendPayload_(snapshot, addition) {
         'Editing this listing would drop their stock, so nothing was sent.');
     }
   }
-  if (snapshot.skus.length + 1 > MAX_SKUS_PER_PRODUCT) {
+  // Counts what will actually be on the product, restored ones included.
+  if (snapshot.skus.length + (alsoKeep || []).length + 1 > MAX_SKUS_PER_PRODUCT) {
     throw new Error('LISTING_FULL');
   }
 
@@ -343,6 +354,35 @@ function buildAppendPayload_(snapshot, addition) {
       inventory: [{ warehouse_id: sku.warehouseId, quantity: sku.quantity }],
       sales_attributes: [attribute]
     };
+  });
+
+  /**
+   * Restate the ones TikTok did not return, by id.
+   *
+   * Placed before the duplicate check on purpose: these occupy their value
+   * names, so a repeated identifier is still caught.
+   */
+  (alsoKeep || []).forEach(function (keep) {
+    if (!keep.id) return;
+    if (taken[String(keep.valueName).toLowerCase()]) return;
+    taken[String(keep.valueName).toLowerCase()] = true;
+
+    var attribute = first.attributeId
+      ? { id: first.attributeId }
+      : { name: first.attributeName || VARIANT_ATTRIBUTE_NAME };
+    // Its value_id was never read back — the variation was invisible — so the
+    // name is sent. TikTok matches an existing value by name rather than
+    // creating a second one with the same name.
+    attribute.value_name = keep.valueName;
+    if (keep.skuImgUri) attribute.sku_img = { uri: keep.skuImgUri };
+
+    skus.push({
+      id: keep.id,
+      seller_sku: keep.sellerSku || undefined,
+      price: { amount: keep.priceAmount, currency: CURRENCY },
+      inventory: [{ warehouse_id: warehouseId, quantity: keep.quantity }],
+      sales_attributes: [attribute]
+    });
   });
 
   // "No duplicates allowed under the same attribute." The identifier makes
@@ -606,9 +646,59 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
     }
   }
 
+  /**
+   * Variations we listed that TikTok is not returning yet.
+   *
+   * A variation still under review is absent from Get Product. Since the
+   * append payload is built from that read, adding the next variation
+   * REBUILDS the product without it — and TikTok deletes any SKU whose id is
+   * not in the payload. That is what happened to B1: it was pushed, it was
+   * under review eighteen minutes later when B2 went up, and B2's edit wrote
+   * the product back without it.
+   *
+   * Nothing detected it. The guard compares the payload against the snapshot,
+   * and a variation missing from the snapshot is missing from both sides.
+   *
+   * So they are carried forward by TikTok's own sku id, which is what says
+   * "keep this one". Everything needed to restate them is already recorded at
+   * push time — the id, the price, the stock, the image and the value name.
+   *
+   * If TikTok refuses the reconstruction the whole edit fails and nothing is
+   * written, which is the safe direction: a refused append loses a minute, and
+   * a silent one loses a SKU nobody notices until the factory is paid.
+   */
+  var seen = {};
+  snapshot.skus.forEach(function (sku) {
+    if (sku.sellerSku) seen[String(sku.sellerSku)] = true;
+  });
+  var alsoKeep = listSkus_(listingId).filter(function (r) {
+    return String(r.status) === 'pushed' &&
+      String(r.identifier) !== addition.identifier &&
+      !seen[String(r.identifier)] &&
+      // Without TikTok's id there is nothing to keep it BY, and sending it
+      // without one would create a duplicate rather than preserve the
+      // original. Rows from before this was recorded fall here.
+      String(r.tiktok_sku_id || '');
+  }).map(function (r) {
+    return {
+      id: String(r.tiktok_sku_id),
+      sellerSku: String(r.identifier),
+      valueName: String(r.variant || ''),
+      skuImgUri: String(r.tiktok_image_uri || ''),
+      priceAmount: String(r.price),
+      quantity: Number(r.stock || 0)
+    };
+  });
+
+  if (alsoKeep.length) {
+    logEvent_(user.name, 'variations_preserved', shop.brand,
+      'Carried forward while under review, adding ' + addition.identifier + ': ' +
+      alsoKeep.map(function (k) { return k.sellerSku; }).join(', '), 'ok');
+  }
+
   var payload;
   try {
-    payload = buildAppendPayload_(snapshot, addition);
+    payload = buildAppendPayload_(snapshot, addition, alsoKeep);
   } catch (e) {
     if (String(e.message) === 'LISTING_FULL') {
       // Not a failure — the run has outgrown one product. Say so in a way the
@@ -658,25 +748,12 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
    * worse than a warning that names the SKU. The count is our own arithmetic
    * either way, which is why it agreed with itself while being wrong.
    */
-  var ours = {};
-  listSkus_(listingId).forEach(function (r) {
-    if (String(r.status) === 'pushed') ours[String(r.identifier)] = true;
-  });
-  var onTikTok = {};
-  snapshot.skus.forEach(function (sku) {
-    if (sku.sellerSku) onTikTok[String(sku.sellerSku)] = true;
-  });
-  var missing = Object.keys(ours).filter(function (id) {
-    return id !== addition.identifier && !onTikTok[id];
-  });
-  if (missing.length) {
-    logEvent_(user.name, 'variations_missing', shop.brand,
-      'Pushed but not on TikTok when ' + addition.identifier + ' was added: ' +
-      missing.join(', '), 'warn');
-  }
 
-  var variationsNow = snapshot.skus.length + 1;
-  recordSku_(skuRow_(body, user, prefix, shop, addition, photoUrl, '', snapshot.productId));
+  // Counts the restored ones too, or the number shrinks every time one is
+  // carried forward — which is how the old count agreed with itself while
+  // being wrong.
+  var variationsNow = snapshot.skus.length + alsoKeep.length + 1;
+  recordSku_(skuRow_(body, user, prefix, shop, addition, photoUrl, '', snapshot.productId, skuId));
   logEvent_(user.name, 'add_variation', shop.brand,
     addition.identifier + ' -> ' + listingId + ' (' + variationsNow + '/' +
     MAX_SKUS_PER_PRODUCT + ')', 'ok');
@@ -686,9 +763,6 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
     listing_id: listingId, product_id: snapshot.productId, sku_id: skuId,
     variant_name: variantValueName_(addition.identifier, addition.variantName),
     variations_now: variationsNow,
-    // Named so the app can say it at the moment it happens, rather than
-    // leaving it to be discovered by a status check later.
-    variations_missing: missing,
     remaining: MAX_SKUS_PER_PRODUCT - variationsNow,
     // Adding a variation resends the product for review. The existing
     // variations stay live and buyable throughout — "If the audit passes, v2 is
@@ -778,7 +852,8 @@ function startNewListing_(body, user, prefix, shop, addition, imageUri, attribut
 }
 
 /** One SKU row for the Sheet, so the two success paths cannot drift. */
-function skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, productId) {
+function skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, productId,
+                 tiktokSkuId) {
   var now = new Date().toISOString();
   return {
     sku_id: Utilities.getUuid(),
@@ -791,6 +866,15 @@ function skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, produ
     tiktok_image_uri: addition.imageUri, photo_url: photoUrl,
     category_id: categoryId || '',
     status: 'pushed', error: '', tiktok_product_id: productId,
+    /**
+     * TikTok's own id for this variation.
+     *
+     * The one field that makes a variation recoverable. It was being computed
+     * from the edit response and then discarded, which left nothing able to
+     * say "keep this one" — and a variation TikTok does not return cannot be
+     * kept by name.
+     */
+    tiktok_sku_id: tiktokSkuId || '',
     idempotency_key: body.idempotency_key || '',
     created_at: now, pushed_at: now, created_by: user.name
   };

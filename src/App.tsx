@@ -9,6 +9,7 @@ import type { Shop, SignedInUser } from './types'
 import SignIn from './auth/SignIn'
 import LiveListing from './live-listing/LiveListing'
 import Orders from './orders/Orders'
+import { useAppUpdate } from './lib/pwa'
 
 export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null)
@@ -150,6 +151,8 @@ export default function App() {
         </nav>
       </header>
 
+      <UpdateBar />
+
       <main className="flex-1 p-3 max-w-5xl mx-auto w-full">
         {!shop && shops.length === 0 ? (
           <p className="text-sm text-gray-500 py-10 text-center">
@@ -168,6 +171,29 @@ export default function App() {
         )}
       </main>
     </div>
+  )
+}
+
+/**
+ * "A new version is ready" — shown, never forced.
+ *
+ * Reloading on its own would lose a half-typed SKU, and mid-broadcast that is
+ * worse than running the previous build for another minute. So it waits to be
+ * tapped, and stays put until it is: a bar that dismisses itself is a bar
+ * nobody reads.
+ */
+function UpdateBar() {
+  const { ready, apply } = useAppUpdate()
+  if (!ready) return null
+
+  return (
+    <button
+      onClick={apply}
+      className="w-full min-h-11 bg-accent text-white text-sm font-medium px-4 flex items-center justify-center gap-2 active:scale-[0.995] transition-transform"
+    >
+      <span>A new version is ready</span>
+      <span className="opacity-80 font-normal">— tap to update</span>
+    </button>
   )
 }
 

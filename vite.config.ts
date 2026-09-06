@@ -8,7 +8,13 @@ export default defineConfig({
     react(),
     tailwindcss(),
     VitePWA({
-      registerType: 'autoUpdate',
+      // 'prompt', not 'autoUpdate'. autoUpdate reloads the page the moment a
+      // new build lands, which during a broadcast means losing a half-typed
+      // SKU. The app registers the worker itself (see src/lib/pwa.ts), watches
+      // for updates, and offers a bar the operator taps when they are between
+      // SKUs rather than mid-one.
+      registerType: 'prompt',
+      injectRegister: null,
       manifest: {
         name: 'TikShop',
         short_name: 'TikShop',

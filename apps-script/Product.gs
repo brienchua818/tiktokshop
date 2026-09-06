@@ -286,7 +286,9 @@ function listingState_(listingId) {
     if (s.sellerSku) bySellerSku[String(s.sellerSku)] = s;
   });
 
-  var variants = rows.map(function (r) {
+  var variants = rows.filter(function (r) {
+    return String(r.status) === 'pushed' || String(r.status) === 'removed';
+  }).map(function (r) {
     var match = bySellerSku[String(r.identifier)];
     var set = Number(r.stock || 0);
     var available = match ? Number(match.quantity || 0) : null;
@@ -295,6 +297,8 @@ function listingState_(listingId) {
       variant: String(r.variant || ''),
       price: String(r.price || ''),
       status: String(r.status || ''),
+      external: false,
+      tiktok_sku_id: String((match && match.id) || r.tiktok_sku_id || ''),
       on_tiktok: Boolean(match),
       /**
        * TikTok acknowledged this variation, but is not returning it.
@@ -333,6 +337,28 @@ function listingState_(listingId) {
     };
   });
 
+  // Everything TikTok has that this app did not list — added in Seller Center,
+  // or on another tool. Shown, or the app claims a listing has four variations
+  // while listing three, and offers an identifier that is already taken.
+  var oursByIdentifier = {};
+  rows.forEach(function (r) { oursByIdentifier[String(r.identifier)] = true; });
+  live.skus.forEach(function (s) {
+    if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
+    variants.push({
+      identifier: String(s.sellerSku || ''),
+      variant: String(s.valueName || ''),
+      price: String(s.priceAmount || ''),
+      status: 'external',
+      external: true,
+      tiktok_sku_id: String(s.id || ''),
+      on_tiktok: true,
+      under_review: false, unaccounted: false, removed: false,
+      stock_set: null,
+      stock_available: Number(s.quantity || 0),
+      sold: null
+    });
+  });
+
   return {
     listing_id: String(listingId),
     title: live.title,
@@ -364,6 +390,172 @@ function listingState_(listingId) {
  * Throws 'LISTING_FULL' when the ceiling is reached, so the caller can offer a
  * continuation listing rather than reporting a failure.
  */
+/**
+ * Variations we listed that TikTok is not returning, and that may still be
+ * under review — the ones any edit of this product must carry forward.
+ *
+ * Shared by adding and removing, because both rebuild the product from the
+ * read and TikTok deletes any SKU absent from the payload. See addVariation_
+ * for why each condition is there; the eligibility rule is tested in one
+ * place and must not be duplicated.
+ */
+function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
+  var seen = {};
+  snapshot.skus.forEach(function (sku) {
+    if (sku.sellerSku) seen[String(sku.sellerSku)] = true;
+  });
+  var cutoff = Date.now() - REVIEW_WINDOW_MS;
+  return listSkus_(listingId).filter(function (r) {
+    if (String(r.status) !== 'pushed') return false;
+    if (excludeIdentifier && String(r.identifier) === String(excludeIdentifier)) return false;
+    if (seen[String(r.identifier)]) return false;
+    if (!String(r.tiktok_sku_id || '')) return false;
+    if (String(r.confirmed_at || '')) return false;
+    var pushedAt = Date.parse(String(r.pushed_at || r.created_at || ''));
+    return !isNaN(pushedAt) && pushedAt >= cutoff;
+  }).map(function (r) {
+    return {
+      id: String(r.tiktok_sku_id),
+      sellerSku: String(r.identifier),
+      valueName: String(r.variant || ''),
+      skuImgUri: String(r.tiktok_image_uri || ''),
+      priceAmount: String(r.price),
+      quantity: Number(r.stock || 0)
+    };
+  });
+}
+
+/**
+ * The payload that removes exactly one variation.
+ *
+ * TikTok deletes any SKU absent from a partial_edit payload. That is the
+ * hazard every append defends against — and here it is the mechanism, used on
+ * purpose. So the shape is the append payload without the addition and
+ * without the target, and the guard is inverted: every id in the snapshot
+ * except the one being removed must survive, or nothing is sent.
+ */
+function buildRemovePayload_(snapshot, alsoKeep, removeId) {
+  var target = null;
+  for (var i = 0; i < snapshot.skus.length; i++) {
+    if (String(snapshot.skus[i].id) === String(removeId)) target = snapshot.skus[i];
+  }
+  if (!target) {
+    throw new Error('That variation is not on the listing right now. If it was just added it ' +
+      'may still be under review; check again in a few minutes.');
+  }
+
+  var remaining = snapshot.skus.filter(function (sku) { return String(sku.id) !== String(removeId); });
+  if (remaining.length + (alsoKeep || []).length === 0) {
+    throw new Error('This is the only variation on the listing. TikTok requires at least one, ' +
+      'so remove the listing itself in Seller Center instead.');
+  }
+
+  for (var k = 0; k < remaining.length; k++) {
+    if (!remaining[k].id || !remaining[k].warehouseId) {
+      throw new Error('TikTok returned an incomplete variation. Editing now could drop it, ' +
+        'so nothing was sent. Try again in a moment.');
+    }
+  }
+
+  var first = remaining[0] || snapshot.skus[0];
+  var warehouseId = first.warehouseId;
+  var skus = remaining.map(function (sku) {
+    var attribute = sku.attributeId ? { id: sku.attributeId }
+                                    : { name: sku.attributeName || VARIANT_ATTRIBUTE_NAME };
+    if (sku.valueId) attribute.value_id = sku.valueId; else attribute.value_name = sku.valueName;
+    if (sku.skuImgUri) attribute.sku_img = { uri: sku.skuImgUri };
+    return {
+      id: sku.id,
+      seller_sku: sku.sellerSku || undefined,
+      price: { amount: sku.priceAmount, currency: CURRENCY },
+      inventory: [{ warehouse_id: sku.warehouseId, quantity: sku.quantity }],
+      sales_attributes: [attribute]
+    };
+  });
+
+  (alsoKeep || []).forEach(function (keep) {
+    if (!keep.id || String(keep.id) === String(removeId)) return;
+    var attribute = first.attributeId ? { id: first.attributeId }
+                                      : { name: first.attributeName || VARIANT_ATTRIBUTE_NAME };
+    attribute.value_name = keep.valueName;
+    if (keep.skuImgUri) attribute.sku_img = { uri: keep.skuImgUri };
+    skus.push({
+      id: keep.id, seller_sku: keep.sellerSku || undefined,
+      price: { amount: keep.priceAmount, currency: CURRENCY },
+      inventory: [{ warehouse_id: warehouseId, quantity: keep.quantity }],
+      sales_attributes: [attribute]
+    });
+  });
+
+  // Inverted guard: exactly one thing may disappear, and it is the target.
+  var kept = {};
+  skus.forEach(function (x) { if (x.id) kept[x.id] = true; });
+  for (var j = 0; j < snapshot.skus.length; j++) {
+    var id = snapshot.skus[j].id;
+    if (String(id) !== String(removeId) && !kept[id]) {
+      throw new Error('Refusing to edit: variation ' + (snapshot.skus[j].sellerSku || id) +
+        ' would also have been deleted. This is a bug — nothing was sent to TikTok.');
+    }
+  }
+  if (kept[removeId]) {
+    throw new Error('Refusing to edit: the variation to remove is still in the payload. ' +
+      'This is a bug — nothing was sent to TikTok.');
+  }
+
+  return { skus: skus, removed: target };
+}
+
+/**
+ * Remove one variation from a listing, on TikTok and in our records.
+ *
+ * Any edit sends the product back for review, so the remaining variations go
+ * through it again — they stay buyable meanwhile. Orders already placed for
+ * the removed variation are unaffected: they are orders, not SKUs.
+ *
+ * The row is marked removed rather than deleted. It sold things; the orders
+ * export needs to know what "B3" was.
+ */
+function removeVariation_(listingId, tiktokSkuId, user) {
+  var rows = listSkus_(listingId);
+  var shopId = rows.length ? String(rows[0].shop_id) : '';
+  if (!shopId) {
+    var listing = readAll_(TAB_LISTINGS).filter(function (l) {
+      return String(l.listing_id) === String(listingId);
+    })[0];
+    shopId = listing ? String(listing.shop_id) : '';
+  }
+  if (!shopId) throw new Error('Unknown listing: ' + listingId);
+  var shop = shopById_(shopId);
+
+  var snapshot = ttGetProduct_(shopId, String(listingId));
+  var ours = rows.filter(function (r) { return String(r.tiktok_sku_id || '') === String(tiktokSkuId); })[0];
+  var alsoKeep = pendingToCarry_(listingId, snapshot, ours ? ours.identifier : null);
+  var built = buildRemovePayload_(snapshot, alsoKeep, tiktokSkuId);
+
+  var r = ttFetch_(shopId, 'post',
+    '/product/202509/products/' + listingId + '/partial_edit', {}, { skus: built.skus });
+  if (r.code !== 0) {
+    logEvent_(user.name, 'remove_variation_failed', shop.brand,
+      (built.removed.sellerSku || tiktokSkuId) + ': ' + (r.message || r.code), 'error');
+    throw new Error(r.message || 'TikTok refused the removal.');
+  }
+
+  if (ours) {
+    markSkus_([{ sku_id: String(ours.sku_id), status: 'removed',
+                 error: 'Removed from TikTok by ' + user.name }]);
+  }
+  var label = built.removed.sellerSku || built.removed.valueName || tiktokSkuId;
+  logEvent_(user.name, 'remove_variation', shop.brand,
+    label + ' from ' + listingId + ' (' + built.skus.length + ' remain)', 'ok');
+
+  return {
+    removed: label,
+    listing_id: String(listingId),
+    variations_now: built.skus.length,
+    audit: 'pending'
+  };
+}
+
 function buildAppendPayload_(snapshot, addition, alsoKeep) {
   if (!snapshot.skus.length) {
     throw new Error('This listing has no variations to extend. TikTok requires at least one ' +
@@ -760,41 +952,7 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
    * written, which is the safe direction: a refused append loses a minute, and
    * a silent one loses a SKU nobody notices until the factory is paid.
    */
-  var seen = {};
-  snapshot.skus.forEach(function (sku) {
-    if (sku.sellerSku) seen[String(sku.sellerSku)] = true;
-  });
-  var cutoff = Date.now() - REVIEW_WINDOW_MS;
-  var alsoKeep = listSkus_(listingId).filter(function (r) {
-    if (String(r.status) !== 'pushed') return false;
-    if (String(r.identifier) === addition.identifier) return false;
-    if (seen[String(r.identifier)]) return false;
-
-    // Without TikTok's id there is nothing to keep it BY, and sending it
-    // without one would create a duplicate rather than preserve the original.
-    if (!String(r.tiktok_sku_id || '')) return false;
-
-    // Confirmed live once and absent now means DELETED — in Seller Center or
-    // here. Restoring it would put back a variation somebody removed on
-    // purpose, at whatever price it had, and nobody would be told. Only
-    // something never yet seen can honestly be called pending.
-    if (String(r.confirmed_at || '')) return false;
-
-    // And not pending forever. A review is minutes; a variation still unseen a
-    // day later was refused or lost, and carrying it into every future push
-    // would make each one larger and more likely to be rejected as a whole.
-    var pushedAt = Date.parse(String(r.pushed_at || r.created_at || ''));
-    return !isNaN(pushedAt) && pushedAt >= cutoff;
-  }).map(function (r) {
-    return {
-      id: String(r.tiktok_sku_id),
-      sellerSku: String(r.identifier),
-      valueName: String(r.variant || ''),
-      skuImgUri: String(r.tiktok_image_uri || ''),
-      priceAmount: String(r.price),
-      quantity: Number(r.stock || 0)
-    };
-  });
+  var alsoKeep = pendingToCarry_(listingId, snapshot, addition.identifier);
 
   if (alsoKeep.length) {
     logEvent_(user.name, 'variations_preserved', shop.brand,
@@ -1001,4 +1159,51 @@ function recordFailure_(body, user, prefix, shop, photoUrl, imageUri, categoryId
     created_by: user.name
   });
   logEvent_(user.name, 'push_sku', shop.brand, body.identifier + ' — ' + message, 'failed');
+}
+
+
+/**
+ * Every identifier already in use on a listing, from both records.
+ *
+ * The client seeds the A1/A2 sequence from this. It used to return raw Sheet
+ * rows, whose field is `identifier`, to a client reading `seller_sku` — so a
+ * fresh device saw nothing usable and restarted the sequence at 1. The same
+ * device never noticed because its local drafts filled the gap.
+ *
+ * TikTok's own list is merged in, so a variation added in Seller Center under
+ * B4 means the app offers B5, not a second B4.
+ */
+function listedSkusForClient_(listingId) {
+  var out = [];
+  var seen = {};
+  listSkus_(listingId).forEach(function (r) {
+    if (String(r.status) !== 'pushed') return;
+    var id = String(r.identifier || '');
+    if (!id || seen[id]) return;
+    seen[id] = true;
+    out.push({ seller_sku: id, title: String(r.variant || r.title || '') });
+  });
+  try {
+    var rows = listSkus_(listingId);
+    var shopId = rows.length ? String(rows[0].shop_id) : '';
+    if (!shopId) {
+      var listing = readAll_(TAB_LISTINGS).filter(function (l) {
+        return String(l.listing_id) === String(listingId);
+      })[0];
+      shopId = listing ? String(listing.shop_id) : '';
+    }
+    if (shopId) {
+      ttGetProduct_(shopId, String(listingId)).skus.forEach(function (s) {
+        var id = String(s.sellerSku || '');
+        if (!id || seen[id]) return;
+        seen[id] = true;
+        out.push({ seller_sku: id, title: String(s.valueName || '') });
+      });
+    }
+  } catch (e) {
+    // TikTok unreachable is not a reason to refuse the listing screen; the
+    // Sheet half is still the better seed than nothing.
+    logEvent_('system', 'listed_skus_live_read_failed', '', String(e), 'warn');
+  }
+  return out;
 }

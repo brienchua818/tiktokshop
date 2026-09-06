@@ -60,6 +60,33 @@ export default function DraftQueue({
   const [checking, setChecking] = useState(false)
   const [checkError, setCheckError] = useState('')
 
+  /** The variation someone has asked to remove, awaiting their confirmation. */
+  const [removing, setRemoving] = useState<LiveVariant | null>(null)
+  const [removeBusy, setRemoveBusy] = useState(false)
+  /** Stays until dismissed: a confirmation that fades is one nobody sees. */
+  const [removedNote, setRemovedNote] = useState('')
+
+  async function confirmRemove() {
+    if (!removing || !listingId) return
+    setRemoveBusy(true)
+    setCheckError('')
+    try {
+      const r = await api.removeVariation(listingId, removing.tiktok_sku_id)
+      setRemovedNote(
+        `${r.removed} removed from TikTok. ${r.variations_now} variation${r.variations_now === 1 ? '' : 's'} remain. ` +
+          'The listing goes through review again; the others stay buyable meanwhile.',
+      )
+      setRemoving(null)
+      await refresh()
+      await onChanged()
+    } catch (e: unknown) {
+      setCheckError(e instanceof ApiError ? e.message : String(e))
+      setRemoving(null)
+    } finally {
+      setRemoveBusy(false)
+    }
+  }
+
   async function refresh() {
     if (!listingId) return
     setChecking(true)
@@ -174,6 +201,19 @@ export default function DraftQueue({
           waiting calmly and opening Seller Center to check. */}
       {live && <ReviewBanner live={live} />}
 
+      {removedNote && (
+        <div className="flex items-start gap-2 text-xs text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2.5">
+          <p className="flex-1">{removedNote}</p>
+          <button
+            onClick={() => setRemovedNote('')}
+            className="text-emerald-300/70 hover:text-white min-h-6 px-1"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {checkError && (
         <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
           {checkError}
@@ -256,19 +296,154 @@ export default function DraftQueue({
                 live={liveFor(live, draft.identifier)}
                 productStatus={live?.product_status ?? null}
               />
-              {draft.status !== 'pushed' && (
+              {draft.status !== 'pushed' ? (
+                // Not on TikTok yet: deleting only discards the local draft, so
+                // no confirmation stands between the tap and the result.
                 <button
                   onClick={() => void onDelete(draft.draft_id)}
-                  className="text-gray-600 hover:text-red-400 text-xs"
+                  className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
                   aria-label={`Delete ${draft.identifier}`}
                 >
                   ✕
                 </button>
+              ) : (
+                // On TikTok: this takes something away from buyers, so it asks
+                // first. Only offered once TikTok is actually showing it —
+                // there is nothing to remove by id until then.
+                (() => {
+                  const v = liveFor(live, draft.identifier)
+                  return v?.on_tiktok && v.tiktok_sku_id && !v.removed ? (
+                    <button
+                      onClick={() => setRemoving(v)}
+                      className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
+                      aria-label={`Remove ${draft.identifier} from TikTok`}
+                    >
+                      ✕
+                    </button>
+                  ) : null
+                })()
               )}
             </div>
           </li>
         ))}
       </ul>
+
+      {/* Variations TikTok has that this app did not list — added in Seller
+          Center, or on another tool. Without these the banner counts five
+          while the list shows three, and the next identifier the app offers
+          may already be taken. */}
+      {live && live.variants.some((v) => v.external) && (
+        <div className="pt-2 border-t border-white/8 space-y-1">
+          <p className="text-xs text-gray-500 uppercase tracking-wide">Also on this listing</p>
+          <ul className="space-y-1">
+            {live.variants
+              .filter((v) => v.external)
+              .map((v) => (
+                <li
+                  key={v.tiktok_sku_id || v.identifier || v.variant}
+                  className="flex items-center gap-2 py-1.5 border-b border-white/5 last:border-0"
+                >
+                  <div className="w-9 h-9 rounded bg-white/5 shrink-0 flex items-center justify-center text-gray-600 text-xs">
+                    SC
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs font-mono text-gray-400">{v.identifier || '—'}</p>
+                    <p className="text-xs text-gray-400 truncate">{v.variant}</p>
+                    <p className="text-xs text-gray-600">
+                      {v.stock_available} in stock · added outside this app
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {v.price && <span className="text-xs text-gray-500">${v.price}</span>}
+                    <span className="text-xs text-emerald-400">Live</span>
+                    {v.tiktok_sku_id && (
+                      <button
+                        onClick={() => setRemoving(v)}
+                        className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
+                        aria-label={`Remove ${v.identifier || v.variant} from TikTok`}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
+          </ul>
+        </div>
+      )}
+
+      {removing && (
+        <RemoveDialog
+          variant={removing}
+          busy={removeBusy}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => void confirmRemove()}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * The one warning in the app that stands between a tap and a loss.
+ *
+ * Everything else here is additive or local. This deletes a variation buyers
+ * can currently purchase, and a mis-tap on a phone in a factory is not rare —
+ * so it names the variation, says what changes, and puts the destructive
+ * button away from where the thumb already is.
+ */
+function RemoveDialog({
+  variant,
+  busy,
+  onCancel,
+  onConfirm,
+}: {
+  variant: LiveVariant
+  busy: boolean
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  const label = variant.identifier || variant.variant
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 px-4 pb-6 sm:pb-0"
+      onClick={busy ? undefined : onCancel}
+    >
+      <div
+        className="w-full max-w-sm bg-surface border border-red-500/30 rounded-2xl p-5 space-y-3"
+        role="alertdialog"
+        aria-modal="true"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <p className="text-sm font-semibold text-white">
+          Remove <span className="font-mono text-identifier">{label}</span> from TikTok?
+        </p>
+        {variant.variant && variant.variant !== label && (
+          <p className="text-xs text-gray-400 -mt-1">{variant.variant}</p>
+        )}
+        <ul className="text-xs text-gray-300 space-y-1.5 list-disc pl-4">
+          <li>Buyers will no longer see or purchase this variation.</li>
+          <li>Orders already placed for it are <span className="text-white">not</span> affected.</li>
+          <li>The listing goes through TikTok review again. The other variations stay buyable meanwhile.</li>
+          <li className="text-amber-300">This cannot be undone from the app.</li>
+        </ul>
+        <div className="flex gap-2 pt-1">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="flex-1 min-h-11 rounded-lg border border-white/15 text-sm text-white"
+          >
+            Keep it
+          </button>
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="flex-1 min-h-11 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-sm text-white font-medium"
+          >
+            {busy ? 'Removing…' : `Remove ${label}`}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }

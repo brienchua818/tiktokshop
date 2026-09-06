@@ -102,6 +102,10 @@ export interface LiveVariant {
   variant: string
   price: string
   status: string
+  /** Listed outside this app — Seller Center or another tool. Shown, read-only. */
+  external: boolean
+  /** TikTok's own id, needed to remove it. Empty only for a never-seen pending row. */
+  tiktok_sku_id: string
   /** False means TikTok is not returning it — see `under_review` before alarming. */
   on_tiktok: boolean
   /**
@@ -120,7 +124,8 @@ export interface LiveVariant {
   unaccounted: boolean
   /** Was live, then deleted — in Seller Center or here. Not a fault. */
   removed: boolean
-  stock_set: number
+  /** Null for a variation this app did not list — we never set its stock. */
+  stock_set: number | null
   /** Null when TikTok has no such variation. */
   stock_available: number | null
   /** Derived as set − available, not a figure TikTok reports. */
@@ -304,6 +309,16 @@ export const api = {
     // a subtype adding an incompatible field. Spreading produces the plain
     // object the call actually sends.
     call<ExportResult>('exportOrders', { body: { ...body } }),
+
+  /**
+   * Remove one variation from TikTok. Confirmed by the person first — this is
+   * the one write in the app that takes something away from buyers.
+   */
+  removeVariation: (listingId: string, tiktokSkuId: string) =>
+    call<{ removed: string; listing_id: string; variations_now: number; audit: 'pending' }>(
+      'removeVariation',
+      { body: { listing_id: listingId, tiktok_sku_id: tiktokSkuId } },
+    ),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>

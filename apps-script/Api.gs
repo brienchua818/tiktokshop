@@ -38,7 +38,10 @@ function doPost(e) {
  * only against themselves, which each does internally around its own write.
  */
 var WRITE_ACTIONS = {
-  addListing: 1, saveSku: 1, pushSku: 1, setRole: 1
+  addListing: 1, saveSku: 1, pushSku: 1, setRole: 1,
+  // Rebuilds the product from a read, exactly as pushSku does; two at once
+  // would each write the other's variation out of existence.
+  removeVariation: 1
 };
 
 /** Actions callable without an approved role. */
@@ -170,7 +173,13 @@ function route_(action, params, body, user) {
       return json_(listingState_(params.listing_id || body.listing_id));
 
     case 'skus':
-      return json_(listSkus_(params.listing_id || body.listing_id));
+      return json_(listedSkusForClient_(params.listing_id || body.listing_id));
+
+    // Remove one variation from TikTok and mark our record. Confirmed on the
+    // client first; this end does not second-guess a person, it does the edit
+    // safely or not at all.
+    case 'removeVariation':
+      return json_(removeVariation_(body.listing_id, body.tiktok_sku_id, user));
 
     case 'allowance':
       var shopId = params.shop_id || body.shop_id;

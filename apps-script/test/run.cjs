@@ -97,7 +97,7 @@ ${src}
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     verifyIdToken_, shortClient_, prop_, SHOPS,
     cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
-    sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_,
+    sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_, buildRemovePayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
@@ -1006,6 +1006,61 @@ check('one TikTok is already returning is left alone', () =>
 
 check('a row with no usable timestamp is not carried forward', () =>
   eq(eligible(row({ pushed_at: '', created_at: '' }), {}, 'B9'), false))
+
+// ---------------------------------------------------------------------------
+// Removing one variation on purpose.
+//
+// TikTok deletes any SKU absent from a partial_edit payload — the hazard every
+// append defends against, used here as the mechanism. So the guard inverts:
+// exactly one id may disappear, and it must be the target.
+// ---------------------------------------------------------------------------
+console.log('\nbuildRemovePayload_ — remove exactly one')
+
+const three = [
+  sku({ id: 'id-a', sellerSku: 'A1', valueName: 'A1 Red' }),
+  sku({ id: 'id-b', sellerSku: 'A2', valueName: 'A2 Blue' }),
+  sku({ id: 'id-c', sellerSku: 'A3', valueName: 'A3 Green' }),
+]
+
+check('the target is gone and nothing else is', () => {
+  const p = gs.buildRemovePayload_({ productId: 'p', skus: three }, [], 'id-b')
+  eq(p.skus.map((x) => x.id).sort(), ['id-a', 'id-c'])
+  eq(p.removed.sellerSku, 'A2')
+})
+
+check('survivors keep price, stock, warehouse and image', () => {
+  const p = gs.buildRemovePayload_({ productId: 'p', skus: three }, [], 'id-b')
+  const a = p.skus.find((x) => x.id === 'id-a')
+  eq(a.price.amount, '12.90')
+  eq(a.inventory[0].quantity, 20)
+  eq(a.inventory[0].warehouse_id, 'WH1')
+  eq(a.sales_attributes[0].sku_img.uri, 'img1')
+})
+
+check('a pending variation is carried forward through a removal too', () => {
+  // Removing A2 while B7 is under review must not also drop B7.
+  const p = gs.buildRemovePayload_({ productId: 'p', skus: three }, [keep({ id: 'tt-b7', sellerSku: 'B7' })], 'id-b')
+  if (!p.skus.some((x) => x.id === 'tt-b7')) throw new Error('B7 dropped')
+})
+
+check('refuses to remove the last variation', () =>
+  throws(() => gs.buildRemovePayload_({ productId: 'p', skus: [three[0]] }, [], 'id-a'), /only variation/))
+
+check('refuses a target TikTok is not showing', () =>
+  // Under review, or never there — either way it cannot be removed by id yet.
+  throws(() => gs.buildRemovePayload_({ productId: 'p', skus: three }, [], 'id-zzz'), /not on the listing/))
+
+check('a survivor missing its warehouse stops the edit', () =>
+  throws(
+    () => gs.buildRemovePayload_({ productId: 'p', skus: [three[0], sku({ id: 'id-x', warehouseId: '' })] }, [], 'id-a'),
+    /incomplete variation/,
+  ))
+
+check('the removed target is never re-added via carry-forward', () => {
+  // If the target were also in alsoKeep (stale record), it must not sneak back.
+  const p = gs.buildRemovePayload_({ productId: 'p', skus: three }, [keep({ id: 'id-b', sellerSku: 'A2' })], 'id-b')
+  if (p.skus.some((x) => x.id === 'id-b')) throw new Error('target came back')
+})
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

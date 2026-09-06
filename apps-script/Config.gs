@@ -24,13 +24,18 @@ var TT_AUTH_HOST = 'https://auth.tiktok-shops.com';
  * The three shops. Prefixes match Sheldon Delivery API's Script Properties, so
  * if the same app registrations are reused the credentials are already there.
  */
+// `authorizeFn` names the toolbar function that starts this shop's consent
+// flow. It is here rather than built from the id because checkSetup has to
+// print a name a person can actually pick from the Run dropdown — and the one
+// it used to print, ttAuthorizeUrl('HZ'), cannot be run that way at all, since
+// the editor has no way to pass an argument.
 var SHOPS = [
-  { id: 'HZ', brand: 'HOUZE',            handle: '@houze.com.sg',    entity: 'Sheldon Global Pte Ltd' },
-  { id: 'TM', brand: 'Table Matters',    handle: '@tablematterssg',  entity: 'Audrey Global Pte Ltd' },
+  { id: 'HZ', brand: 'HOUZE',            handle: '@houze.com.sg',    entity: 'Sheldon Global Pte Ltd', authorizeFn: 'authorizeHOUZE' },
+  { id: 'TM', brand: 'Table Matters',    handle: '@tablematterssg',  entity: 'Audrey Global Pte Ltd',  authorizeFn: 'authorizeTableMatters' },
   // Painting Matters' legal entity is not recorded in the vault yet. Left
   // blank rather than guessed — a wrong entity is corrosive once exports
   // become purchase orders.
-  { id: 'PM', brand: 'Painting Matters', handle: '@paintingmatters', entity: '' }
+  { id: 'PM', brand: 'Painting Matters', handle: '@paintingmatters', entity: '', authorizeFn: 'authorizePaintingMatters' }
 ];
 
 /** Singapore listing constraints, enforced before anything reaches TikTok. */
@@ -162,6 +167,9 @@ function checkSetup() {
   var clientId = prop_('GOOGLE_CLIENT_ID');
   if (!clientId) {
     bad('GOOGLE_CLIENT_ID — not set, so nobody can sign in');
+    note('  add it here: Project Settings (gear, left) > Script Properties > Add');
+    note('  it is the SAME value as VITE_GOOGLE_CLIENT_ID in Netlify, and ends');
+    note('  in .apps.googleusercontent.com');
   } else if (clientId.indexOf('.apps.googleusercontent.com') === -1) {
     bad('GOOGLE_CLIENT_ID does not end in .apps.googleusercontent.com: ' + clientId);
     note('  that is probably the client SECRET or a project number, not the client ID');
@@ -174,16 +182,27 @@ function checkSetup() {
     lines.push('');
     lines.push(shop.brand + '  (' + shop.id + ')');
 
-    var missingCreds = false;
-    ['APP_KEY', 'APP_SECRET', 'SERVICE_ID'].forEach(function (k) {
-      if (prop_(shop.id + '_' + k)) {
-        ok(shop.id + '_' + k + ' set');
-      } else {
-        bad(shop.id + '_' + k);
-        missingCreds = true;
-      }
+    var creds = ['APP_KEY', 'APP_SECRET', 'SERVICE_ID'];
+    var present = creds.filter(function (k) { return Boolean(prop_(shop.id + '_' + k)); });
+
+    // A shop with nothing entered has not been started; a shop with some of
+    // three has been started and got stuck. Those are different situations and
+    // the second is the alarming one, so they do not read the same. Counting a
+    // deliberately deferred shop as three separate faults buries the ones that
+    // actually block a livestream.
+    if (present.length === 0) {
+      note('not set up yet — nothing entered for this shop');
+      note('  skip this if you are not using it yet; otherwise Partner Center, ' +
+           'on this shop\'s own custom app');
+      return;
+    }
+
+    creds.forEach(function (k) {
+      prop_(shop.id + '_' + k)
+        ? ok(shop.id + '_' + k + ' set')
+        : bad(shop.id + '_' + k + ' — the other ' + (present.length) + ' are set, so this one is a gap');
     });
-    if (missingCreds) {
+    if (present.length < creds.length) {
       note('from Partner Center, on this shop\'s own custom app');
       return;
     }
@@ -194,7 +213,7 @@ function checkSetup() {
     // absolute epoch SECONDS, not durations.
     var expiry = Number(prop_(shop.id + '_REFRESH_EXPIRES') || 0);
     if (!prop_(shop.id + '_ACCESS_TOKEN')) {
-      bad('not authorised — run ttAuthorizeUrl(\'' + shop.id + '\')');
+      bad('not authorised — run ' + shop.authorizeFn + ' from the function dropdown');
       return;
     }
     ok('authorised');
@@ -207,7 +226,7 @@ function checkSetup() {
     // Also worth surfacing: the shop_cipher, which nearly every call needs.
     prop_(shop.id + '_SHOP_CIPHER')
       ? ok('shop_cipher stored')
-      : bad('no shop_cipher — re-run ttAuthorizeUrl(\'' + shop.id + '\')');
+      : bad('no shop_cipher — re-run ' + shop.authorizeFn);
 
     // The two calls that actually have to work before a livestream.
     try {

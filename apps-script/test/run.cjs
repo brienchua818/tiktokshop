@@ -70,7 +70,7 @@ ${src}
     variantValueName_, buildAppendPayload_, buildPayload_, validateTitle_,
     validateVariantName_, continuationTitle_,
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
-    verifyIdToken_, shortClient_, prop_,
+    verifyIdToken_, shortClient_, prop_, SHOPS,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -536,6 +536,49 @@ check('keeps the project number and a little more', () =>
 check('handles an id with no dash', () => eq(gs.shortClient_('abcdefghijklmnop'), 'abcdefghijkl…'))
 check('says (none) rather than printing undefined', () => eq(gs.shortClient_(undefined), '(none)'))
 
+
+// ---------------------------------------------------------------------------
+// SHOPS.authorizeFn must name a function that really exists.
+//
+// checkSetup prints this name and tells a person to pick it from the Run
+// dropdown. It used to print ttAuthorizeUrl('HZ'), which cannot be run that
+// way at all — the editor has no way to pass an argument — so someone followed
+// the instruction, found nothing to click, and stopped. A name that is only a
+// string in one file and a declaration in another is exactly the pair that
+// drifts, so it is pinned here.
+// ---------------------------------------------------------------------------
+console.log('\nSHOPS — the authorise function named for each shop')
+
+const tiktokSrc = fs.readFileSync(path.join(DIR, 'TikTok.gs'), 'utf8')
+
+check('every shop names one', () => {
+  gs.SHOPS.forEach((shop) => {
+    if (!shop.authorizeFn) throw new Error(shop.id + ' has no authorizeFn')
+  })
+})
+
+check('every named function is declared in TikTok.gs', () => {
+  gs.SHOPS.forEach((shop) => {
+    const declared = new RegExp('function\\s+' + shop.authorizeFn + '\\s*\\(')
+    if (!declared.test(tiktokSrc)) {
+      throw new Error(shop.id + ': ' + shop.authorizeFn + '() is named but not declared')
+    }
+  })
+})
+
+check('each function takes no argument, so the Run dropdown can call it', () => {
+  gs.SHOPS.forEach((shop) => {
+    const sig = new RegExp('function\\s+' + shop.authorizeFn + '\\s*\\(([^)]*)\\)')
+    const m = tiktokSrc.match(sig)
+    if (!m) throw new Error(shop.authorizeFn + ' not found')
+    if (m[1].trim() !== '') throw new Error(shop.authorizeFn + ' takes "' + m[1] + '"')
+  })
+})
+
+check('no two shops share one', () => {
+  const names = gs.SHOPS.map((s) => s.authorizeFn)
+  eq(names.length, new Set(names).size, 'duplicate authorizeFn')
+})
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

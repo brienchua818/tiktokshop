@@ -255,13 +255,37 @@ function ttToken_(prefix) {
 }
 
 /** Signed call. `payload` is an object (JSON) or a Blob (multipart). */
+/**
+ * Paths that must NOT carry `shop_cipher`.
+ *
+ * Almost every call needs the cipher — it is how a request says which shop it
+ * is for. Image upload does not: an image is not owned by a shop until a
+ * product references it, and sending the cipher anyway is a hard rejection,
+ * not something ignored:
+ *
+ *   "Unexpected identifier. The 'shop_cipher' query parameter is not
+ *    required for this request."
+ *
+ * Which reads like a bug in the payload rather than one extra query
+ * parameter. Kept as a list here rather than a flag at the call site, because
+ * the rule belongs to the endpoint, not to whoever happens to be calling it.
+ */
+var PATHS_WITHOUT_CIPHER = ['/product/202309/images/upload'];
+
+function cipherAllowed_(path) {
+  for (var i = 0; i < PATHS_WITHOUT_CIPHER.length; i++) {
+    if (path === PATHS_WITHOUT_CIPHER[i]) return false;
+  }
+  return true;
+}
+
 function ttFetch_(prefix, method, path, extraQuery, payload) {
   var c = ttCreds_(prefix);
   var token = ttToken_(prefix);
   var cipher = prop_(prefix + '_SHOP_CIPHER');
 
   var query = { app_key: c.key, timestamp: String(Math.floor(Date.now() / 1000)) };
-  if (cipher) query.shop_cipher = cipher;
+  if (cipher && cipherAllowed_(path)) query.shop_cipher = cipher;
   Object.keys(extraQuery || {}).forEach(function (k) { query[k] = extraQuery[k]; });
 
   var isBlob = payload && typeof payload.getBytes === 'function';

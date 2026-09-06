@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs']
+const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -43,7 +43,16 @@ const sandbox = `
   var Utilities = {
     getUuid: function () { return 'uuid' },
     newBlob: function () { return {} },
-    base64Decode: function () { return [] }
+    base64Decode: function () { return [] },
+    // Apps Script returns a byte array of SIGNED bytes, which is why ttSign_
+    // masks with 0xff before hexing. Reproduced faithfully, or the test would
+    // pass against a shape the real runtime never produces.
+    computeHmacSha256Signature: function (value, key) {
+      var mac = NODE_CRYPTO.createHmac('sha256', key).update(value, 'utf8').digest()
+      return Array.prototype.slice.call(mac).map(function (b) {
+        return b > 127 ? b - 256 : b
+      })
+    }
   };
   var DriveApp = {}, Session = {};
   var UrlFetchApp = { fetch: function () {
@@ -71,6 +80,7 @@ ${src}
     validateVariantName_, continuationTitle_,
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     verifyIdToken_, shortClient_, prop_, SHOPS,
+    cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
@@ -82,7 +92,7 @@ const loaded = path.join(os.tmpdir(), 'tikshop-gs-loaded.cjs')
 const authState = { props: {}, status: 200, bodyText: '{}', throws: false }
 fs.writeFileSync(
   loaded,
-  'const LOCK_STATE = global.__LOCK_STATE__;\nconst AUTH_STATE = global.__AUTH_STATE__;\n' + sandbox,
+  'const LOCK_STATE = global.__LOCK_STATE__;\nconst AUTH_STATE = global.__AUTH_STATE__;\nconst NODE_CRYPTO = require("crypto");\n' + sandbox,
 )
 global.__LOCK_STATE__ = lockState
 global.__AUTH_STATE__ = authState
@@ -613,6 +623,53 @@ check('each function takes no argument, so the Run dropdown can call it', () => 
 check('no two shops share one', () => {
   const names = gs.SHOPS.map((s) => s.authorizeFn)
   eq(names.length, new Set(names).size, 'duplicate authorizeFn')
+})
+
+// ---------------------------------------------------------------------------
+// shop_cipher must be omitted from image upload.
+//
+// A real push failed here: "Unexpected identifier. The 'shop_cipher' query
+// parameter is not required for this request." Almost every endpoint needs the
+// cipher to say which shop a call is for, so it was added to all of them —
+// but image upload rejects it outright rather than ignoring it, and the
+// wording points at the payload rather than at one query parameter.
+// ---------------------------------------------------------------------------
+console.log('\nshop_cipher — the endpoint that refuses it')
+
+check('image upload is excluded', () =>
+  eq(gs.cipherAllowed_('/product/202309/images/upload'), false))
+
+check('everything else still gets it', () => {
+  ;[
+    '/product/202309/products',
+    '/product/202509/products/123/partial_edit',
+    '/product/202502/products/search',
+    '/logistics/202309/warehouses',
+    '/product/202309/categories/recommend',
+  ].forEach((path) => {
+    if (!gs.cipherAllowed_(path)) throw new Error(path + ' lost its cipher')
+  })
+})
+
+check('the exclusion list is exact paths, not prefixes', () => {
+  // A prefix match would strip the cipher from anything under /images/, and a
+  // silently unsigned-for-the-wrong-shop request is worse than a loud refusal.
+  gs.PATHS_WITHOUT_CIPHER.forEach((path) => {
+    if (!path.startsWith('/')) throw new Error('not a path: ' + path)
+  })
+  eq(gs.cipherAllowed_('/product/202309/images/upload/extra'), true)
+})
+
+// The signature must be computed over exactly what is sent. If the cipher were
+// dropped after signing, every upload would fail as a bad signature instead —
+// an opaque failure with no clue which step broke.
+console.log('\nsigning agrees with the query actually sent')
+check('a query without the cipher signs differently from one with it', () => {
+  const withCipher = gs.ttSign_('/product/202309/images/upload',
+    { app_key: 'k', timestamp: '1', shop_cipher: 'abc', use_case: 'MAIN_IMAGE' }, '', 'secret')
+  const without = gs.ttSign_('/product/202309/images/upload',
+    { app_key: 'k', timestamp: '1', use_case: 'MAIN_IMAGE' }, '', 'secret')
+  if (withCipher === without) throw new Error('the cipher is not being signed at all')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

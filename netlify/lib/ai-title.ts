@@ -121,7 +121,16 @@ function client(): Anthropic {
       503,
     )
   }
-  cached = new Anthropic()
+  // An org-level API key is not tied to a workspace, and every request made
+  // with one has to name the workspace itself — otherwise the API refuses with
+  // a 400 that says so. A key created inside a workspace carries that already
+  // and needs nothing here, which is why this is optional rather than
+  // required: both kinds of key work, and neither needs a code change to
+  // switch between.
+  const workspace = process.env.ANTHROPIC_WORKSPACE_ID?.trim()
+  cached = new Anthropic(
+    workspace ? { defaultHeaders: { 'anthropic-workspace-id': workspace } } : {},
+  )
   return cached
 }
 

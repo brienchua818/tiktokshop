@@ -943,5 +943,69 @@ check('a repeated identifier is still refused', () => {
   )
 })
 
+// ---------------------------------------------------------------------------
+// Never restore something that was deleted on purpose.
+//
+// The carry-forward for under-review variations, taken alone, would have put a
+// deleted variation back on the next push. B1 was deleted deliberately, and
+// the first version of that code matched it on every condition: pushed, has an
+// id, absent from the read. A SKU nobody wanted, live again, at whatever price
+// it had, with nobody told.
+//
+// What separates the two is whether TikTok was ever seen returning it. Never
+// seen means it may be pending. Seen and now gone means someone removed it.
+// ---------------------------------------------------------------------------
+console.log('\ncarry-forward eligibility')
+
+const REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000
+const recent = new Date(Date.now() - 60_000).toISOString()
+const old = new Date(Date.now() - 3 * REVIEW_WINDOW_MS).toISOString()
+
+/** Mirrors the filter in addVariation_, so the rule is asserted in one place. */
+function eligible(row, seen, addingIdentifier) {
+  const cutoff = Date.now() - REVIEW_WINDOW_MS
+  if (String(row.status) !== 'pushed') return false
+  if (String(row.identifier) === addingIdentifier) return false
+  if (seen[String(row.identifier)]) return false
+  if (!String(row.tiktok_sku_id || '')) return false
+  if (String(row.confirmed_at || '')) return false
+  const pushedAt = Date.parse(String(row.pushed_at || row.created_at || ''))
+  return !isNaN(pushedAt) && pushedAt >= cutoff
+}
+
+const row = (o) =>
+  Object.assign(
+    { identifier: 'B1', status: 'pushed', tiktok_sku_id: 'tt-b1',
+      confirmed_at: '', pushed_at: recent },
+    o,
+  )
+
+check('a variation TikTok has never shown is carried forward', () =>
+  eq(eligible(row(), {}, 'B9'), true))
+
+check('one confirmed live and now gone is NOT restored', () =>
+  // This is B1. It was seen, then deleted.
+  eq(eligible(row({ confirmed_at: recent }), {}, 'B9'), false))
+
+check('one already marked removed is not restored', () =>
+  eq(eligible(row({ status: 'removed', confirmed_at: recent }), {}, 'B9'), false))
+
+check('one still unseen after a day is not carried forward forever', () =>
+  // Past a day it was refused or lost. Carrying it into every later push grows
+  // each payload and risks the whole edit for something not coming back.
+  eq(eligible(row({ pushed_at: old }), {}, 'B9'), false))
+
+check('one without a TikTok id cannot be kept by anything', () =>
+  eq(eligible(row({ tiktok_sku_id: '' }), {}, 'B9'), false))
+
+check('the variation being added is not also carried forward', () =>
+  eq(eligible(row({ identifier: 'B9' }), {}, 'B9'), false))
+
+check('one TikTok is already returning is left alone', () =>
+  eq(eligible(row(), { B1: true }, 'B9'), false))
+
+check('a row with no usable timestamp is not carried forward', () =>
+  eq(eligible(row({ pushed_at: '', created_at: '' }), {}, 'B9'), false))
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

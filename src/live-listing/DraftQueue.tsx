@@ -395,6 +395,12 @@ function ReviewBanner({ live }: { live: ListingState }) {
 
 function StockLine({ v }: { v: LiveVariant }) {
   if (!v.on_tiktok) {
+    // Deleted on purpose. Stated plainly and without alarm — somebody made
+    // this decision, and the app agreeing with reality beats it insisting the
+    // SKU should still be there.
+    if (v.removed) {
+      return <p className="text-xs text-gray-500 mt-0.5">Removed from TikTok.</p>
+    }
     // Absence is not loss. TikTok omits a variation still under review, so a
     // SKU it has issued an id for is waiting, not gone — B5 read as missing
     // and went live minutes later. Calling that "retry this SKU" invites a
@@ -444,6 +450,7 @@ function StatusBadge({
 }) {
   if (draft.status === 'pushed') {
     if (live && !live.on_tiktok) {
+      if (live.removed) return <span className="text-xs text-gray-500">Removed</span>
       return <span className="text-xs text-amber-400">Reviewing</span>
     }
     // Buyable requires two things: TikTok has the variation, and the product

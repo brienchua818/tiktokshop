@@ -118,6 +118,8 @@ export interface LiveVariant {
    * here. Rows pushed before the id was recorded all land in this state.
    */
   unaccounted: boolean
+  /** Was live, then deleted — in Seller Center or here. Not a fault. */
+  removed: boolean
   stock_set: number
   /** Null when TikTok has no such variation. */
   stock_available: number | null

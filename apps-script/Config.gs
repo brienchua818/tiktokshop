@@ -96,6 +96,16 @@ var MAX_SKUS_PER_PRODUCT = 100;
 /** Sheet tab names. */
 var TAB_LISTINGS = 'Listings';
 var TAB_SKUS = 'SKUs';
+/**
+ * How long a variation can plausibly still be under review.
+ *
+ * A review runs minutes, not hours. Past this a variation TikTok has never
+ * shown was refused or lost, and carrying it forward into every later push
+ * would grow each payload and risk the whole edit for something that is not
+ * coming back.
+ */
+var REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 var TAB_ORDERS = 'Orders';
 var TAB_ORDER_ITEMS = 'Order Items';
 var TAB_LOG = 'Log';

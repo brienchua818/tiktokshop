@@ -232,24 +232,51 @@ function listingState_(listingId) {
   var live = ttGetProduct_(shopId, String(listingId));
 
   /**
-   * Heal rows written before TikTok's sku id was being kept.
+   * Record what TikTok is showing, and what it has stopped showing.
    *
-   * Those rows cannot be carried forward if they go under review, because
-   * there is nothing to keep them by. Every time one is visible here its id is
-   * available, so it is recorded — which quietly repairs the listings that
-   * existed before that field did, without anyone re-pushing.
+   * Two writes, and the second one matters more than it looks.
+   *
+   * Seeing a variation confirms it: the id is stored if it was missing (rows
+   * written before that field existed are repaired for free), and the first
+   * sighting is stamped.
+   *
+   * A variation that WAS confirmed and is now gone has been deleted — in
+   * Seller Center, or in this app. That is not a variation to restore. Without
+   * this distinction the carry-forward added for under-review variations would
+   * put a deliberately deleted one back on the next push, which is worse than
+   * the problem it solves: a SKU nobody wanted, live, at whatever price it
+   * had. So the row is marked removed and takes itself out of consideration.
    */
-  var repairs = [];
+  var now = new Date().toISOString();
+  var updates = [];
   listSkus_(listingId).forEach(function (r) {
-    if (String(r.status) !== 'pushed' || String(r.tiktok_sku_id || '')) return;
+    if (String(r.status) !== 'pushed') return;
     var found = live.skus.filter(function (s) {
       return String(s.sellerSku) === String(r.identifier);
     })[0];
-    if (found && found.id) {
-      repairs.push({ sku_id: String(r.sku_id), tiktok_sku_id: String(found.id) });
+
+    if (found) {
+      var patch = { sku_id: String(r.sku_id) };
+      var changed = false;
+      if (found.id && !String(r.tiktok_sku_id || '')) {
+        patch.tiktok_sku_id = String(found.id);
+        changed = true;
+      }
+      if (!String(r.confirmed_at || '')) {
+        patch.confirmed_at = now;
+        changed = true;
+      }
+      if (changed) updates.push(patch);
+      return;
+    }
+
+    // Seen once, gone now. Deleted, not pending.
+    if (String(r.confirmed_at || '')) {
+      updates.push({ sku_id: String(r.sku_id), status: 'removed', error: 'Removed from TikTok' });
     }
   });
-  if (repairs.length) backfillSkuIds_(repairs);
+  if (updates.length) markSkus_(updates);
+  if (updates.length) rows = listSkus_(listingId);
 
   // Keyed by seller_sku, which is the identifier the app assigns and the only
   // field both sides agree on — a TikTok sku id is not known until after the
@@ -288,7 +315,16 @@ function listingState_(listingId) {
        * must not be reported as fine either. Rows written before the id was
        * kept all land here, which is why this state exists at all.
        */
-      unaccounted: !match && !String(r.tiktok_sku_id || ''),
+      unaccounted: !match && !String(r.tiktok_sku_id || '') &&
+        String(r.status) !== 'removed',
+      /**
+       * Seen live once, and gone now. Deleted, not pending.
+       *
+       * Reported rather than hidden: a variation removed in Seller Center is a
+       * decision someone made, and the app agreeing quietly with reality is
+       * more use than the app pretending it never happened.
+       */
+      removed: String(r.status) === 'removed',
       stock_set: set,
       stock_available: available,
       // Never negative: someone raising stock in Seller Center would otherwise
@@ -728,14 +764,27 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
   snapshot.skus.forEach(function (sku) {
     if (sku.sellerSku) seen[String(sku.sellerSku)] = true;
   });
+  var cutoff = Date.now() - REVIEW_WINDOW_MS;
   var alsoKeep = listSkus_(listingId).filter(function (r) {
-    return String(r.status) === 'pushed' &&
-      String(r.identifier) !== addition.identifier &&
-      !seen[String(r.identifier)] &&
-      // Without TikTok's id there is nothing to keep it BY, and sending it
-      // without one would create a duplicate rather than preserve the
-      // original. Rows from before this was recorded fall here.
-      String(r.tiktok_sku_id || '');
+    if (String(r.status) !== 'pushed') return false;
+    if (String(r.identifier) === addition.identifier) return false;
+    if (seen[String(r.identifier)]) return false;
+
+    // Without TikTok's id there is nothing to keep it BY, and sending it
+    // without one would create a duplicate rather than preserve the original.
+    if (!String(r.tiktok_sku_id || '')) return false;
+
+    // Confirmed live once and absent now means DELETED — in Seller Center or
+    // here. Restoring it would put back a variation somebody removed on
+    // purpose, at whatever price it had, and nobody would be told. Only
+    // something never yet seen can honestly be called pending.
+    if (String(r.confirmed_at || '')) return false;
+
+    // And not pending forever. A review is minutes; a variation still unseen a
+    // day later was refused or lost, and carrying it into every future push
+    // would make each one larger and more likely to be rejected as a whole.
+    var pushedAt = Date.parse(String(r.pushed_at || r.created_at || ''));
+    return !isNaN(pushedAt) && pushedAt >= cutoff;
   }).map(function (r) {
     return {
       id: String(r.tiktok_sku_id),

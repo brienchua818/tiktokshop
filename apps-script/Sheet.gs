@@ -17,6 +17,11 @@ HEADERS[TAB_SKUS] = [
   'sku_id', 'listing_id', 'shop_id', 'brand', 'identifier', 'title', 'variant',
   'price', 'stock', 'weight_kg', 'dims_cm', 'tiktok_image_uri', 'photo_url',
   'category_id', 'status', 'error', 'tiktok_product_id', 'tiktok_sku_id',
+  // When TikTok was first seen returning this variation. The difference
+  // between "not shown yet" and "was shown, then removed" — which is the
+  // difference between restoring it and resurrecting something deleted on
+  // purpose.
+  'confirmed_at',
   'idempotency_key', 'created_at', 'pushed_at', 'created_by'
 ];
 HEADERS[TAB_ORDERS] = [
@@ -230,27 +235,30 @@ function replaceByKey_(tabName, keyField, rows) {
  * status check, which can happen mid-broadcast, and rewriting the SKUs tab
  * while a push is appending to it is the kind of race worth not having.
  */
-function backfillSkuIds_(repairs) {
-  if (!repairs || !repairs.length) return 0;
+function markSkus_(updates) {
+  if (!updates || !updates.length) return 0;
   return withScriptLock_(30000, function () {
     var sheet = sheet_(TAB_SKUS);
     var headers = HEADERS[TAB_SKUS];
     var keyCol = headers.indexOf('sku_id') + 1;
-    var idCol = headers.indexOf('tiktok_sku_id') + 1;
-    if (keyCol < 1 || idCol < 1) return 0;
+    if (keyCol < 1) return 0;
 
     var last = sheet.getLastRow();
     if (last < 2) return 0;
     var keys = sheet.getRange(2, keyCol, last - 1, 1).getValues();
 
     var byKey = {};
-    repairs.forEach(function (r) { byKey[String(r.sku_id)] = String(r.tiktok_sku_id); });
+    updates.forEach(function (u) { byKey[String(u.sku_id)] = u; });
 
     var written = 0;
     for (var i = 0; i < keys.length; i++) {
-      var found = byKey[String(keys[i][0])];
-      if (!found) continue;
-      sheet.getRange(i + 2, idCol).setValue(found);
+      var u = byKey[String(keys[i][0])];
+      if (!u) continue;
+      Object.keys(u).forEach(function (field) {
+        if (field === 'sku_id') return;
+        var col = headers.indexOf(field) + 1;
+        if (col > 0) sheet.getRange(i + 2, col).setValue(u[field]);
+      });
       written++;
     }
     if (written) SpreadsheetApp.flush();

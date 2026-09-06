@@ -63,6 +63,8 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-ORD-04` | Orders.gs:111 | Unknown shop: |
 | `TS-ORD-05` | Orders.gs:115 | The end of the range is before its start. |
 | `TS-ORD-06` | Orders.gs:131 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
+| `TS-ORD-07` | Orders.gs:442 | seller_sku lookup: could not read listing : [ ] |
+| `TS-ORD-08` | Orders.gs:198 | order line(s) have no identifier from any source ( ) |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:151 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:230 | Unknown listing: |

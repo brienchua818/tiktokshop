@@ -40,7 +40,7 @@ FIXED = [
                                 'If it persists for minutes, a write is stuck — read the execution log.'),
 ]
 
-pat = re.compile(r"fail_\(\s*'(TS-[A-Z]+-\d+)'\s*,\s*(.*)", re.S)
+pat = re.compile(r"(?:fail_|warn_)\(\s*'(TS-[A-Z]+-\d+)'\s*,\s*(.*)", re.S)
 code_lit = re.compile(r"code\s*[:=]\s*'(TS-[A-Z]+-\d+)'")
 
 

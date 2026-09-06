@@ -190,6 +190,15 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
     });
   });
 
+  // Blank seller_sku is filled before the rows are written, so every reader
+  // — the app's order detail, the export — sees the same identifier.
+  var filled = resolveSellerSkus_(shopId, itemRows);
+  var filledNote = describeResolution_(filled);
+  if (filled.unresolved) {
+    warn_('TS-ORD-08', filled.unresolved + ' order line(s) have no identifier from any source ' +
+      '(' + filledNote + ')', shopId);
+  }
+
   /**
    * The lock goes here, around the write, and not around the fetch above.
    *
@@ -204,7 +213,8 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
   });
 
   logEvent_(actor, 'sync_orders', shop.brand,
-    orders.length + ' orders ' + fromDate + ' to ' + toDate, 'ok');
+    orders.length + ' orders ' + fromDate + ' to ' + toDate +
+      (filledNote ? ' · seller_sku filled: ' + filledNote : ''), 'ok');
 
   return {
     orders: orders.length,
@@ -372,6 +382,90 @@ function inspectOrders() {
 }
 
 /**
+ * The identifier at the front of a variation name, or ''.
+ *
+ * Both apps that have listed for HOUZE write the variation as the identifier
+ * followed by the name: "B6 Silver Magnetic Charging Stand" (this app) and
+ * "F21-Segretto cast iron Mint" (the old one). The identifier scheme is one
+ * to three letters and a running number, so that — and only that — is what is
+ * recognised. "Floral Blue", "3 Tier, White" and "Default" yield '' rather than
+ * a guess: an invented identifier on a purchase order is worse than a blank.
+ */
+function identifierFromVariation_(name) {
+  var m = String(name || '').match(/^\s*([A-Za-z]{1,3}\d{1,6})(?=[\s\-–—:_.,/]|$)/);
+  return m ? m[1].toUpperCase() : '';
+}
+
+/**
+ * Fill in seller_sku where TikTok left it blank on an order line.
+ *
+ * TikTok returns seller_sku inconsistently on line items: on 4 Sep the same
+ * variation (F20) came back with it on some orders and without on others, and
+ * F21 never had it. The purchase order needs the identifier on every row, so
+ * it is recovered from the best source available, in this order:
+ *
+ *   1. another line item with the same TikTok sku id that does carry it;
+ *   2. this app's own SKU rows, by TikTok sku id;
+ *   3. TikTok's product read, which lists seller_sku per sku id — one call
+ *      per listing, and only for listings that still have a blank;
+ *   4. the identifier at the front of the variation name.
+ *
+ * Mutates the items. Returns counts per source for the log. Never throws: a
+ * TikTok read that fails is a warn, and the name pattern still applies.
+ */
+function resolveSellerSkus_(shopId, items) {
+  var counts = { sibling: 0, sheet: 0, tiktok: 0, name: 0, unresolved: 0 };
+  var known = {};
+  items.forEach(function (i) {
+    if (i.sku_id && i.seller_sku) known[String(i.sku_id)] = { sku: String(i.seller_sku), src: 'sibling' };
+  });
+  var blank = items.filter(function (i) { return !String(i.seller_sku || ''); });
+  if (!blank.length) return counts;
+
+  readAll_(TAB_SKUS).forEach(function (r) {
+    var id = String(r.tiktok_sku_id || '');
+    if (id && r.identifier && !known[id]) known[id] = { sku: String(r.identifier), src: 'sheet' };
+  });
+
+  var need = {};
+  blank.forEach(function (i) {
+    if (i.sku_id && !known[String(i.sku_id)] && i.listing_id) need[String(i.listing_id)] = 1;
+  });
+  Object.keys(need).forEach(function (listingId) {
+    try {
+      ttGetProduct_(shopId, listingId).skus.forEach(function (sk) {
+        if (sk.id && sk.sellerSku && !known[String(sk.id)]) {
+          known[String(sk.id)] = { sku: String(sk.sellerSku), src: 'tiktok' };
+        }
+      });
+    } catch (e) {
+      warn_('TS-ORD-07', 'seller_sku lookup: could not read listing ' + listingId + ': ' +
+        (e && e.message ? e.message : e) + ' [' + codeOf_(e) + ']', shopId);
+    }
+  });
+
+  blank.forEach(function (i) {
+    var hit = known[String(i.sku_id || '')];
+    if (hit) { i.seller_sku = hit.sku; counts[hit.src]++; return; }
+    var fromName = identifierFromVariation_(i.variation);
+    if (fromName) { i.seller_sku = fromName; counts.name++; return; }
+    counts.unresolved++;
+  });
+  return counts;
+}
+
+/** "3 from TikTok, 12 from names, 1 unresolved" — or '' when nothing was blank. */
+function describeResolution_(c) {
+  var parts = [];
+  if (c.sibling) parts.push(c.sibling + ' from sibling lines');
+  if (c.sheet) parts.push(c.sheet + ' from our rows');
+  if (c.tiktok) parts.push(c.tiktok + ' from TikTok');
+  if (c.name) parts.push(c.name + ' from names');
+  if (c.unresolved) parts.push(c.unresolved + ' unresolved');
+  return parts.join(', ');
+}
+
+/**
  * The line items behind one listing's total, inside the same window.
  *
  * Grouped by variation, because that is what a factory is being asked to
@@ -387,6 +481,13 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     var t = Number(r.created_epoch || 0);
     return t >= fromEpoch && t < toEpoch;
   });
+
+  // Rows synced before seller_sku was being filled at sync time get the same
+  // treatment here, so an old sync does not need repeating to read correctly.
+  if (items.length) {
+    var shopId = String(items[0].shop_id || '');
+    if (shopId) resolveSellerSkus_(shopId, items);
+  }
 
   var byVariation = {};
   items.forEach(function (r) {
@@ -409,6 +510,7 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     }
     var g = byVariation[key];
     if (!g.sku_image && r.sku_image) g.sku_image = String(r.sku_image);
+    if (!g.seller_sku && r.seller_sku) g.seller_sku = String(r.seller_sku);
     var qty = Number(r.quantity || 0);
     if (UNSOLD_STATUSES[String(r.status || '').toUpperCase()]) {
       g.unsold_units += qty;

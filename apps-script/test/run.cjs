@@ -101,7 +101,7 @@ ${src}
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     relayoutRows_, exportFilename_, fileSafe_, driveFileId_, PHOTO_PX, listingUrl_, listingLinkFormula_,
     imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
-    photoCandidates_, PHOTO_FETCH_PX,
+    photoCandidates_, PHOTO_FETCH_PX, identifierFromVariation_, describeResolution_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -1162,7 +1162,7 @@ check('every error code is used exactly once and is in ERROR-CODES.md', () => {
   for (const f of fs.readdirSync(DIR)) {
     if (!f.endsWith('.gs') || f === 'TikShopBackend.gs') continue
     const src = fs.readFileSync(path.join(DIR, f), 'utf8')
-    for (const m of src.matchAll(/(?:fail_\(\s*|code\s*[:=]\s*)'(TS-[A-Z]+-\d+)'/g)) codes.push(m[1])
+    for (const m of src.matchAll(/(?:fail_\(\s*|warn_\(\s*|code\s*[:=]\s*)'(TS-[A-Z]+-\d+)'/g)) codes.push(m[1])
   }
   if (codes.length < 50) throw new Error('too few codes found: ' + codes.length)
   const dupes = codes.filter((c, i) => codes.indexOf(c) !== i)
@@ -1245,6 +1245,31 @@ check('a variation this app never listed still has TikTok\'s image to resize', (
 
 check('the phone thumbnail and Drive resize both sit well under the pixel cap', () => {
   if (gs.PHOTO_FETCH_PX * gs.PHOTO_FETCH_PX * 4 > gs.SHEETS_IMAGE_MAX_PIXELS) throw new Error('too close to the cap')
+})
+
+// --- Recovering the identifier when TikTok leaves seller_sku blank -----------------
+
+check('the identifier is read off the front of a variation name, both apps\' styles', () => {
+  eq(gs.identifierFromVariation_('F21-Segretto cast iron Mint'), 'F21')
+  eq(gs.identifierFromVariation_('B6 Silver Magnetic Charging Stand'), 'B6')
+  eq(gs.identifierFromVariation_('F2-B1F1 Popcon medium pink with LED '), 'F2')
+  eq(gs.identifierFromVariation_('  hz12: thing'), 'HZ12')
+})
+
+check('names without an identifier yield blank, never a guess', () => {
+  eq(gs.identifierFromVariation_('Floral Blue'), '')
+  eq(gs.identifierFromVariation_('3 Tier, White'), '')
+  eq(gs.identifierFromVariation_('Default'), '')
+  eq(gs.identifierFromVariation_('Smoke Grey & White, 55L - 51*36*30cm, 3 PCS'), '')
+  eq(gs.identifierFromVariation_('ABCD12 four letters is not the scheme'), '')
+  eq(gs.identifierFromVariation_('F21Segretto no separator'), '')
+  eq(gs.identifierFromVariation_(''), '')
+})
+
+check('the resolution note names each source and the unresolved count', () => {
+  eq(gs.describeResolution_({ sibling: 2, sheet: 0, tiktok: 3, name: 12, unresolved: 1 }),
+     '2 from sibling lines, 3 from TikTok, 12 from names, 1 unresolved')
+  eq(gs.describeResolution_({ sibling: 0, sheet: 0, tiktok: 0, name: 0, unresolved: 0 }), '')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

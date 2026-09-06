@@ -53,7 +53,7 @@ the hard way, it goes here the same day, with the code that hit it.
 | Get Product under review | A variation still under review is **omitted** from the product read | Observed with B5, 6 Sep | `tiktok_sku_id` stored at push; `pendingToCarry_` carries them through edits; `confirmed_at` distinguishes removed from pending. |
 | Image upload | Must **not** carry `shop_cipher` | Error text, 6 Sep | `PATHS_WITHOUT_CIPHER`. |
 | Order line items | No `quantity` field — one line item is one unit | `inspectOrders`, 6 Sep | `quantity: 1` per line item. |
-| `seller_sku` on orders | Empty for products this app did not create | Observed | Grouping keys on `sku_id` first. |
+| `seller_sku` on orders | **Inconsistent**: blank on some line items of a variation and present on others (F20, 4 Sep); blank on every line of F21 | Observed in the Order Items tab | `resolveSellerSkus_` fills it from a sibling line, our SKU rows, TikTok's product read, then the `<1–3 letters><number>` pattern at the front of the variation name (`identifierFromVariation_`). Grouping keys on `sku_id`. |
 | Rate limits | Dynamic per app × shop; ~1 write/s is the safe assumption; HTTP 429 or code 36009002 | Docs | Pushes serialised by the script lock. |
 | Daily listing cap | 100 uploads/day on probation, 1,000 after | Products overview | Allowance shown in the app. |
 | Product page URL | `https://shop.tiktok.com/view/product/<id>?region=SG` | Shareable link format | `listingUrl_`. |

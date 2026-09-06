@@ -95,6 +95,57 @@ function authorizeHOUZE() { return logAuthorizeUrl_('HZ'); }
 function authorizeTableMatters() { return logAuthorizeUrl_('TM'); }
 function authorizePaintingMatters() { return logAuthorizeUrl_('PM'); }
 
+/**
+ * Every shop that still needs authorising, in one run.
+ *
+ * Authorising is the one step in this whole setup that cannot be automated —
+ * it is a consent screen that has to be approved while signed in as the shop.
+ * So the least this can do is stop making someone run a different function per
+ * shop, work out which ones are outstanding, and re-read the log each time.
+ *
+ * Shops already authorised are skipped rather than re-listed, because a
+ * re-authorisation that was not wanted costs the tokens currently working.
+ * Shops with no credentials are skipped too — Table Matters is deliberately
+ * not set up, and printing a broken link for it every run trains people to
+ * ignore the output.
+ */
+function authorizeAll() {
+  var lines = ['', 'SHOPS TO AUTHORISE', ''];
+  var pending = 0;
+
+  SHOPS.forEach(function (shop) {
+    if (!prop_(shop.id + '_SERVICE_ID')) {
+      lines.push('- ' + shop.brand + ': skipped, not set up yet');
+      return;
+    }
+    if (prop_(shop.id + '_ACCESS_TOKEN')) {
+      lines.push('- ' + shop.brand + ': already authorised, nothing to do');
+      return;
+    }
+    pending++;
+    lines.push('');
+    lines.push('== ' + pending + '. ' + shop.brand + '  (' + shop.handle + ') ==');
+    lines.push('Open this signed in as ' + shop.handle + ', in a PRIVATE window:');
+    lines.push('');
+    lines.push('   ' + ttAuthorizeUrl(shop.id));
+    lines.push('');
+  });
+
+  lines.push('');
+  if (pending === 0) {
+    lines.push('Nothing to authorise. Run checkSetup to confirm the rest.');
+  } else {
+    lines.push(pending + ' shop(s) to go.');
+    lines.push('A private window per shop, or the second sign-in reuses the first.');
+    lines.push('After approving, TikTok returns you to this script and stores the');
+    lines.push('tokens. Then run checkSetup.');
+  }
+
+  var out = lines.join('\n');
+  Logger.log(out);
+  return out;
+}
+
 function logAuthorizeUrl_(prefix) {
   var shop = shopById_(prefix);
   var url = ttAuthorizeUrl(prefix);

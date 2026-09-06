@@ -869,6 +869,57 @@ function authorizeHOUZE() { return logAuthorizeUrl_('HZ'); }
 function authorizeTableMatters() { return logAuthorizeUrl_('TM'); }
 function authorizePaintingMatters() { return logAuthorizeUrl_('PM'); }
 
+/**
+ * Every shop that still needs authorising, in one run.
+ *
+ * Authorising is the one step in this whole setup that cannot be automated —
+ * it is a consent screen that has to be approved while signed in as the shop.
+ * So the least this can do is stop making someone run a different function per
+ * shop, work out which ones are outstanding, and re-read the log each time.
+ *
+ * Shops already authorised are skipped rather than re-listed, because a
+ * re-authorisation that was not wanted costs the tokens currently working.
+ * Shops with no credentials are skipped too — Table Matters is deliberately
+ * not set up, and printing a broken link for it every run trains people to
+ * ignore the output.
+ */
+function authorizeAll() {
+  var lines = ['', 'SHOPS TO AUTHORISE', ''];
+  var pending = 0;
+
+  SHOPS.forEach(function (shop) {
+    if (!prop_(shop.id + '_SERVICE_ID')) {
+      lines.push('- ' + shop.brand + ': skipped, not set up yet');
+      return;
+    }
+    if (prop_(shop.id + '_ACCESS_TOKEN')) {
+      lines.push('- ' + shop.brand + ': already authorised, nothing to do');
+      return;
+    }
+    pending++;
+    lines.push('');
+    lines.push('== ' + pending + '. ' + shop.brand + '  (' + shop.handle + ') ==');
+    lines.push('Open this signed in as ' + shop.handle + ', in a PRIVATE window:');
+    lines.push('');
+    lines.push('   ' + ttAuthorizeUrl(shop.id));
+    lines.push('');
+  });
+
+  lines.push('');
+  if (pending === 0) {
+    lines.push('Nothing to authorise. Run checkSetup to confirm the rest.');
+  } else {
+    lines.push(pending + ' shop(s) to go.');
+    lines.push('A private window per shop, or the second sign-in reuses the first.');
+    lines.push('After approving, TikTok returns you to this script and stores the');
+    lines.push('tokens. Then run checkSetup.');
+  }
+
+  var out = lines.join('\n');
+  Logger.log(out);
+  return out;
+}
+
 function logAuthorizeUrl_(prefix) {
   var shop = shopById_(prefix);
   var url = ttAuthorizeUrl(prefix);
@@ -1959,8 +2010,20 @@ function route_(action, params, body, user) {
     case 'listings':
       return json_(listListings_(params.shop_id || body.shop_id));
 
+    // Reads its arguments from either place, like the read actions above.
+    //
+    // Not for tidiness: when a browser mishandles the redirect Apps Script
+    // answers through, the client retries the same call as a GET, and an
+    // action that only looks at the body would refuse it. This one is on the
+    // critical path — no listing means no stream to add SKUs to — so it must
+    // survive that retry. pushSku deliberately does not, because a photo does
+    // not fit in a URL; it is protected by its idempotency key instead.
     case 'addListing':
-      return json_(addListing_(body.shop_id, body.listing_id, user.name));
+      return json_(addListing_(
+        params.shop_id || body.shop_id,
+        params.listing_id || body.listing_id,
+        user.name
+      ));
 
     case 'skus':
       return json_(listSkus_(params.listing_id || body.listing_id));
@@ -1975,12 +2038,15 @@ function route_(action, params, body, user) {
       return json_(pushSku_(body, user));
 
     case 'exportListing':
-      return json_(exportListing_(body.listing_id, user.name));
+      return json_(exportListing_(params.listing_id || body.listing_id, user.name));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(usersAll_());
 
+    // Left POST-only on purpose. It is an admin action taken once in a while,
+    // never mid-stream, so it does not need to survive a broken redirect — and
+    // the fewer ways there are to change someone's role, the better.
     case 'setRole':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(setRole_(body.email, body.role, user));

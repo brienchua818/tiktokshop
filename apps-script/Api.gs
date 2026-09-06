@@ -129,8 +129,20 @@ function route_(action, params, body, user) {
     case 'listings':
       return json_(listListings_(params.shop_id || body.shop_id));
 
+    // Reads its arguments from either place, like the read actions above.
+    //
+    // Not for tidiness: when a browser mishandles the redirect Apps Script
+    // answers through, the client retries the same call as a GET, and an
+    // action that only looks at the body would refuse it. This one is on the
+    // critical path — no listing means no stream to add SKUs to — so it must
+    // survive that retry. pushSku deliberately does not, because a photo does
+    // not fit in a URL; it is protected by its idempotency key instead.
     case 'addListing':
-      return json_(addListing_(body.shop_id, body.listing_id, user.name));
+      return json_(addListing_(
+        params.shop_id || body.shop_id,
+        params.listing_id || body.listing_id,
+        user.name
+      ));
 
     case 'skus':
       return json_(listSkus_(params.listing_id || body.listing_id));
@@ -145,12 +157,15 @@ function route_(action, params, body, user) {
       return json_(pushSku_(body, user));
 
     case 'exportListing':
-      return json_(exportListing_(body.listing_id, user.name));
+      return json_(exportListing_(params.listing_id || body.listing_id, user.name));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(usersAll_());
 
+    // Left POST-only on purpose. It is an admin action taken once in a while,
+    // never mid-stream, so it does not need to survive a broken redirect — and
+    // the fewer ways there are to change someone's role, the better.
     case 'setRole':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(setRole_(body.email, body.role, user));

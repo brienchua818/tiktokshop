@@ -61,6 +61,25 @@ export class ScriptError extends Error {
   get isListingFull(): boolean {
     return this.code === 'LISTING_FULL'
   }
+
+  /**
+   * The request may have been carried out, but the answer never arrived.
+   *
+   * A rejection from TikTok is a decision — it definitely did not happen. But
+   * a lost connection, a redirect the browser mishandled, or a page where JSON
+   * was expected all leave the same question open: the write may well have
+   * landed and only the reply was dropped. A push in that state must not be
+   * reported as failed until someone has looked.
+   */
+  get isOutcomeUnknown(): boolean {
+    return (
+      this.status === 0 ||
+      this.code === 'NOT_JSON' ||
+      this.code === 'REDIRECT_METHOD' ||
+      this.status === 502 ||
+      this.status === 504
+    )
+  }
 }
 
 /**

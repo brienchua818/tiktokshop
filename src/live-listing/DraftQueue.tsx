@@ -215,15 +215,7 @@ export default function DraftQueue({
             key={draft.draft_id}
             className="flex items-start gap-2 py-1.5 border-b border-white/5 last:border-0"
           >
-            {draft.image_preview ? (
-              <img
-                src={draft.image_preview}
-                alt=""
-                className="w-9 h-9 rounded object-cover shrink-0"
-              />
-            ) : (
-              <div className="w-9 h-9 rounded bg-white/5 shrink-0" />
-            )}
+            <Thumbnail draft={draft} />
 
             <div className="min-w-0 flex-1">
               <p className="text-xs font-mono text-identifier">{draft.identifier}</p>
@@ -279,6 +271,46 @@ export default function DraftQueue({
       </ul>
     </div>
   )
+}
+
+/**
+ * A draft's photo, read from IndexedDB at render time.
+ *
+ * `image_preview` is a `blob:` URL, and a blob URL only exists for the life of
+ * the document that made it — the browser revokes it on unload. Persisting one
+ * in IndexedDB therefore stores a string that is guaranteed to be dead the
+ * next time the app opens, which is exactly what it looked like: this
+ * session's SKU showed its photo and every earlier one showed a broken image.
+ *
+ * The photo itself was never lost. It is in IndexedDB beside the draft, so the
+ * fix is to make the URL here and revoke it on the way out, rather than to
+ * keep one across sessions. `image_preview` is still honoured when it happens
+ * to be from this session, which saves a read on the row just added.
+ */
+function Thumbnail({ draft }: { draft: QueuedDraft }) {
+  const [url, setUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    let revoke: string | null = null
+    let cancelled = false
+
+    void (async () => {
+      const blob = await getPhoto(draft.draft_id)
+      if (cancelled || !blob) return
+      revoke = URL.createObjectURL(blob)
+      setUrl(revoke)
+    })()
+
+    return () => {
+      cancelled = true
+      // Not revoking leaks the blob for as long as the app is open, and a
+      // three-hour stream is two hundred photos.
+      if (revoke) URL.revokeObjectURL(revoke)
+    }
+  }, [draft.draft_id])
+
+  if (!url) return <div className="w-9 h-9 rounded bg-white/5 shrink-0" />
+  return <img src={url} alt="" className="w-9 h-9 rounded object-cover shrink-0" />
 }
 
 /** The live record for one identifier, if a refresh has been done. */
@@ -510,6 +542,38 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
         retryAfter: Number.MAX_SAFE_INTEGER,
       })
       return
+    }
+
+    /**
+     * Ask TikTok before declaring a failure whose outcome is unknown.
+     *
+     * A lost reply is not a failed write. The push may have reached Apps
+     * Script, uploaded the photo, edited the product and only lost the
+     * response on the way home — which is precisely what happened on a real
+     * SKU: the listing showed four variations while the app showed the fourth
+     * as failed. Reporting that as a failure sends someone to Seller Center to
+     * find out, which is the errand this whole screen exists to remove.
+     *
+     * Cheap, and only on the unknown-outcome path: a rejection from TikTok is
+     * a decision and needs no second opinion.
+     */
+    if (api_error?.isOutcomeUnknown && draft.listing_id) {
+      try {
+        const live = await api.listingState(draft.listing_id)
+        const landed = live.variants.find((v) => v.identifier === draft.identifier)
+        if (landed?.on_tiktok) {
+          await updateDraft(draft.draft_id, {
+            status: 'pushed',
+            error: null,
+            settled: true,
+            listing_id: draft.listing_id,
+          })
+          return
+        }
+      } catch {
+        // The check itself failed. Falls through and is reported as before —
+        // an unanswered question is still better recorded than guessed at.
+      }
     }
 
     // A connection failure is retryable; a rejection from TikTok is not, and

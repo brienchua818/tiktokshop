@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
+const FILES = ['Config.gs', 'Lock.gs', 'Sheet.gs', 'Export.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -99,6 +99,7 @@ ${src}
     cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
     sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_, buildRemovePayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
+    relayoutRows_, exportFilename_, fileSafe_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -1060,6 +1061,61 @@ check('the removed target is never re-added via carry-forward', () => {
   // If the target were also in alsoKeep (stale record), it must not sneak back.
   const p = gs.buildRemovePayload_({ productId: 'p', skus: three }, [keep({ id: 'id-b', sellerSku: 'A2' })], 'id-b')
   if (p.skus.some((x) => x.id === 'id-b')) throw new Error('target came back')
+})
+
+// --- Sheet header migration -------------------------------------------------
+//
+// The SKU tab gained tiktok_sku_id and confirmed_at while rows already existed.
+// Reads map by position, so those rows came back shifted — an idempotency key
+// where a TikTok sku id should be. This is the repair, and the cases are the
+// real shapes found in the Sheet.
+
+const OLD = ['a', 'b', 'e']
+const NEW = ['a', 'b', 'c', 'd', 'e']
+
+check('an old-shape row is re-laid-out by name, new columns blank', () => {
+  const out = gs.relayoutRows_(OLD, NEW, [['1', '2', '5']])
+  eq(JSON.stringify(out), JSON.stringify([['1', '2', '', '', '5']]))
+})
+
+check('a row already written in the new shape is kept as it is', () => {
+  // Five values under a three-column header: only current code writes that.
+  const out = gs.relayoutRows_(OLD, NEW, [['1', '2', '3', '4', '5']])
+  eq(JSON.stringify(out), JSON.stringify([['1', '2', '3', '4', '5']]))
+})
+
+check('old and new shapes in the same tab each go to the right place', () => {
+  const out = gs.relayoutRows_(OLD, NEW, [
+    ['1', '2', '5', '', ''],        // old row, padded by getValues
+    ['1', '2', '3', '4', '5'],      // new row
+  ])
+  eq(out[0][4], '5')
+  eq(out[0][2], '')
+  eq(out[1][2], '3')
+})
+
+check('a dropped column disappears and a reordered one follows its name', () => {
+  const out = gs.relayoutRows_(['x', 'y', 'z'], ['z', 'x'], [['1', '2', '3']])
+  eq(JSON.stringify(out), JSON.stringify([['3', '1']]))
+})
+
+check('identical headers change nothing', () => {
+  const out = gs.relayoutRows_(NEW, NEW, [['1', '2', '3', '4', '5']])
+  eq(JSON.stringify(out), JSON.stringify([['1', '2', '3', '4', '5']]))
+})
+
+// --- Export naming ------------------------------------------------------------
+
+check('export filename carries when and who, and keeps the email readable', () => {
+  const name = gs.exportFilename_('HOUZE - Purchase order 2026-09-04 to 2026-09-06', 'Brien Chua (brienchua@sheldonglobal.com)')
+  if (!/^HOUZE - Purchase order 2026-09-04 to 2026-09-06 - requested \d{4}-\d{2}-\d{2} \d{4} by Brien Chua \(brienchua@sheldonglobal.com\)\.xlsx$/.test(name)) {
+    throw new Error('unexpected name: ' + name)
+  }
+})
+
+check('characters a filename cannot hold are removed, nothing else is', () => {
+  eq(gs.fileSafe_('a/b\\c:d*e?f"g<h>i|j'), 'a b c d e f g h i j')
+  eq(gs.fileSafe_('Table Matters - 7" bowl [Live]'), 'Table Matters - 7 bowl [Live]')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

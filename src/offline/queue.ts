@@ -83,8 +83,17 @@ export function getPhoto(draftId: string): Promise<Blob | undefined> {
   return tx<Blob | undefined>(PHOTOS, 'readonly', (store) => store.get(draftId))
 }
 
-export function allDrafts(): Promise<QueuedDraft[]> {
-  return tx<QueuedDraft[]>(STORE, 'readonly', (store) => store.getAll())
+/**
+ * Every draft, oldest first.
+ *
+ * IndexedDB returns rows in key order, and the key is a random UUID — so
+ * without this the list is in an order nobody chose (B5, B1, B2, B6, B3 on
+ * a real stream). Sorted here rather than at each call site so no screen can
+ * forget to.
+ */
+export async function allDrafts(): Promise<QueuedDraft[]> {
+  const rows = await tx<QueuedDraft[]>(STORE, 'readonly', (store) => store.getAll())
+  return rows.sort((a, b) => a.created_at.localeCompare(b.created_at))
 }
 
 export async function updateDraft(

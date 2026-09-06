@@ -218,6 +218,9 @@ export interface ExportRequest extends DateWindow {
 export interface ExportResult {
   url: string
   name: string
+  /** Where in the shared drive it went, e.g. "Exports/2026/2026-09/2026-09-06". */
+  folder?: string
+  folder_url?: string
   listings: number
   units: number
   revenue: number

@@ -23,6 +23,46 @@ function sgtStamp_(d) {
   return Utilities.formatDate(d || new Date(), 'Asia/Singapore', 'yyyy-MM-dd HHmm');
 }
 
+/**
+ * The export naming convention, in one place so every file in the folder
+ * sorts and reads the same way:
+ *
+ *     <what> - requested 2026-09-06 2359 by Brien Chua (brienchua@sheldonglobal.com).xlsx
+ *
+ * When it was produced and who asked for it are both in the name, because a
+ * purchase order is something a factory is paid against, and "which one" and
+ * "who sent it" are the two questions asked about it afterwards.
+ */
+function exportFilename_(what, requester) {
+  return fileSafe_(what) + ' - requested ' + sgtStamp_() + ' by ' +
+    fileSafe_(requester || 'unknown') + '.xlsx';
+}
+
+/**
+ * Strip only what a filename cannot hold. Unlike safeName_, this keeps "@",
+ * "." and brackets, so an email address survives into the name.
+ */
+function fileSafe_(text) {
+  return String(text || '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** "Exports/2026/2026-09/2026-09-06" — where the file went, for the screen. */
+function folderPath_(folder) {
+  var parts = [];
+  var f = folder;
+  var guard = 0;
+  while (f && guard++ < 6) {
+    parts.unshift(f.getName());
+    if (f.getId() === EXPORTS_FOLDER_ID) break;
+    var it = f.getParents();
+    f = it.hasNext() ? it.next() : null;
+  }
+  return parts.join('/');
+}
+
 /** Find or create a child folder. Never creates a duplicate. */
 function childFolder_(parent, name) {
   var it = parent.getFoldersByName(name);
@@ -95,9 +135,8 @@ function exportListing_(listingId, actor) {
       headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
     }).getBlob();
 
-    var filename = (listing.brand || listing.shop_id) + ' - ' +
-      safeName_(listing.product_name || listingId) + ' - ' +
-      safeName_(actor) + ' - ' + sgtStamp_() + '.xlsx';
+    var filename = exportFilename_((listing.brand || listing.shop_id) + ' - ' +
+      safeName_(listing.product_name || listingId), actor);
     blob.setName(filename);
 
     var file = datedExportFolder_().createFile(blob);
@@ -159,8 +198,8 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       ['Purchase order — ' + shop.brand],
       [window],
       [divisor ? 'Cost = selling price / ' + divisor : 'Selling prices only, no cost column'],
-      ['Prepared by ' + actor + ' on ' + sgtStamp_()],
-      []
+      ['Requested by ' + actor + ' on ' + sgtStamp_()],
+      ['']
     ];
     sh.getRange(1, 1, head.length, 1).setValues(head);
     sh.getRange(1, 1).setFontWeight('bold').setFontSize(13);
@@ -214,7 +253,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       var top = [
         [l.product_name || l.listing_id],
         ['Listing ' + l.listing_id + '   ·   ' + window],
-        []
+        ['']
       ];
       s2.getRange(1, 1, top.length, 1).setValues(top);
       s2.getRange(1, 1).setFontWeight('bold').setFontSize(12);
@@ -243,18 +282,22 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
     }).getBlob();
 
-    var filename = shop.brand + ' - Orders ' + fromDate +
-      (fromDate === toDate ? '' : ' to ' + toDate) +
-      ' - ' + safeName_(actor) + ' - ' + sgtStamp_() + '.xlsx';
+    var filename = exportFilename_(
+      shop.brand + ' - Purchase order ' + fromDate +
+        (fromDate === toDate ? '' : ' to ' + toDate),
+      actor);
     blob.setName(filename);
 
-    var file = datedExportFolder_().createFile(blob);
+    var folder = datedExportFolder_();
+    var file = folder.createFile(blob);
     logEvent_(actor, 'export_orders', shop.brand,
       filename + ' (' + chosen.length + ' listings)', 'ok');
 
     return {
       url: file.getUrl(),
       name: filename,
+      folder: folderPath_(folder),
+      folder_url: folder.getUrl(),
       listings: chosen.length,
       units: summary.total_units,
       revenue: summary.total_revenue,

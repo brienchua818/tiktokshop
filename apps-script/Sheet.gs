@@ -53,8 +53,93 @@ function sheet_(name) {
     // open on an empty sheet.
     var first = ss.getSheetByName('Sheet1');
     if (first && ss.getSheets().length > 1) ss.deleteSheet(first);
+  } else {
+    ensureHeaders_(name, sh);
   }
   return sh;
+}
+
+/** Tabs whose header row has been checked this execution. One read each. */
+var HEADERS_CHECKED_ = {};
+
+/**
+ * Re-lay rows written under `have` out in the order of `want`. Pure, so it can
+ * be tested without a spreadsheet.
+ *
+ * A row with any value beyond the width of `have` was written by current code
+ * by position, so it is already in the `want` layout and is only trimmed or
+ * padded. Every other row is mapped by column name; a name new to `want` is
+ * blank, a name dropped from it disappears.
+ */
+function relayoutRows_(have, want, rows) {
+  var oldWidth = have.length;
+  return rows.map(function (row) {
+    var beyond = row.slice(oldWidth).some(function (v) {
+      return v !== undefined && v !== null && String(v) !== '';
+    });
+    if (beyond) {
+      return want.map(function (_, i) {
+        return row[i] === undefined || row[i] === null ? '' : row[i];
+      });
+    }
+    var byName = {};
+    have.forEach(function (h, i) { if (h) byName[h] = row[i]; });
+    return want.map(function (h) {
+      return byName[h] === undefined || byName[h] === null ? '' : byName[h];
+    });
+  });
+}
+
+/**
+ * Bring a tab's columns up to date with HEADERS when the code has gained,
+ * lost or reordered a column since the tab was created.
+ *
+ * Every read in this file maps a row to fields by POSITION in HEADERS, and
+ * every write lays a row out the same way. That is fine while the tab was
+ * created by the same code. It silently goes wrong the moment a column is
+ * added: the header row still says the old names, rows written before the
+ * change are one shape and rows written after are another, and a read
+ * shifts the old ones — tiktok_sku_id came back holding an idempotency key,
+ * confirmed_at a creation date. Nothing threw. The wrong values simply flowed
+ * into decisions about what is on TikTok.
+ *
+ * So the header row is treated as the record of the shape the data was
+ * written in, and rows are re-laid-out by NAME against it. A row that has
+ * values beyond the old header's width can only have been written by the new
+ * code (there was nowhere else for them to come from), so it is already in
+ * the new shape and is kept as it is.
+ */
+function ensureHeaders_(name, sh) {
+  if (HEADERS_CHECKED_[name]) return;
+  HEADERS_CHECKED_[name] = true;
+  var want = HEADERS[name];
+  if (!want || !want.length) return;
+
+  var width = Math.max(sh.getLastColumn(), want.length);
+  var have = sh.getRange(1, 1, 1, width).getValues()[0]
+    .map(function (h) { return String(h || '').trim(); });
+  while (have.length && !have[have.length - 1]) have.pop();
+  if (have.join('\u0001') === want.join('\u0001')) return;
+
+  withScriptLock_(30000, function () {
+    var lastRow = sh.getLastRow();
+    var oldWidth = have.length;
+    var rows = lastRow > 1 ? sh.getRange(2, 1, lastRow - 1, width).getValues() : [];
+
+    var out = relayoutRows_(have, want, rows);
+
+    // Header first, then every row in the new layout, then anything left over
+    // to the right is cleared so a stale column cannot be read back later.
+    sh.getRange(1, 1, 1, width).clearContent();
+    sh.getRange(1, 1, 1, want.length).setValues([want]).setFontWeight('bold');
+    if (out.length) {
+      sh.getRange(2, 1, out.length, width).clearContent();
+      sh.getRange(2, 1, out.length, want.length).setValues(out);
+    }
+    SpreadsheetApp.flush();
+    logEvent_('system', 'migrate_headers', '',
+      name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
+  });
 }
 
 /** Run once to lay the spreadsheet out. Safe to re-run. */

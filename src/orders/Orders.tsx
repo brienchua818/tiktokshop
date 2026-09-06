@@ -279,21 +279,40 @@ export default function Orders({ shop }: { shop: Shop }) {
               </p>
             </div>
 
+            {/* The file lives in the shared drive, not on this phone. Say so,
+                say where, and make opening it a real button — a one-line link
+                was missed on a phone screen. */}
             {exported && (
-              <a
-                href={exported.url}
-                target="_blank"
-                rel="noreferrer"
-                className="block text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2.5 hover:border-emerald-400/60"
-              >
-                <span className="font-medium">{exported.name}</span>
-                <span className="block text-emerald-300/70 mt-0.5">
+              <div className="text-xs text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-3 space-y-2">
+                <p className="font-medium text-emerald-300">✅ Purchase order saved to the shared drive</p>
+                <p className="break-words">{exported.name}</p>
+                <p className="text-emerald-300/70">
                   {exported.listings} listing{exported.listings === 1 ? '' : 's'} ·{' '}
                   {exported.units} units · ${exported.revenue.toFixed(2)}
-                  {exported.cost_divisor ? ` · cost ÷ ${exported.cost_divisor}` : ''} — tap to
-                  open in Drive
-                </span>
-              </a>
+                  {exported.cost_divisor ? ` · cost ÷ ${exported.cost_divisor}` : ''}
+                  {exported.folder ? ` · in ${exported.folder}` : ''}
+                </p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <a
+                    href={exported.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="min-h-11 inline-flex items-center px-4 rounded-lg bg-emerald-500 text-black font-medium"
+                  >
+                    Open the Excel file
+                  </a>
+                  {exported.folder_url && (
+                    <a
+                      href={exported.folder_url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="min-h-11 inline-flex items-center px-4 rounded-lg border border-emerald-400/50 text-emerald-200"
+                    >
+                      Open the folder
+                    </a>
+                  )}
+                </div>
+              </div>
             )}
           </div>
 

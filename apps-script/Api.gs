@@ -10,6 +10,22 @@
  * shops ends up open to anyone with a Google account.
  */
 
+
+/**
+ * Who is acting, for the log's error path. Set once identity is verified, so a
+ * failure after that point is attributed to a person rather than "unknown" —
+ * which is what every export failure read as in the log.
+ */
+var actorName_ = '';
+
+/** How a person is named on a file they asked for: name, then email as the id. */
+function requester_(user) {
+  var name = String(user.name || '').trim();
+  var email = String(user.email || '').trim();
+  if (name && email) return name + ' (' + email + ')';
+  return name || email || 'unknown';
+}
+
 function doGet(e) {
   // TikTok sends the seller back as {redirect_url}?code=...&state=...
   // Checked before anything else, or the callback would be treated as an API
@@ -70,6 +86,7 @@ function handle_(e, method) {
     }
 
     var user = resolveUser_(identity);
+    actorName_ = user.name || user.email || '';
 
     if (action === 'whoami') {
       return json_({
@@ -126,7 +143,7 @@ function handle_(e, method) {
     // Log the detail, return something safe. A stack trace in a response body
     // is information disclosure.
     console.error(action + ' failed: ' + err + (err && err.stack ? '\n' + err.stack : ''));
-    logEvent_((params && params.actor) || 'unknown', action, '', message, 'error');
+    logEvent_(actorName_ || (params && params.actor) || 'unknown', action, '', message, 'error');
 
     // A rejection from TikTok is the operator's to act on, so its own wording
     // goes through verbatim — "you haven't set the return warehouse" is
@@ -220,11 +237,11 @@ function route_(action, params, body, user) {
       return json_(exportOrders_(
         body.shop_id, body.listing_ids || [],
         body.from_date, body.from_time, body.to_date, body.to_time,
-        body.cost_divisor, user.name
+        body.cost_divisor, requester_(user)
       ));
 
     case 'exportListing':
-      return json_(exportListing_(params.listing_id || body.listing_id, user.name));
+      return json_(exportListing_(params.listing_id || body.listing_id, requester_(user)));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);

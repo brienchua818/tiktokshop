@@ -166,7 +166,107 @@ function ttGetProduct_(prefix, productId) {
       warehouseId: inventory.warehouse_id || ''
     };
   });
-  return { productId: r.data.id || productId, title: r.data.title || '', skus: skus };
+  return {
+    productId: r.data.id || productId,
+    title: r.data.title || '',
+    // TikTok re-reviews the whole product on every edit, so this changes each
+    // time a variation is added. Carried out of here rather than discarded,
+    // because otherwise the only way to know whether a push actually landed is
+    // to open Seller Center.
+    status: r.data.status || '',
+    auditReasons: auditReasons_(r.data),
+    skus: skus
+  };
+}
+
+/**
+ * Why a listing was rejected, flattened into readable lines.
+ *
+ * The shape TikTok uses nests reasons under positions, which is right for a
+ * form that can highlight fields and useless on a phone. Reading defensively
+ * because a rejection is exactly when a missing field would be least welcome.
+ */
+function auditReasons_(data) {
+  var out = [];
+  var groups = (data && data.audit_failed_reasons) || [];
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i] || {};
+    var reasons = g.reasons || [];
+    for (var j = 0; j < reasons.length; j++) {
+      var line = String(reasons[j] || '').trim();
+      if (line) out.push(g.position ? g.position + ': ' + line : line);
+    }
+    var tips = g.suggestions || [];
+    for (var k = 0; k < tips.length; k++) {
+      var tip = String(tips[k] || '').trim();
+      if (tip) out.push('Fix: ' + tip);
+    }
+  }
+  return out;
+}
+
+/**
+ * What a listing looks like on TikTok right now, per variation.
+ *
+ * Answers the three questions that otherwise mean opening Seller Center: has
+ * the push landed, is the variation live or still under review, and how much
+ * stock is left.
+ *
+ * `sold` is `set - available`, not a figure TikTok reports. The product API has
+ * no sold count — that lives in orders — but we know what we asked for and it
+ * tells us what remains, so the difference is sound unless someone edits stock
+ * in Seller Center. Labelled as derived in the UI rather than presented as
+ * TikTok's own number.
+ */
+function listingState_(listingId) {
+  var rows = listSkus_(listingId);
+  var shopId = rows.length ? String(rows[0].shop_id) : '';
+  if (!shopId) {
+    var listing = readAll_(TAB_LISTINGS).filter(function (r) {
+      return String(r.listing_id) === String(listingId);
+    })[0];
+    shopId = listing ? String(listing.shop_id) : '';
+  }
+  if (!shopId) throw new Error('Unknown listing: ' + listingId);
+
+  var live = ttGetProduct_(shopId, String(listingId));
+
+  // Keyed by seller_sku, which is the identifier the app assigns and the only
+  // field both sides agree on — a TikTok sku id is not known until after the
+  // push, and a row pushed from another device would not have it locally.
+  var bySellerSku = {};
+  live.skus.forEach(function (s) {
+    if (s.sellerSku) bySellerSku[String(s.sellerSku)] = s;
+  });
+
+  var variants = rows.map(function (r) {
+    var match = bySellerSku[String(r.identifier)];
+    var set = Number(r.stock || 0);
+    var available = match ? Number(match.quantity || 0) : null;
+    return {
+      identifier: String(r.identifier || ''),
+      variant: String(r.variant || ''),
+      price: String(r.price || ''),
+      status: String(r.status || ''),
+      on_tiktok: Boolean(match),
+      stock_set: set,
+      stock_available: available,
+      // Never negative: someone raising stock in Seller Center would otherwise
+      // read as negative sales, which is worse than showing nothing.
+      sold: available === null ? null : Math.max(0, set - available)
+    };
+  });
+
+  return {
+    listing_id: String(listingId),
+    title: live.title,
+    product_status: live.status,
+    audit_reasons: live.auditReasons,
+    variations_on_tiktok: live.skus.length,
+    max_skus: MAX_SKUS_PER_PRODUCT,
+    variants: variants,
+    checked_at: new Date().toISOString()
+  };
 }
 
 /**

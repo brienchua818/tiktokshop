@@ -371,6 +371,54 @@ function ttAuthorizedShops_(prefix, accessToken) {
 }
 
 /** Check every shop answers. Run by hand after setting up credentials. */
+/**
+ * Print the raw Get Product response for the first listing on record.
+ *
+ * Here because the field names for review state were written from
+ * documentation that cannot be read from a script — the reference site is a
+ * JavaScript application — and a status display built on guessed field names
+ * would show "unknown" forever without ever erroring. One run against a real
+ * listing settles it.
+ *
+ * Read-only. Prints the response, changes nothing.
+ */
+function inspectProduct() {
+  var listings = readAll_(TAB_LISTINGS);
+  if (!listings.length) {
+    Logger.log('No listings on record yet. Add one in the app first.');
+    return;
+  }
+  var row = listings[listings.length - 1];
+  var shopId = String(row.shop_id);
+  var productId = String(row.listing_id);
+
+  Logger.log('Shop: ' + shopId + '   Product: ' + productId);
+
+  var r = ttFetch_(shopId, 'get', '/product/202309/products/' + productId,
+    { category_version: CATEGORY_VERSION }, null);
+
+  if (r.code !== 0) {
+    Logger.log('TikTok refused: ' + (r.message || r.code));
+    return;
+  }
+
+  var d = r.data || {};
+  Logger.log('--- the fields the status display depends on ---');
+  Logger.log('status              = ' + JSON.stringify(d.status));
+  Logger.log('audit               = ' + JSON.stringify(d.audit));
+  Logger.log('audit_failed_reasons= ' + JSON.stringify(d.audit_failed_reasons));
+  Logger.log('top-level keys      = ' + Object.keys(d).join(', '));
+
+  var sku = (d.skus || [])[0];
+  if (sku) {
+    Logger.log('--- first sku ---');
+    Logger.log('sku keys            = ' + Object.keys(sku).join(', '));
+    Logger.log('inventory           = ' + JSON.stringify(sku.inventory));
+    Logger.log('seller_sku          = ' + JSON.stringify(sku.seller_sku));
+  }
+  return 'Logged. Paste the log to Brien.';
+}
+
 function ttSelfTest() {
   var out = [];
   SHOPS.forEach(function (s) {

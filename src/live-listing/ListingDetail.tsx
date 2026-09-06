@@ -165,6 +165,7 @@ export default function ListingDetail({
         <div className="listing-queue min-w-0">
           <DraftQueue
             drafts={drafts}
+            listingId={listing.listing_id}
             onChanged={refreshDrafts}
             onDelete={async (id) => {
               await removeDraft(id)

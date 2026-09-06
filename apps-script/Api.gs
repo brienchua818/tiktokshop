@@ -152,6 +152,11 @@ function route_(action, params, body, user) {
         params.product_name || body.product_name || ''
       ));
 
+    // What TikTok shows right now: review state, and stock per variation.
+    // Read-only and safe to call on a refresh button.
+    case 'listingState':
+      return json_(listingState_(params.listing_id || body.listing_id));
+
     case 'skus':
       return json_(listSkus_(params.listing_id || body.listing_id));
 

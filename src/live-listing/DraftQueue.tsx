@@ -1,7 +1,17 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError } from '../lib/api'
+import { api, ApiError, type ListingState, type LiveVariant } from '../lib/api'
 import { toBase64 } from '../lib/bytes'
-import { afterAttempt, backfillListingId, allDrafts, MAX_AUTO_ATTEMPTS, nextBatch, getPhoto, needsAttention, updateDraft } from '../offline/queue'
+import {
+  afterAttempt,
+  backfillListingId,
+  allDrafts,
+  MAX_AUTO_ATTEMPTS,
+  nextBatch,
+  getPhoto,
+  needsAttention,
+  retryDraft,
+  updateDraft,
+} from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
@@ -25,15 +35,54 @@ export const LISTING_FULL_MARKER = '[listing-full]'
  */
 export default function DraftQueue({
   drafts,
+  listingId,
   onChanged,
   onDelete,
 }: {
   drafts: QueuedDraft[]
+  /** The listing these SKUs belong to, so its live state can be read back. */
+  listingId: string | null
   onChanged: () => Promise<void>
   onDelete: (draftId: string) => void | Promise<void>
 }) {
   const online = useOnlineStatus()
   const [working, setWorking] = useState(false)
+
+  /**
+   * What TikTok says about this listing, as of the last refresh.
+   *
+   * Null until asked. A push landing means TikTok ACCEPTED the SKU, which is
+   * not the same as the variation being buyable — every edit sends the whole
+   * product back for review — so "pushed" on this device must not be drawn as
+   * "Live". Only this can say that.
+   */
+  const [live, setLive] = useState<ListingState | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [checkError, setCheckError] = useState('')
+
+  async function refresh() {
+    if (!listingId) return
+    setChecking(true)
+    setCheckError('')
+    try {
+      setLive(await api.listingState(listingId))
+    } catch (e: unknown) {
+      setCheckError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  // Checked once when there is something to check, and after that on request.
+  // Not polled: it is a TikTok call per refresh, review takes minutes rather
+  // than seconds, and a timer firing through a three-hour broadcast would
+  // spend the shop's rate limit on nothing.
+  const pushedCount = drafts.filter((d) => d.status === 'pushed').length
+  useEffect(() => {
+    if (!listingId || pushedCount === 0 || live || checking) return
+    void refresh()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listingId, pushedCount])
 
   // Drain the queue whenever the connection returns or new work appears.
   // A single in-flight guard keeps a reconnect from starting a second pass
@@ -98,13 +147,38 @@ export default function DraftQueue({
 
   return (
     <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-3">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* "Sent", not "live". A push landing means TikTok accepted the SKU;
+            whether buyers can see it is a separate question that only a
+            refresh can answer. */}
         <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
-          SKUs ({pushed.length}/{drafts.length} live)
+          SKUs ({pushed.length}/{drafts.length} sent)
         </p>
         {working && <span className="text-xs text-blue-400">Uploading…</span>}
         {!online && <span className="text-xs text-amber-400">Waiting for a connection</span>}
+        <span className="flex-1" />
+        {listingId && pushed.length > 0 && (
+          <button
+            onClick={() => void refresh()}
+            disabled={checking}
+            className="text-xs px-2.5 min-h-8 rounded-lg border border-white/10 text-gray-300 hover:border-accent/50 disabled:opacity-50"
+          >
+            {checking ? 'Checking…' : '↻ Check TikTok'}
+          </button>
+        )}
       </div>
+
+      {/* The listing's own review state. TikTok resends the whole product for
+          review on every edit, so this is normal after each variation rather
+          than a sign of trouble — and saying so is the difference between
+          waiting calmly and opening Seller Center to check. */}
+      {live && <ReviewBanner live={live} />}
+
+      {checkError && (
+        <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+          {checkError}
+        </p>
+      )}
 
       {/* A full listing is not a fault — Singapore allows 100 variations per
           product, so a long factory run simply outgrows one. It gets its own
@@ -154,6 +228,13 @@ export default function DraftQueue({
             <div className="min-w-0 flex-1">
               <p className="text-xs font-mono text-identifier">{draft.identifier}</p>
               <p className="text-xs text-gray-400 truncate">{draft.title}</p>
+
+              {/* Stock as TikTok has it, once a refresh has been done. Sold is
+                  derived — set minus what remains — because the product API
+                  reports no sold count; that lives in orders. Labelled so
+                  nobody takes it for TikTok's own figure. */}
+              {liveFor(live, draft.identifier) && <StockLine v={liveFor(live, draft.identifier)!} />}
+
               {/* TikTok's own rejection text, verbatim. A generic "failed" is
                   what makes the current app hard to recover from. */}
               {draft.error && (
@@ -162,11 +243,27 @@ export default function DraftQueue({
                   {draft.error.replace(LISTING_FULL_MARKER, '').trim()}
                 </p>
               )}
+
+              {/* Only on a SKU that has stopped trying by itself. Offering it
+                  on one still counting down would invite a second push of
+                  something already in flight. */}
+              {draft.status === 'failed' && draft.attempts >= MAX_AUTO_ATTEMPTS && (
+                <button
+                  onClick={() => void retryDraft(draft.draft_id).then(onChanged)}
+                  className="mt-1 text-xs px-2.5 min-h-8 rounded-lg bg-accent/90 hover:bg-accent text-white"
+                >
+                  ↻ Retry {draft.identifier}
+                </button>
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
               <span className="text-xs text-gray-500">${draft.price}</span>
-              <StatusBadge draft={draft} />
+              <StatusBadge
+                draft={draft}
+                live={liveFor(live, draft.identifier)}
+                productStatus={live?.product_status ?? null}
+              />
               {draft.status !== 'pushed' && (
                 <button
                   onClick={() => void onDelete(draft.draft_id)}
@@ -184,8 +281,134 @@ export default function DraftQueue({
   )
 }
 
-function StatusBadge({ draft }: { draft: QueuedDraft }) {
-  if (draft.status === 'pushed') return <span className="text-xs text-emerald-400">Live</span>
+/** The live record for one identifier, if a refresh has been done. */
+function liveFor(live: ListingState | null, identifier: string): LiveVariant | null {
+  return live?.variants.find((v) => v.identifier === identifier) ?? null
+}
+
+/**
+ * TikTok's product statuses, in the words of someone standing in a factory.
+ *
+ * Only the ones that can be seen from here are named. An unrecognised status
+ * is shown verbatim rather than mapped to "unknown", because a status this
+ * code has not met before is exactly the one worth reading.
+ */
+const PRODUCT_STATUS: Record<string, { label: string; tone: string; note: string }> = {
+  ACTIVATE: {
+    label: 'Live',
+    tone: 'emerald',
+    note: 'Approved and buyable.',
+  },
+  PENDING: {
+    label: 'Under review',
+    tone: 'amber',
+    note: 'TikTok reviews the whole product after every change, so this is normal each time a variation is added. Variations already approved stay buyable throughout.',
+  },
+  FAILED: {
+    label: 'Rejected',
+    tone: 'red',
+    note: 'TikTok refused this listing. The reasons are below.',
+  },
+  DRAFT: { label: 'Draft', tone: 'gray', note: 'Not submitted yet.' },
+  SELLER_DEACTIVATED: {
+    label: 'Deactivated by you',
+    tone: 'gray',
+    note: 'Turned off in Seller Center, not by this app.',
+  },
+  PLATFORM_DEACTIVATED: {
+    label: 'Deactivated by TikTok',
+    tone: 'red',
+    note: 'TikTok took this listing down.',
+  },
+  FREEZE: { label: 'Frozen', tone: 'red', note: 'TikTok has frozen this listing.' },
+  DELETED: { label: 'Deleted', tone: 'red', note: 'This listing no longer exists on TikTok.' },
+}
+
+const TONES: Record<string, string> = {
+  emerald: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30',
+  amber: 'text-amber-200 bg-amber-500/10 border-amber-500/30',
+  red: 'text-red-300 bg-red-500/10 border-red-500/30',
+  gray: 'text-gray-300 bg-white/5 border-white/10',
+}
+
+function ReviewBanner({ live }: { live: ListingState }) {
+  const known = PRODUCT_STATUS[live.product_status]
+  const tone = TONES[known?.tone ?? 'gray']
+  const checked = new Date(live.checked_at).toLocaleTimeString('en-SG', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Asia/Singapore',
+  })
+
+  return (
+    <div className={`text-xs border rounded-lg px-3 py-2.5 space-y-1 ${tone}`}>
+      <p className="font-medium">
+        {known?.label ?? (live.product_status || "Status unavailable")}
+        <span className="font-normal opacity-60">
+          {' '}
+          · {live.variations_on_tiktok} of {live.max_skus} variations · checked {checked}
+        </span>
+      </p>
+      {known?.note && <p className="opacity-70">{known.note}</p>}
+      {live.audit_reasons.length > 0 && (
+        <ul className="list-disc pl-4 space-y-0.5 opacity-90">
+          {live.audit_reasons.map((r, i) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function StockLine({ v }: { v: LiveVariant }) {
+  if (!v.on_tiktok) {
+    // The device thinks this was sent and TikTok has never heard of it. Worth
+    // saying loudly: it is the one failure the queue cannot detect by itself.
+    return <p className="text-xs text-red-400 mt-0.5">Not on TikTok — retry this SKU.</p>
+  }
+  return (
+    <p className="text-xs text-gray-500 mt-0.5">
+      <span className="text-gray-300">{v.stock_available}</span> left of {v.stock_set}
+      {v.sold !== null && v.sold > 0 && (
+        <span className="text-emerald-400/80"> · {v.sold} sold</span>
+      )}
+    </p>
+  )
+}
+
+/**
+ * The state of one SKU, from this device's view and TikTok's.
+ *
+ * "Pushed" used to be drawn as "Live", which was wrong in a way that mattered:
+ * TikTok accepting a SKU only starts a review, and every added variation sends
+ * the whole product back through it. So a sent SKU reads as "Sent" until a
+ * refresh confirms the listing is ACTIVATE, and only then as "Live".
+ */
+function StatusBadge({
+  draft,
+  live,
+  productStatus,
+}: {
+  draft: QueuedDraft
+  live: LiveVariant | null
+  /** TikTok's review state for the whole product — what decides "Live". */
+  productStatus: string | null
+}) {
+  if (draft.status === 'pushed') {
+    if (live && !live.on_tiktok) return <span className="text-xs text-red-400">Missing</span>
+    // Buyable requires two things: TikTok has the variation, and the product
+    // it belongs to has cleared review. A variation can exist while the
+    // product is still PENDING, and it is not purchasable then.
+    if (live?.on_tiktok && productStatus === 'ACTIVATE') {
+      return <span className="text-xs text-emerald-400">Live</span>
+    }
+    return (
+      <span className="text-xs text-gray-400" title="Accepted by TikTok; see the listing status above">
+        Sent
+      </span>
+    )
+  }
   if (draft.status === 'uploading') return <span className="text-xs text-blue-400">…</span>
   if (draft.status === 'failed') {
     return (

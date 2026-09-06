@@ -188,6 +188,30 @@ export function backfillListingId(
     .map((d) => ({ ...d, listing_id: listingId }))
 }
 
+/**
+ * Put a stalled SKU back in the queue, by hand.
+ *
+ * Resetting `attempts` is the point: automatic retries stop at
+ * MAX_AUTO_ATTEMPTS so a genuinely invalid SKU cannot burn the shop's daily
+ * listing allowance forever, and without a reset the button would appear to do
+ * nothing. Clearing `settled` and the error matters too — a settled item is
+ * never pushed again whatever its status says, and a stale error under a
+ * retrying row reads as a fresh failure.
+ *
+ * The idempotency key is deliberately NOT regenerated. If the previous attempt
+ * actually reached TikTok and only the reply was lost, the same key makes this
+ * a no-op that returns the original product rather than a duplicate.
+ */
+export async function retryDraft(draftId: string): Promise<void> {
+  await updateDraft(draftId, {
+    status: 'queued' satisfies DraftStatus,
+    error: null,
+    attempts: 0,
+    retryAfter: 0,
+    settled: false,
+  })
+}
+
 /** Items a person needs to look at: out of automatic attempts. */
 export function needsAttention(drafts: readonly QueuedDraft[]): QueuedDraft[] {
   return drafts.filter((d) => !d.settled && d.status === 'failed' && d.attempts >= MAX_AUTO_ATTEMPTS)

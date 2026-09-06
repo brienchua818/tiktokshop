@@ -96,6 +96,37 @@ export interface TikTokProduct {
   image: string
 }
 
+/** One variation as TikTok currently has it. */
+export interface LiveVariant {
+  identifier: string
+  variant: string
+  price: string
+  status: string
+  /** False means the push never landed, whatever this device recorded. */
+  on_tiktok: boolean
+  stock_set: number
+  /** Null when TikTok has no such variation. */
+  stock_available: number | null
+  /** Derived as set − available, not a figure TikTok reports. */
+  sold: number | null
+}
+
+/** A listing's live review state and stock, read back from TikTok. */
+export interface ListingState {
+  listing_id: string
+  title: string
+  /**
+   * TikTok's own product status. `ACTIVATE` is live and buyable; `PENDING` is
+   * under review, which is what every edit triggers; `FAILED` carries reasons.
+   */
+  product_status: string
+  audit_reasons: string[]
+  variations_on_tiktok: number
+  max_skus: number
+  variants: LiveVariant[]
+  checked_at: string
+}
+
 /** Identity plus what the allowlist says this person may do. */
 export type Me = SignedInUser & { role: string; approved: boolean; admin: boolean }
 
@@ -140,6 +171,15 @@ export const api = {
     call<{ seller_sku: string | null; title: string | null }[]>('skus', {
       body: { listing_id: listingId },
     }),
+
+  /**
+   * What TikTok shows for this listing right now.
+   *
+   * The one call that answers "did it actually land, and is it live yet"
+   * without opening Seller Center.
+   */
+  listingState: (listingId: string) =>
+    call<ListingState>('listingState', { body: { listing_id: listingId } }),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>

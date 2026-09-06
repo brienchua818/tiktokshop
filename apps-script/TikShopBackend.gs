@@ -1206,6 +1206,54 @@ function ttAuthorizedShops_(prefix, accessToken) {
 }
 
 /** Check every shop answers. Run by hand after setting up credentials. */
+/**
+ * Print the raw Get Product response for the first listing on record.
+ *
+ * Here because the field names for review state were written from
+ * documentation that cannot be read from a script — the reference site is a
+ * JavaScript application — and a status display built on guessed field names
+ * would show "unknown" forever without ever erroring. One run against a real
+ * listing settles it.
+ *
+ * Read-only. Prints the response, changes nothing.
+ */
+function inspectProduct() {
+  var listings = readAll_(TAB_LISTINGS);
+  if (!listings.length) {
+    Logger.log('No listings on record yet. Add one in the app first.');
+    return;
+  }
+  var row = listings[listings.length - 1];
+  var shopId = String(row.shop_id);
+  var productId = String(row.listing_id);
+
+  Logger.log('Shop: ' + shopId + '   Product: ' + productId);
+
+  var r = ttFetch_(shopId, 'get', '/product/202309/products/' + productId,
+    { category_version: CATEGORY_VERSION }, null);
+
+  if (r.code !== 0) {
+    Logger.log('TikTok refused: ' + (r.message || r.code));
+    return;
+  }
+
+  var d = r.data || {};
+  Logger.log('--- the fields the status display depends on ---');
+  Logger.log('status              = ' + JSON.stringify(d.status));
+  Logger.log('audit               = ' + JSON.stringify(d.audit));
+  Logger.log('audit_failed_reasons= ' + JSON.stringify(d.audit_failed_reasons));
+  Logger.log('top-level keys      = ' + Object.keys(d).join(', '));
+
+  var sku = (d.skus || [])[0];
+  if (sku) {
+    Logger.log('--- first sku ---');
+    Logger.log('sku keys            = ' + Object.keys(sku).join(', '));
+    Logger.log('inventory           = ' + JSON.stringify(sku.inventory));
+    Logger.log('seller_sku          = ' + JSON.stringify(sku.seller_sku));
+  }
+  return 'Logged. Paste the log to Brien.';
+}
+
 function ttSelfTest() {
   var out = [];
   SHOPS.forEach(function (s) {
@@ -1392,7 +1440,107 @@ function ttGetProduct_(prefix, productId) {
       warehouseId: inventory.warehouse_id || ''
     };
   });
-  return { productId: r.data.id || productId, title: r.data.title || '', skus: skus };
+  return {
+    productId: r.data.id || productId,
+    title: r.data.title || '',
+    // TikTok re-reviews the whole product on every edit, so this changes each
+    // time a variation is added. Carried out of here rather than discarded,
+    // because otherwise the only way to know whether a push actually landed is
+    // to open Seller Center.
+    status: r.data.status || '',
+    auditReasons: auditReasons_(r.data),
+    skus: skus
+  };
+}
+
+/**
+ * Why a listing was rejected, flattened into readable lines.
+ *
+ * The shape TikTok uses nests reasons under positions, which is right for a
+ * form that can highlight fields and useless on a phone. Reading defensively
+ * because a rejection is exactly when a missing field would be least welcome.
+ */
+function auditReasons_(data) {
+  var out = [];
+  var groups = (data && data.audit_failed_reasons) || [];
+  for (var i = 0; i < groups.length; i++) {
+    var g = groups[i] || {};
+    var reasons = g.reasons || [];
+    for (var j = 0; j < reasons.length; j++) {
+      var line = String(reasons[j] || '').trim();
+      if (line) out.push(g.position ? g.position + ': ' + line : line);
+    }
+    var tips = g.suggestions || [];
+    for (var k = 0; k < tips.length; k++) {
+      var tip = String(tips[k] || '').trim();
+      if (tip) out.push('Fix: ' + tip);
+    }
+  }
+  return out;
+}
+
+/**
+ * What a listing looks like on TikTok right now, per variation.
+ *
+ * Answers the three questions that otherwise mean opening Seller Center: has
+ * the push landed, is the variation live or still under review, and how much
+ * stock is left.
+ *
+ * `sold` is `set - available`, not a figure TikTok reports. The product API has
+ * no sold count — that lives in orders — but we know what we asked for and it
+ * tells us what remains, so the difference is sound unless someone edits stock
+ * in Seller Center. Labelled as derived in the UI rather than presented as
+ * TikTok's own number.
+ */
+function listingState_(listingId) {
+  var rows = listSkus_(listingId);
+  var shopId = rows.length ? String(rows[0].shop_id) : '';
+  if (!shopId) {
+    var listing = readAll_(TAB_LISTINGS).filter(function (r) {
+      return String(r.listing_id) === String(listingId);
+    })[0];
+    shopId = listing ? String(listing.shop_id) : '';
+  }
+  if (!shopId) throw new Error('Unknown listing: ' + listingId);
+
+  var live = ttGetProduct_(shopId, String(listingId));
+
+  // Keyed by seller_sku, which is the identifier the app assigns and the only
+  // field both sides agree on — a TikTok sku id is not known until after the
+  // push, and a row pushed from another device would not have it locally.
+  var bySellerSku = {};
+  live.skus.forEach(function (s) {
+    if (s.sellerSku) bySellerSku[String(s.sellerSku)] = s;
+  });
+
+  var variants = rows.map(function (r) {
+    var match = bySellerSku[String(r.identifier)];
+    var set = Number(r.stock || 0);
+    var available = match ? Number(match.quantity || 0) : null;
+    return {
+      identifier: String(r.identifier || ''),
+      variant: String(r.variant || ''),
+      price: String(r.price || ''),
+      status: String(r.status || ''),
+      on_tiktok: Boolean(match),
+      stock_set: set,
+      stock_available: available,
+      // Never negative: someone raising stock in Seller Center would otherwise
+      // read as negative sales, which is worse than showing nothing.
+      sold: available === null ? null : Math.max(0, set - available)
+    };
+  });
+
+  return {
+    listing_id: String(listingId),
+    title: live.title,
+    product_status: live.status,
+    audit_reasons: live.auditReasons,
+    variations_on_tiktok: live.skus.length,
+    max_skus: MAX_SKUS_PER_PRODUCT,
+    variants: variants,
+    checked_at: new Date().toISOString()
+  };
 }
 
 /**
@@ -2171,6 +2319,11 @@ function route_(action, params, body, user) {
         user.name,
         params.product_name || body.product_name || ''
       ));
+
+    // What TikTok shows right now: review state, and stock per variation.
+    // Read-only and safe to call on a refresh button.
+    case 'listingState':
+      return json_(listingState_(params.listing_id || body.listing_id));
 
     case 'skus':
       return json_(listSkus_(params.listing_id || body.listing_id));

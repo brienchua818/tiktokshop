@@ -8,6 +8,7 @@ import { allDrafts, pendingCount } from './offline/queue'
 import type { Shop, SignedInUser } from './types'
 import SignIn from './auth/SignIn'
 import LiveListing from './live-listing/LiveListing'
+import Orders from './orders/Orders'
 
 export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null)
@@ -145,8 +146,7 @@ export default function App() {
 
         <nav className="flex gap-1 px-3 pb-1 max-w-5xl mx-auto w-full">
           <Tab to="/live-listing">Live Listing</Tab>
-          {/* Orders is Phase 4. The tab is deliberately absent rather than
-              present and dead. */}
+          <Tab to="/orders">Orders</Tab>
         </nav>
       </header>
 
@@ -162,6 +162,7 @@ export default function App() {
               path="/live-listing"
               element={shop ? <LiveListing shop={shop} onQueueChange={refreshPending} /> : null}
             />
+            <Route path="/orders" element={shop ? <Orders shop={shop} /> : null} />
             <Route path="*" element={<Navigate to="/live-listing" replace />} />
           </Routes>
         )}

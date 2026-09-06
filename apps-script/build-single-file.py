@@ -29,6 +29,7 @@ ORDER = [
     'Auth.gs',
     'TikTok.gs',
     'Product.gs',
+    'Orders.gs',
     'Export.gs',
     'Api.gs',
 ]

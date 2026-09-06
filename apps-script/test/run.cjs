@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs']
+const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -44,6 +44,22 @@ const sandbox = `
     getUuid: function () { return 'uuid' },
     newBlob: function () { return {} },
     base64Decode: function () { return [] },
+    // Only the SGT pattern this code uses, and computed rather than faked, so
+    // an off-by-one hour in the real formatter would not slip past.
+    formatDate: function (date, tz, pattern) {
+      if (tz !== 'Asia/Singapore') throw new Error('unexpected timezone: ' + tz)
+      var sgt = new Date(date.getTime() + 8 * 3600 * 1000)
+      var p = function (n) { return String(n).padStart(2, '0') }
+      var y = sgt.getUTCFullYear()
+      var mo = p(sgt.getUTCMonth() + 1)
+      var d = p(sgt.getUTCDate())
+      var h = p(sgt.getUTCHours())
+      var mi = p(sgt.getUTCMinutes())
+      if (pattern === 'yyyy-MM-dd') return y + '-' + mo + '-' + d
+      if (pattern === 'yyyy-MM-dd HHmm') return y + '-' + mo + '-' + d + ' ' + h + mi
+      if (pattern === 'yyyy-MM-dd HH:mm') return y + '-' + mo + '-' + d + ' ' + h + ':' + mi
+      throw new Error('unexpected pattern: ' + pattern)
+    },
     // Apps Script returns a byte array of SIGNED bytes, which is why ttSign_
     // masks with 0xff before hexing. Reproduced faithfully, or the test would
     // pass against a shape the real runtime never produces.
@@ -81,6 +97,7 @@ ${src}
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     verifyIdToken_, shortClient_, prop_, SHOPS,
     cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
+    sgtEpoch_, summariseItems_, listingOrders_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
@@ -670,6 +687,114 @@ check('a query without the cipher signs differently from one with it', () => {
   const without = gs.ttSign_('/product/202309/images/upload',
     { app_key: 'k', timestamp: '1', use_case: 'MAIN_IMAGE' }, '', 'secret')
   if (withCipher === without) throw new Error('the cipher is not being signed at all')
+})
+
+// ---------------------------------------------------------------------------
+// Orders: the arithmetic that becomes a purchase order.
+//
+// These numbers are what a factory gets paid against, so the cases that matter
+// are the ones that quietly produce a plausible wrong answer: a basket holding
+// two listings, a cancelled line, and a boundary between two streams.
+// ---------------------------------------------------------------------------
+console.log('\nsgtEpoch_ — Singapore time, not the server timezone')
+
+check('midnight SGT is 16:00 UTC the day before', () =>
+  eq(gs.sgtEpoch_('2026-09-06', '00:00'), Date.parse('2026-09-05T16:00:00Z') / 1000))
+
+check('an evening stream start converts correctly', () =>
+  eq(gs.sgtEpoch_('2026-09-06', '20:30'), Date.parse('2026-09-06T12:30:00Z') / 1000))
+
+check('the offset is explicit, not the script timezone', () => {
+  // Written as +08:00 in the source rather than relying on a project setting
+  // anyone can change. Asserted by value, so changing that setting cannot
+  // silently shift every export by hours.
+  eq(gs.sgtEpoch_('2026-01-01', '12:00'), Date.parse('2026-01-01T04:00:00Z') / 1000)
+})
+
+check('a nonsense date is refused rather than becoming NaN', () =>
+  throws(() => gs.sgtEpoch_('not-a-date', '00:00'), /Not a date/))
+
+function item(o) {
+  return Object.assign({
+    order_id: 'o1', shop_id: 'HZ', listing_id: 'L1', product_name: 'Katrin Run',
+    sku_id: 's1', seller_sku: 'A1', variation: 'A1 Blue Mug',
+    quantity: 1, sale_price: '10.00', currency: 'SGD', status: 'AWAITING_SHIPMENT',
+    created_at_sgt: '2026-09-06 20:10', created_epoch: gs.sgtEpoch_('2026-09-06', '20:10'),
+  }, o)
+}
+
+console.log('\nsummariseItems_ — per listing, from line items')
+
+check('units and revenue multiply quantity by price', () => {
+  const r = gs.summariseItems_([item({ quantity: 3, sale_price: '12.50' })])
+  eq(r.listings[0].units, 3)
+  eq(r.listings[0].revenue, 37.5)
+})
+
+// The reason per-listing figures come from line items and not order totals.
+check('one order spanning two listings is not double counted', () => {
+  const r = gs.summariseItems_([
+    item({ order_id: 'o1', listing_id: 'L1', quantity: 2, sale_price: '10.00' }),
+    item({ order_id: 'o1', listing_id: 'L2', quantity: 1, sale_price: '30.00' }),
+  ])
+  eq(r.listings.length, 2)
+  eq(r.total_units, 3)
+  eq(r.total_revenue, 50)
+  // Both listings see the same order, and each counts it once.
+  r.listings.forEach((l) => eq(l.order_count, 1))
+})
+
+check('two lines of one listing in one order count as one order', () => {
+  const r = gs.summariseItems_([
+    item({ order_id: 'o9', seller_sku: 'A1' }),
+    item({ order_id: 'o9', seller_sku: 'A2' }),
+  ])
+  eq(r.listings[0].order_count, 1)
+  eq(r.listings[0].units, 2)
+})
+
+check('a cancelled line is reported, not counted as sold', () => {
+  const r = gs.summariseItems_([
+    item({ quantity: 5, sale_price: '10.00' }),
+    item({ order_id: 'o2', quantity: 2, sale_price: '10.00', status: 'CANCELLED' }),
+  ])
+  eq(r.listings[0].units, 5, 'cancelled units must not be sold')
+  eq(r.listings[0].revenue, 50)
+  eq(r.listings[0].unsold_units, 2, 'but they must still be visible')
+})
+
+check('an unpaid line is treated the same as cancelled', () => {
+  const r = gs.summariseItems_([item({ quantity: 4, status: 'UNPAID' })])
+  eq(r.listings[0].units, 0)
+  eq(r.listings[0].unsold_units, 4)
+})
+
+check('status matching is case insensitive', () => {
+  const r = gs.summariseItems_([item({ quantity: 4, status: 'cancelled' })])
+  eq(r.listings[0].unsold_units, 4)
+})
+
+check('listings are ordered by revenue, biggest first', () => {
+  const r = gs.summariseItems_([
+    item({ listing_id: 'small', sale_price: '5.00' }),
+    item({ listing_id: 'big', sale_price: '90.00' }),
+  ])
+  eq(r.listings.map((l) => l.listing_id), ['big', 'small'])
+})
+
+check('money is rounded to cents, not left as float drift', () => {
+  const r = gs.summariseItems_([
+    item({ quantity: 3, sale_price: '0.10' }),
+    item({ order_id: 'o2', quantity: 3, sale_price: '0.20' }),
+  ])
+  eq(r.total_revenue, 0.9)
+})
+
+check('no items is an empty summary, not a crash', () => {
+  const r = gs.summariseItems_([])
+  eq(r.listings, [])
+  eq(r.total_units, 0)
+  eq(r.total_revenue, 0)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

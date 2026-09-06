@@ -96,6 +96,8 @@ var MAX_SKUS_PER_PRODUCT = 100;
 /** Sheet tab names. */
 var TAB_LISTINGS = 'Listings';
 var TAB_SKUS = 'SKUs';
+var TAB_ORDERS = 'Orders';
+var TAB_ORDER_ITEMS = 'Order Items';
 var TAB_LOG = 'Log';
 var TAB_USERS = 'Users';
 

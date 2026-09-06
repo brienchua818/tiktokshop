@@ -26,7 +26,9 @@ function doPost(e) {
 
 /** Actions that must serialise, because they read-then-write the Sheet. */
 var WRITE_ACTIONS = {
-  addListing: 1, saveSku: 1, pushSku: 1, exportListing: 1, setRole: 1
+  addListing: 1, saveSku: 1, pushSku: 1, exportListing: 1, setRole: 1,
+  // Rewrites whole tabs, so it must not interleave with another sync.
+  syncOrders: 1
 };
 
 /** Actions callable without an approved role. */
@@ -168,6 +170,30 @@ function route_(action, params, body, user) {
 
     case 'pushSku':
       return json_(pushSku_(body, user));
+
+    // Pull a window of orders down from TikTok into the Sheet.
+    case 'syncOrders':
+      return json_(syncOrders_(
+        body.shop_id, body.from_date, body.from_time, body.to_date, body.to_time,
+        user.name
+      ));
+
+    // Per-listing totals inside a window. The window applies to every line
+    // item, so a listing used on two streams reports only the one asked about.
+    case 'orderSummary':
+      return json_(orderSummary_(
+        params.shop_id || body.shop_id,
+        params.from_date || body.from_date, params.from_time || body.from_time,
+        params.to_date || body.to_date, params.to_time || body.to_time
+      ));
+
+    // The variations behind one listing's total, in the same window.
+    case 'listingOrders':
+      return json_(listingOrders_(
+        params.listing_id || body.listing_id,
+        params.from_date || body.from_date, params.from_time || body.from_time,
+        params.to_date || body.to_date, params.to_time || body.to_time
+      ));
 
     case 'exportListing':
       return json_(exportListing_(params.listing_id || body.listing_id, user.name));

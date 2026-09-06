@@ -127,6 +127,60 @@ export interface ListingState {
   checked_at: string
 }
 
+/** A date and time range in Singapore time — the only timezone this app uses. */
+export interface Window {
+  from_date: string
+  from_time: string
+  to_date: string
+  to_time: string
+}
+
+export interface SyncResult {
+  orders: number
+  items: number
+  from: string
+  to: string
+}
+
+/** One listing's takings inside the window. */
+export interface ListingTotals {
+  listing_id: string
+  product_name: string
+  order_count: number
+  units: number
+  /** Cancelled or unpaid — shown rather than dropped, so totals reconcile. */
+  unsold_units: number
+  revenue: number
+  latest_order_sgt: string
+}
+
+export interface OrderSummary {
+  from: string
+  to: string
+  listings: ListingTotals[]
+  total_units: number
+  total_revenue: number
+}
+
+export interface VariationTotals {
+  seller_sku: string
+  variation: string
+  units: number
+  unsold_units: number
+  revenue: number
+  price: string
+}
+
+export interface ListingOrders {
+  listing_id: string
+  from: string
+  to: string
+  variations: VariationTotals[]
+  order_count: number
+  total_units: number
+  total_revenue: number
+}
+
 /** Identity plus what the allowlist says this person may do. */
 export type Me = SignedInUser & { role: string; approved: boolean; admin: boolean }
 
@@ -180,6 +234,23 @@ export const api = {
    */
   listingState: (listingId: string) =>
     call<ListingState>('listingState', { body: { listing_id: listingId } }),
+
+  /** Pull a window of orders down from TikTok into the Sheet. */
+  syncOrders: (body: {
+    shop_id: string
+    from_date: string
+    from_time: string
+    to_date: string
+    to_time: string
+  }) => call<SyncResult>('syncOrders', { body }),
+
+  /** Per-listing totals inside a date and time window. */
+  orderSummary: (shopId: string, w: Window) =>
+    call<OrderSummary>('orderSummary', { body: { shop_id: shopId, ...w } }),
+
+  /** The variations behind one listing's total, in the same window. */
+  listingOrders: (listingId: string, w: Window) =>
+    call<ListingOrders>('listingOrders', { body: { listing_id: listingId, ...w } }),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>

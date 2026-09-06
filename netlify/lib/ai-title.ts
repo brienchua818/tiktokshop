@@ -228,7 +228,12 @@ Write a corrected name. If it was too long, cut adjectives before you cut distin
 
   const response = await client().messages.parse({
     model: 'claude-opus-5',
-    max_tokens: 1024,
+    // Thinking is on by default on this model, and thinking tokens come out of
+    // max_tokens. At 1024 a moment's deliberation could exhaust the budget
+    // before the structured answer was written — which surfaces as no parsed
+    // output, indistinguishable from a photo the model could not read. The
+    // answer is a dozen words; the headroom is for the reasoning in front of it.
+    max_tokens: 4096,
     system: VARIANT_SYSTEM_PROMPT,
     messages: [
       {
@@ -236,7 +241,13 @@ Write a corrected name. If it was too long, cut adjectives before you cut distin
         content: [imageBlock(request.image), { type: 'text', text: instruction }],
       },
     ],
-    output_config: { format: zodOutputFormat(VariantSchema) },
+    output_config: {
+      format: zodOutputFormat(VariantSchema),
+      // Naming what is in a photograph is not a hard problem, and this call is
+      // in the hot path of a livestream where seconds are the cost that
+      // matters.
+      effort: 'low',
+    },
   })
 
   const parsed = response.parsed_output
@@ -263,7 +274,8 @@ Write a corrected title. If it was too short, add genuine detail about material,
 
   const response = await client().messages.parse({
     model: 'claude-opus-5',
-    max_tokens: 2048,
+    // As above: thinking shares this budget, so it needs room beyond the answer.
+    max_tokens: 8192,
     system: SYSTEM_PROMPT,
     thinking: { type: 'adaptive' },
     messages: [

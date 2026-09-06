@@ -65,7 +65,7 @@ export default function Orders({ shop }: { shop: Shop }) {
     try {
       setSummary(await api.orderSummary(shop.shop_id, win))
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      setError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setBusy(false)
     }
@@ -94,7 +94,7 @@ export default function Orders({ shop }: { shop: Shop }) {
       setNote(`${r.orders} orders, ${r.items} items — ${r.from} to ${r.to}`)
       await load()
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      setError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setSyncing(false)
     }
@@ -118,7 +118,7 @@ export default function Orders({ shop }: { shop: Shop }) {
         }),
       )
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      setError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setExporting(false)
     }
@@ -135,7 +135,7 @@ export default function Orders({ shop }: { shop: Shop }) {
     try {
       setDetail(await api.listingOrders(listingId, win))
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      setError(e instanceof ApiError ? e.display : String(e))
     }
   }
 
@@ -292,6 +292,17 @@ export default function Orders({ shop }: { shop: Shop }) {
                   {exported.cost_divisor ? ` · cost ÷ ${exported.cost_divisor}` : ''}
                   {exported.folder ? ` · in ${exported.folder}` : ''}
                 </p>
+                {/* Said here so nobody has to open the file to learn a photo
+                    did not make it. The reason for each is in the Log tab
+                    and as a note on the cell itself. */}
+                {typeof exported.photos_placed === 'number' && (
+                  <p className={exported.photos_missing ? 'text-amber-300' : 'text-emerald-300/70'}>
+                    {exported.photos_placed} photo{exported.photos_placed === 1 ? '' : 's'} placed
+                    {exported.photos_missing
+                      ? ` · ${exported.photos_missing} shown as a link instead (reason in the Log tab and on the cell)`
+                      : ''}
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-2 pt-1">
                   <a
                     href={exported.url}

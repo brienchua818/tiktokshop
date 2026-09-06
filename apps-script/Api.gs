@@ -140,16 +140,27 @@ function handle_(e, method) {
       }, 409);
     }
 
-    // Log the detail, return something safe. A stack trace in a response body
-    // is information disclosure.
-    console.error(action + ' failed: ' + err + (err && err.stack ? '\n' + err.stack : ''));
-    logEvent_(actorName_ || (params && params.actor) || 'unknown', action, '', message, 'error');
+    // Every failure leaves with a code. One this backend raised carries its
+    // own (TS-EXP-07 is one line of Export.gs); one the runtime raised — a
+    // Sheets limit, a Drive permission, a TypeError — is TS-UNC-00, which
+    // says "nobody anticipated this" and names the runtime's own error type,
+    // because that is the finding. The same code goes to the app, the Log
+    // tab and the execution log, so any one of the three is enough to look
+    // it up in ERROR-CODES.md.
+    var code = codeOf_(err);
+    if (code === 'TS-UNC-00' && err && err.name && err.name !== 'Error') {
+      message = err.name + ': ' + message;
+    }
+    console.error('[' + code + '] ' + action + ' failed: ' + err +
+      (err && err.stack ? '\n' + err.stack : ''));
+    logEvent_(actorName_ || (params && params.actor) || 'unknown', action, '',
+      '[' + code + '] ' + message, 'error');
 
     // A rejection from TikTok is the operator's to act on, so its own wording
     // goes through verbatim — "you haven't set the return warehouse" is
     // actionable, "push failed" is not. 422 rather than 500: the request was
     // understood and refused, and the client must not retry it.
-    return json_({ error: message }, action === 'pushSku' ? 422 : 500);
+    return json_({ error: message, code: code }, action === 'pushSku' ? 422 : 500);
   }
 }
 
@@ -276,10 +287,10 @@ function shopsForClient_() {
 function setRole_(email, role, actor) {
   var target = String(email || '').toLowerCase();
   var allowed = [ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED];
-  if (allowed.indexOf(role) === -1) throw new Error('Unknown role: ' + role);
+  if (allowed.indexOf(role) === -1) throw fail_('TS-API-01', 'Unknown role: ' + role);
   if (target === String(OWNER_EMAIL).toLowerCase() && role !== ROLE_ADMIN) {
     // Without this, one mistake locks everyone out of approving anyone.
-    throw new Error('The owner account cannot be demoted.');
+    throw fail_('TS-API-02', 'The owner account cannot be demoted.');
   }
 
   var sh = sheet_(TAB_USERS);
@@ -292,7 +303,7 @@ function setRole_(email, role, actor) {
       return { email: target, role: role };
     }
   }
-  throw new Error('No such user: ' + target);
+  throw fail_('TS-API-03', 'No such user: ' + target);
 }
 
 function json_(obj, status) {

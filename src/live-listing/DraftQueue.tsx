@@ -80,7 +80,7 @@ export default function DraftQueue({
       await refresh()
       await onChanged()
     } catch (e: unknown) {
-      setCheckError(e instanceof ApiError ? e.message : String(e))
+      setCheckError(e instanceof ApiError ? e.display : String(e))
       setRemoving(null)
     } finally {
       setRemoveBusy(false)
@@ -94,7 +94,7 @@ export default function DraftQueue({
     try {
       setLive(await api.listingState(listingId))
     } catch (e: unknown) {
-      setCheckError(e instanceof ApiError ? e.message : String(e))
+      setCheckError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setChecking(false)
     }

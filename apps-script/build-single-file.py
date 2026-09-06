@@ -24,6 +24,7 @@ OUT = HERE / 'TikShopBackend.gs'
 # reading top to bottom deserves the definitions first.
 ORDER = [
     'Config.gs',
+    'Errors.gs',
     'Lock.gs',
     'Sheet.gs',
     'Auth.gs',

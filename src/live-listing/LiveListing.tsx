@@ -29,7 +29,7 @@ export default function LiveListing({
     api
       .listings(shop.shop_id)
       .then(setListings)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.message : String(e)))
+      .catch((e: unknown) => setError(e instanceof ApiError ? e.display : String(e)))
       .finally(() => setLoading(false))
   }, [shop.shop_id])
 
@@ -155,7 +155,7 @@ function AddListing({
       .then((r) => !cancelled && setProducts(r.products))
       .catch((e: unknown) => {
         if (cancelled) return
-        setError(e instanceof ApiError ? e.message : String(e))
+        setError(e instanceof ApiError ? e.display : String(e))
         // Nothing to pick from is a dead end, so open the fallback rather than
         // leaving someone looking at an error with no way forward.
         setByHand(true)
@@ -172,7 +172,7 @@ function AddListing({
     try {
       onAdded(await api.addListing(shopId, id, name))
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
+      setError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setBusyId('')
     }

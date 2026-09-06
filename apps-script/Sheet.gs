@@ -217,7 +217,7 @@ function listListings_(shopId) {
 
 function addListing_(shopId, listingId, actor, productName) {
   var shop = shopById_(shopId);
-  if (!shop) throw new Error('Unknown shop: ' + shopId);
+  if (!shop) throw fail_('TS-SHT-01', 'Unknown shop: ' + shopId);
 
   var existing = listListings_(shopId).filter(function (r) {
     return String(r.listing_id) === String(listingId);

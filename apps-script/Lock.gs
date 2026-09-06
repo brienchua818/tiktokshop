@@ -50,7 +50,7 @@ function withScriptLock_(timeoutMs, fn) {
 
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(timeoutMs || LOCK_TIMEOUT_MS)) {
-    throw new Error(
+    throw fail_('LISTING_BUSY',
       'BUSY: Another change is being saved right now. This will retry in a moment — ' +
       'nothing has been lost.'
     );

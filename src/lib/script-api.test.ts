@@ -72,3 +72,16 @@ describe('ScriptError classification', () => {
     })
   })
 })
+
+describe('ScriptError.display', () => {
+  it('puts the backend code where it will be photographed', () => {
+    expect(new ScriptError(500, 'Drive metadata read failed', 'TS-EXP-14').display).toBe(
+      'Drive metadata read failed [TS-EXP-14]',
+    )
+  })
+  it('hides flow signals the app already acts on, and copes with no code', () => {
+    expect(new ScriptError(409, 'full', 'LISTING_FULL').display).toBe('full')
+    expect(new ScriptError(409, 'busy', 'LISTING_BUSY').display).toBe('busy')
+    expect(new ScriptError(0, 'offline').display).toBe('offline')
+  })
+})

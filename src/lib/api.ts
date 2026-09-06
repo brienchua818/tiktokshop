@@ -221,6 +221,9 @@ export interface ExportResult {
   /** Where in the shared drive it went, e.g. "Exports/2026/2026-09/2026-09-06". */
   folder?: string
   folder_url?: string
+  /** Variation photos placed in the workbook, and those that fell back to a link. */
+  photos_placed?: number
+  photos_missing?: number
   listings: number
   units: number
   revenue: number

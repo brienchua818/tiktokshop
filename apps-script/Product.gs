@@ -55,7 +55,7 @@ function validateTitle_(title) {
 function ttUploadImage_(prefix, blob, useCase) {
   var r = ttFetch_(prefix, 'post', '/product/202309/images/upload',
     { use_case: useCase || 'MAIN_IMAGE' }, blob);
-  if (r.code !== 0) throw new Error('Image upload failed: ' + (r.message || r.code));
+  if (r.code !== 0) throw fail_('TS-PRD-01', 'Image upload failed: ' + ttReason_(r));
   return r.data.uri;
 }
 
@@ -148,7 +148,7 @@ function ttGetProduct_(prefix, productId) {
   var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
     { category_version: CATEGORY_VERSION }, null);
   if (r.code !== 0 || !r.data) {
-    throw new Error('Could not read the listing: ' + (r.message || r.code));
+    throw fail_('TS-PRD-02', 'Could not read the listing: ' + ttReason_(r));
   }
   var skus = (r.data.skus || []).map(function (raw) {
     var attribute = (raw.sales_attributes || [])[0] || {};
@@ -227,7 +227,7 @@ function listingState_(listingId) {
     })[0];
     shopId = listing ? String(listing.shop_id) : '';
   }
-  if (!shopId) throw new Error('Unknown listing: ' + listingId);
+  if (!shopId) throw fail_('TS-PRD-03', 'Unknown listing: ' + listingId);
 
   var live = ttGetProduct_(shopId, String(listingId));
 
@@ -440,19 +440,19 @@ function buildRemovePayload_(snapshot, alsoKeep, removeId) {
     if (String(snapshot.skus[i].id) === String(removeId)) target = snapshot.skus[i];
   }
   if (!target) {
-    throw new Error('That variation is not on the listing right now. If it was just added it ' +
+    throw fail_('TS-PRD-04', 'That variation is not on the listing right now. If it was just added it ' +
       'may still be under review; check again in a few minutes.');
   }
 
   var remaining = snapshot.skus.filter(function (sku) { return String(sku.id) !== String(removeId); });
   if (remaining.length + (alsoKeep || []).length === 0) {
-    throw new Error('This is the only variation on the listing. TikTok requires at least one, ' +
+    throw fail_('TS-PRD-05', 'This is the only variation on the listing. TikTok requires at least one, ' +
       'so remove the listing itself in Seller Center instead.');
   }
 
   for (var k = 0; k < remaining.length; k++) {
     if (!remaining[k].id || !remaining[k].warehouseId) {
-      throw new Error('TikTok returned an incomplete variation. Editing now could drop it, ' +
+      throw fail_('TS-PRD-06', 'TikTok returned an incomplete variation. Editing now could drop it, ' +
         'so nothing was sent. Try again in a moment.');
     }
   }
@@ -493,12 +493,12 @@ function buildRemovePayload_(snapshot, alsoKeep, removeId) {
   for (var j = 0; j < snapshot.skus.length; j++) {
     var id = snapshot.skus[j].id;
     if (String(id) !== String(removeId) && !kept[id]) {
-      throw new Error('Refusing to edit: variation ' + (snapshot.skus[j].sellerSku || id) +
+      throw fail_('TS-PRD-07', 'Refusing to edit: variation ' + (snapshot.skus[j].sellerSku || id) +
         ' would also have been deleted. This is a bug — nothing was sent to TikTok.');
     }
   }
   if (kept[removeId]) {
-    throw new Error('Refusing to edit: the variation to remove is still in the payload. ' +
+    throw fail_('TS-PRD-08', 'Refusing to edit: the variation to remove is still in the payload. ' +
       'This is a bug — nothing was sent to TikTok.');
   }
 
@@ -524,7 +524,7 @@ function removeVariation_(listingId, tiktokSkuId, user) {
     })[0];
     shopId = listing ? String(listing.shop_id) : '';
   }
-  if (!shopId) throw new Error('Unknown listing: ' + listingId);
+  if (!shopId) throw fail_('TS-PRD-09', 'Unknown listing: ' + listingId);
   var shop = shopById_(shopId);
 
   var snapshot = ttGetProduct_(shopId, String(listingId));
@@ -536,8 +536,8 @@ function removeVariation_(listingId, tiktokSkuId, user) {
     '/product/202509/products/' + listingId + '/partial_edit', {}, { skus: built.skus });
   if (r.code !== 0) {
     logEvent_(user.name, 'remove_variation_failed', shop.brand,
-      (built.removed.sellerSku || tiktokSkuId) + ': ' + (r.message || r.code), 'error');
-    throw new Error(r.message || 'TikTok refused the removal.');
+      (built.removed.sellerSku || tiktokSkuId) + ': ' + ttReason_(r), 'error');
+    throw fail_('TS-PRD-10', ttReason_(r) || 'TikTok refused the removal.');
   }
 
   if (ours) {
@@ -558,20 +558,20 @@ function removeVariation_(listingId, tiktokSkuId, user) {
 
 function buildAppendPayload_(snapshot, addition, alsoKeep) {
   if (!snapshot.skus.length) {
-    throw new Error('This listing has no variations to extend. TikTok requires at least one ' +
+    throw fail_('TS-PRD-11', 'This listing has no variations to extend. TikTok requires at least one ' +
       'sales attribute on a product, so the first variation has to be created with the product.');
   }
   for (var i = 0; i < snapshot.skus.length; i++) {
     // Without an id we cannot say "keep this one", and TikTok would treat it as
     // a new SKU — duplicating it while deleting the original.
     if (!snapshot.skus[i].id) {
-      throw new Error('TikTok returned a variation without an ID for this listing. Adding to ' +
+      throw fail_('TS-PRD-12', 'TikTok returned a variation without an ID for this listing. Adding to ' +
         'it now would duplicate it, so nothing was sent. Try again in a moment.');
     }
     // 12052533: "Removal, addition, and change of warehouses are not
     // permitted. Please specify the original warehouses for the SKUs."
     if (!snapshot.skus[i].warehouseId) {
-      throw new Error('TikTok did not return a warehouse for every existing variation. ' +
+      throw fail_('TS-PRD-13', 'TikTok did not return a warehouse for every existing variation. ' +
         'Editing this listing would drop their stock, so nothing was sent.');
     }
   }
@@ -646,7 +646,7 @@ function buildAppendPayload_(snapshot, addition, alsoKeep) {
   // "No duplicates allowed under the same attribute." The identifier makes
   // this all but impossible, so hitting it means an identifier repeated.
   if (taken[valueName.toLowerCase()]) {
-    throw new Error('A variation called "' + valueName + '" is already on this listing. ' +
+    throw fail_('TS-PRD-14', 'A variation called "' + valueName + '" is already on this listing. ' +
       'Identifier ' + addition.identifier + ' looks to have been used twice.');
   }
 
@@ -674,7 +674,7 @@ function buildAppendPayload_(snapshot, addition, alsoKeep) {
   skus.forEach(function (s) { if (s.id) kept[s.id] = true; });
   for (var j = 0; j < snapshot.skus.length; j++) {
     if (!kept[snapshot.skus[j].id]) {
-      throw new Error('Refusing to edit: variation ' +
+      throw fail_('TS-PRD-15', 'Refusing to edit: variation ' +
         (snapshot.skus[j].sellerSku || snapshot.skus[j].id) +
         ' would have been deleted. This is a bug — nothing was sent to TikTok.');
     }
@@ -690,7 +690,7 @@ function ttRecommendCategory_(prefix, title, imageUri) {
     category_version: CATEGORY_VERSION
   });
   if (r.code !== 0 || !r.data || !r.data.leaf_category_id) {
-    throw new Error('Could not resolve a category: ' + (r.message || r.code));
+    throw fail_('TS-PRD-16', 'Could not resolve a category: ' + ttReason_(r));
   }
   return r.data.leaf_category_id;
 }
@@ -724,13 +724,13 @@ function ttWarehouseId_(prefix) {
   var cached = prop_(prefix + '_WAREHOUSE_ID');
   if (cached) return cached;
   var r = ttFetch_(prefix, 'get', '/logistics/202309/warehouses', {}, null);
-  if (r.code !== 0) throw new Error('Could not read warehouses: ' + r.message);
+  if (r.code !== 0) throw fail_('TS-PRD-17', 'Could not read warehouses: ' + ttReason_(r));
   var usable = (r.data.warehouses || []).filter(function (w) {
     return w.type === 'SALES_WAREHOUSE' && w.effect_status === 'ENABLED';
   });
   var chosen = usable.filter(function (w) { return w.is_default; })[0] || usable[0];
   if (!chosen) {
-    throw new Error('No enabled sales warehouse for this shop. Set one up in Seller Center first.');
+    throw fail_('TS-PRD-18', 'No enabled sales warehouse for this shop. Set one up in Seller Center first.');
   }
   var set = {}; set[prefix + '_WAREHOUSE_ID'] = chosen.id; setProps_(set);
   return chosen.id;
@@ -796,26 +796,26 @@ function buildPayload_(input, categoryId, warehouseId, attributes) {
 function pushSku_(body, user) {
   var prefix = String(body.shop_id || '').toUpperCase();
   var shop = shopById_(prefix);
-  if (!shop) throw new Error('Unknown shop: ' + body.shop_id);
+  if (!shop) throw fail_('TS-PRD-19', 'Unknown shop: ' + body.shop_id);
 
   if (!body.identifier || /\s/.test(body.identifier)) {
-    throw new Error('SKU identifier is required and cannot contain spaces.');
+    throw fail_('TS-PRD-20', 'SKU identifier is required and cannot contain spaces.');
   }
-  if (!(Number(body.price) > 0)) throw new Error('Price must be more than zero.');
+  if (!(Number(body.price) > 0)) throw fail_('TS-PRD-21', 'Price must be more than zero.');
   var stock = Number(body.stock);
-  if (!(stock >= 1 && stock <= 99999)) throw new Error('Stock must be between 1 and 99,999.');
-  if (!body.photo_base64 && !body.tiktok_image_uri) throw new Error('A photo is required.');
+  if (!(stock >= 1 && stock <= 99999)) throw fail_('TS-PRD-22', 'Stock must be between 1 and 99,999.');
+  if (!body.photo_base64 && !body.tiktok_image_uri) throw fail_('TS-PRD-23', 'A photo is required.');
 
   // The variant name is the ONLY text a SKU contributes. The product title
   // belongs to the listing and is set once, so it is validated only on the
   // path that creates one — holding a variation to a product title's
   // 25-character floor rejected every short variant name.
   var variantProblem = validateVariantName_(variantValueName_(body.identifier, body.variant_name));
-  if (variantProblem) throw new Error(variantProblem);
+  if (variantProblem) throw fail_('TS-PRD-24', variantProblem);
 
   if (!body.listing_id) {
     var titleProblem = validateTitle_(body.title);
-    if (titleProblem) throw new Error(titleProblem);
+    if (titleProblem) throw fail_('TS-PRD-25', titleProblem);
   }
 
   // NO LOCK IS TAKEN HERE, deliberately.
@@ -984,7 +984,7 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
     recordFailure_(body, user, prefix, shop, photoUrl, addition.imageUri, '', edited.message);
     // TikTok's own wording, verbatim. "You haven't set the return warehouse" is
     // actionable; "push failed" is not.
-    throw new Error(edited.message || 'TikTok refused the variation.');
+    throw fail_('TS-PRD-26', ttReason_(edited) || 'TikTok refused the variation.');
   }
 
   var skuId = '';
@@ -1055,13 +1055,13 @@ function startNewListing_(body, user, prefix, shop, addition, imageUri, attribut
   if (body.continues_from) {
     var parent = ttGetProduct_(prefix, body.continues_from);
     if (!parent.title) {
-      throw new Error('Could not read the title of the listing this continues, so the new one ' +
+      throw fail_('TS-PRD-27', 'Could not read the title of the listing this continues, so the new one ' +
         'cannot be named. Try again in a moment.');
     }
     title = continuationTitle_(parent.title);
   }
   var titleProblem = validateTitle_(title);
-  if (titleProblem) throw new Error(titleProblem);
+  if (titleProblem) throw fail_('TS-PRD-28', titleProblem);
 
   var input = {
     title: title,
@@ -1085,14 +1085,14 @@ function startNewListing_(body, user, prefix, shop, addition, imageUri, attribut
   var check = ttFetch_(prefix, 'post', '/product/202309/products/listing_check', {}, payload);
   if (check.code !== 0) {
     recordFailure_(body, user, prefix, shop, photoUrl, input.imageUri, categoryId, check.message);
-    throw new Error(check.message || 'Listing check failed.');
+    throw fail_('TS-PRD-29', ttReason_(check) || 'Listing check failed.');
   }
 
   var created = ttFetch_(prefix, 'post', '/product/202309/products', {}, payload);
   if (created.code !== 0 || !created.data || !created.data.product_id) {
     recordFailure_(body, user, prefix, shop, photoUrl, input.imageUri, categoryId,
-      created.message || 'no product id returned');
-    throw new Error(created.message || 'TikTok returned no product ID.');
+      ttReason_(created) || 'no product id returned');
+    throw fail_('TS-PRD-30', ttReason_(created) || 'TikTok returned no product ID.');
   }
 
   var productId = created.data.product_id;

@@ -20,11 +20,13 @@ of dated exports is unusable after a few months of daily streams.
 
 1. Create a **new, separate** Apps Script project. Not the delivery one — see
    the warning below.
-2. Paste the files in: `Config.gs`, `Lock.gs`, `Sheet.gs`, `Auth.gs`, `Api.gs`,
-   `TikTok.gs`, `Product.gs`, `Export.gs`, and the `appsscript.json` manifest.
-   Order does not matter — Apps Script shares one global scope — but all eight
-   must be there. `Lock.gs` in particular: without it every write action fails
-   on an undefined `withScriptLock_`.
+2. Paste in `TikShopBackend.gs` — the single generated file
+   (`python3 apps-script/build-single-file.py`) that concatenates all ten
+   sources: `Config.gs`, `Errors.gs`, `Lock.gs`, `Sheet.gs`, `Auth.gs`,
+   `TikTok.gs`, `Product.gs`, `Orders.gs`, `Export.gs`, `Api.gs` — plus the
+   `appsscript.json` manifest. Check the line count against the one in the
+   commit message: a truncated paste fails on an undefined function.
+   Error codes are listed in `ERROR-CODES.md`; platform limits in `LIMITS.md`.
 3. Run `setupSheets()` once. It creates the four tabs and seeds you as admin.
 4. Add Script Properties, per shop, `{P}` being `HZ`, `TM` or `PM`:
    - `{P}_APP_KEY`, `{P}_APP_SECRET`, `{P}_SERVICE_ID`

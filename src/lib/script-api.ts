@@ -42,6 +42,20 @@ export class ScriptError extends Error {
     this.name = 'ScriptError'
   }
 
+  /**
+   * What to show a person: the message, then the code in brackets.
+   *
+   * The code is the handle for diagnosis — TS-EXP-13 is one line of the
+   * backend and nothing else — so it belongs on the screen where it will be
+   * photographed. LISTING_FULL and LISTING_BUSY are flow signals the app
+   * already acts on, not faults, so they are not shown.
+   */
+  get display(): string {
+    const c = this.code === undefined || this.code === null ? '' : String(this.code)
+    if (!c || c === 'LISTING_FULL' || c === 'LISTING_BUSY') return this.message
+    return `${this.message} [${c}]`
+  }
+
   /** The session has expired or was never established. */
   get isAuthError(): boolean {
     return this.status === 401

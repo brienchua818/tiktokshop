@@ -73,14 +73,142 @@ function folderPath_(folder) {
 var PHOTO_PX = 128;
 var PHOTO_ROW_PX = PHOTO_PX + 10;
 var PHOTO_COL_PX = PHOTO_PX + 14;
-/** Sheets refuses an inserted image above this. Thumbnails are far under it. */
-var PHOTO_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * What Sheets will accept as an inserted image. Both limits are enforced by
+ * insertImage and both are documented; the export on 7 Sep failed on the
+ * second one with a 1600x1600 photo (2.56 million pixels) that was well under
+ * the byte limit. So every candidate is measured before it is offered.
+ *
+ *   https://developers.google.com/apps-script/reference/spreadsheet/sheet#insertimageblob,-column,-row
+ */
+var SHEETS_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+var SHEETS_IMAGE_MAX_PIXELS = 1000000;
+
+/** Side length asked of Drive when it resizes a photo for the export. */
+var PHOTO_FETCH_PX = 400;
 
 /** The file id inside a Drive link, in either of the two shapes Drive issues. */
 function driveFileId_(url) {
   var m = String(url || '').match(/\/d\/([A-Za-z0-9_-]+)/) ||
     String(url || '').match(/[?&]id=([A-Za-z0-9_-]+)/);
   return m ? m[1] : '';
+}
+
+/**
+ * Width and height of a PNG, JPEG or GIF from its bytes, or null if the format
+ * is not one of those. Pure, and tested with hand-built headers.
+ *
+ * Apps Script has no image API, so the dimensions come from the file header:
+ * PNG keeps them at a fixed offset, GIF too, and a JPEG holds them in its first
+ * start-of-frame marker. Anything else is "unknown", and unknown is treated as
+ * too big — the cost of a wrong guess is a failed export, the cost of a
+ * cautious one is a resized copy.
+ */
+function imageDims_(bytes) {
+  if (!bytes || bytes.length < 24) return null;
+  var b = function (i) { return bytes[i] & 0xff; };
+  // PNG: 8-byte signature, then IHDR with width and height as big-endian u32.
+  if (b(0) === 0x89 && b(1) === 0x50 && b(2) === 0x4e && b(3) === 0x47) {
+    return {
+      width: (b(16) << 24 | b(17) << 16 | b(18) << 8 | b(19)) >>> 0,
+      height: (b(20) << 24 | b(21) << 16 | b(22) << 8 | b(23)) >>> 0
+    };
+  }
+  // GIF: "GIF8", then width and height as little-endian u16.
+  if (b(0) === 0x47 && b(1) === 0x49 && b(2) === 0x46 && b(3) === 0x38) {
+    return { width: b(6) | b(7) << 8, height: b(8) | b(9) << 8 };
+  }
+  // JPEG: walk the segments to the first SOFn marker.
+  if (b(0) === 0xff && b(1) === 0xd8) {
+    var i = 2;
+    while (i + 9 < bytes.length) {
+      if (b(i) !== 0xff) { i++; continue; }
+      var marker = b(i + 1);
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+      var len = b(i + 2) << 8 | b(i + 3);
+      var isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+      if (isSof) {
+        return { width: b(i + 7) << 8 | b(i + 8), height: b(i + 5) << 8 | b(i + 6) };
+      }
+      if (len < 2) return null;
+      i += 2 + len;
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * Whether Sheets will take this image, and if not, why — as a code.
+ * Pure: takes the bytes, returns { ok, code, detail }.
+ */
+function sheetsImageFit_(bytes) {
+  var size = bytes ? bytes.length : 0;
+  if (!size) return { ok: false, code: 'TS-EXP-10', detail: 'empty image' };
+  if (size > SHEETS_IMAGE_MAX_BYTES) {
+    return { ok: false, code: 'TS-EXP-11', detail: Math.round(size / 1024) + ' KB exceeds the 2 MB limit' };
+  }
+  var dims = imageDims_(bytes);
+  if (!dims) return { ok: false, code: 'TS-EXP-12', detail: 'unrecognised image format' };
+  var pixels = dims.width * dims.height;
+  if (pixels > SHEETS_IMAGE_MAX_PIXELS) {
+    return {
+      ok: false, code: 'TS-EXP-13',
+      detail: dims.width + 'x' + dims.height + ' exceeds the 1,000,000-pixel limit'
+    };
+  }
+  return { ok: true, code: '', detail: dims.width + 'x' + dims.height + ', ' + Math.round(size / 1024) + ' KB' };
+}
+
+/**
+ * A copy of a Drive image no larger than `px` on its longest side, made by
+ * Drive rather than here — Apps Script cannot resize an image, Drive can.
+ *
+ * The Drive API's thumbnailLink is a resizable URL: the trailing "=s220" is
+ * the size, and asking for "=s400" returns a 400-pixel version. Null when
+ * Drive has not generated a thumbnail yet (it can lag a fresh upload by a
+ * few seconds) or the call fails; the caller decides what to do then.
+ */
+function driveResized_(fileId, px) {
+  var meta = UrlFetchApp.fetch(
+    'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) +
+      '?fields=thumbnailLink&supportsAllDrives=true',
+    { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true }
+  );
+  if (meta.getResponseCode() !== 200) {
+    throw fail_('TS-EXP-14', 'Drive metadata read failed for ' + fileId + ': HTTP ' + meta.getResponseCode());
+  }
+  var link = JSON.parse(meta.getContentText()).thumbnailLink;
+  if (!link) return null;
+  var sized = link.replace(/=s\d+(-c)?$/, '=s' + px);
+  var img = UrlFetchApp.fetch(sized, {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+  });
+  if (img.getResponseCode() !== 200) {
+    throw fail_('TS-EXP-15', 'Drive thumbnail fetch failed for ' + fileId + ': HTTP ' + img.getResponseCode());
+  }
+  return img.getBlob();
+}
+
+/**
+ * TikTok's picture of a variation, kept in Drive under Product Photos/_tiktok
+ * so it is fetched from TikTok once and resized by Drive like our own photos.
+ * The by-product is an archive of every variation ever sold, including ones
+ * this app did not create.
+ */
+function tiktokPhotoFile_(url, key) {
+  var root = DriveApp.getFolderById(PHOTOS_FOLDER_ID);
+  var cache = childFolder_(root, '_tiktok');
+  var name = fileSafe_(key) + '.jpg';
+  var existing = cache.getFilesByName(name);
+  if (existing.hasNext()) return existing.next();
+  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  if (res.getResponseCode() !== 200) {
+    throw fail_('TS-EXP-16', 'TikTok image fetch failed for ' + key + ': HTTP ' + res.getResponseCode());
+  }
+  var blob = res.getBlob().setName(name);
+  return cache.createFile(blob);
 }
 
 /** identifier -> Drive photo link, from this listing's own SKU rows. */
@@ -93,38 +221,81 @@ function photoIndex_(listingId) {
 }
 
 /**
- * The picture for one variation on the purchase order, or null.
+ * The picture for one variation, sized for Sheets, or the reason there is none.
  *
- * Our own Drive copy first, as a thumbnail: it is the photo taken at the
- * factory, and a thumbnail keeps the workbook small. Otherwise the image TikTok
- * attached to the order line, which exists for every variation TikTok has ever
- * sold, including ones added in Seller Center. A failure here is a missing
- * picture, never a failed export — the figures matter more than the photo.
+ * Returns { blob, link, code, detail }: `blob` is ready to insert (measured,
+ * within both limits) or null; `link` is a URL to the full photo for the cell
+ * to fall back to; `code` and `detail` say why there is no blob. Nothing here
+ * throws to the caller — a picture is never allowed to fail the figures.
+ *
+ * Order of preference: our own Drive photo of the SKU, resized by Drive; then
+ * TikTok's image of the variation as sold, cached to Drive and resized the
+ * same way; then, if Drive has no thumbnail yet, the original — but only if
+ * it measures within the limits.
  */
 function variantPhoto_(v, photos) {
-  var driveUrl = photos[String(v.seller_sku || '')];
-  if (driveUrl) {
+  var out = { blob: null, link: '', code: '', detail: '' };
+  var driveUrl = photos[String(v.seller_sku || '')] || '';
+  var key = String(v.seller_sku || v.sku_id || v.variation || 'variation');
+
+  var candidates = [];
+  if (driveUrl) candidates.push({ fileId: driveFileId_(driveUrl), link: driveUrl, source: 'drive' });
+  if (v.sku_image) candidates.push({ url: String(v.sku_image), link: String(v.sku_image), source: 'tiktok' });
+  if (!candidates.length) {
+    out.code = 'TS-EXP-17';
+    out.detail = 'no photo on record for ' + key;
+    return out;
+  }
+
+  var problems = [];
+  for (var i = 0; i < candidates.length; i++) {
+    var c = candidates[i];
     try {
-      var file = DriveApp.getFileById(driveFileId_(driveUrl));
-      var thumb = file.getThumbnail();
-      var blob = thumb || file.getBlob();
-      if (blob && blob.getBytes().length <= PHOTO_MAX_BYTES) return blob;
+      var file = c.fileId ? DriveApp.getFileById(c.fileId) : tiktokPhotoFile_(c.url, key);
+      out.link = out.link || c.link;
+      var blob = driveResized_(file.getId(), PHOTO_FETCH_PX) || file.getBlob();
+      var fit = sheetsImageFit_(blob.getBytes());
+      if (fit.ok) { out.blob = blob; out.code = ''; out.detail = fit.detail; return out; }
+      problems.push(c.source + ': ' + fit.detail + ' [' + fit.code + ']');
+      out.code = fit.code;
     } catch (e) {
-      console.warn('Drive photo unavailable for ' + v.seller_sku + ': ' + e);
+      problems.push(c.source + ': ' + (e && e.message ? e.message : e) + ' [' + codeOf_(e) + ']');
+      out.code = codeOf_(e);
     }
   }
-  if (v.sku_image) {
+  out.detail = key + ' — ' + problems.join('; ');
+  return out;
+}
+
+/**
+ * Put one variation's photo in its row, or a link where the photo would be.
+ *
+ * Whatever happens in here is recorded (a warn row in the Log tab, with the
+ * code) and the export carries on. Returns true if a picture was placed.
+ */
+function placePhoto_(sheet, rowIndex, v, photos, brand) {
+  sheet.setRowHeight(rowIndex, PHOTO_ROW_PX);
+  var photo = variantPhoto_(v, photos);
+  if (photo.blob) {
     try {
-      var res = UrlFetchApp.fetch(v.sku_image, { muteHttpExceptions: true });
-      if (res.getResponseCode() === 200) {
-        var b = res.getBlob();
-        if (b.getBytes().length <= PHOTO_MAX_BYTES) return b;
-      }
-    } catch (e2) {
-      console.warn('TikTok photo unavailable for ' + (v.seller_sku || v.sku_id) + ': ' + e2);
+      sheet.insertImage(photo.blob, 1, rowIndex, 6, 5).setWidth(PHOTO_PX).setHeight(PHOTO_PX);
+      return true;
+    } catch (e) {
+      // Measured as fitting and still refused: that is the case to know about.
+      photo.code = 'TS-EXP-18';
+      photo.detail = (v.seller_sku || v.sku_id) + ' — insertImage refused a ' + photo.detail +
+        ' image: ' + (e && e.message ? e.message : e);
     }
   }
-  return null;
+  warn_(photo.code, 'export photo: ' + photo.detail, brand);
+  var cell = sheet.getRange(rowIndex, 1);
+  if (photo.link) {
+    cell.setFormula('=HYPERLINK("' + String(photo.link).replace(/"/g, '') + '","photo (link)")');
+  } else {
+    cell.setValue('no photo');
+  }
+  cell.setFontColor('#888888').setNote('[' + photo.code + '] ' + photo.detail);
+  return false;
 }
 
 /**
@@ -194,7 +365,7 @@ function exportListing_(listingId, actor) {
   var listing = readAll_(TAB_LISTINGS).filter(function (l) {
     return String(l.listing_id) === String(listingId);
   })[0];
-  if (!listing) throw new Error('Unknown listing: ' + listingId);
+  if (!listing) throw fail_('TS-EXP-01', 'Unknown listing: ' + listingId);
 
   var header = ['Identifier', 'Title', 'Variant', 'Price (SGD)', 'Stock', 'Weight (kg)', 'Dimensions (cm)', 'TikTok product ID', 'Listed at (SGT)', 'Created by'];
   var rows = skus.map(function (s) {
@@ -249,13 +420,13 @@ function exportListing_(listingId, actor) {
 function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
                        costDivisor, actor) {
   var shop = shopById_(shopId);
-  if (!shop) throw new Error('Unknown shop: ' + shopId);
+  if (!shop) throw fail_('TS-EXP-02', 'Unknown shop: ' + shopId);
 
   var divisor = Number(costDivisor || 0);
   // A divisor of zero or less is a division by zero or a negative price. Caught
   // here rather than producing Infinity in a column someone pays against.
   if (divisor && divisor <= 0) {
-    throw new Error('The cost divisor must be greater than zero.');
+    throw fail_('TS-EXP-03', 'The cost divisor must be greater than zero.');
   }
 
   var summary = orderSummary_(shopId, fromDate, fromTime, toDate, toTime);
@@ -265,8 +436,10 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
   var chosen = summary.listings.filter(function (l) {
     return !listingIds || !listingIds.length || wanted[l.listing_id];
   });
-  if (!chosen.length) throw new Error('No orders in that window for those listings.');
+  if (!chosen.length) throw fail_('TS-EXP-04', 'No orders in that window for those listings.');
 
+  var photosPlaced = 0;
+  var photosMissing = 0;
   var temp = SpreadsheetApp.create('tikshop-orders-temp');
   try {
     var book = temp;
@@ -365,17 +538,13 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
       // One picture per variation, anchored to its row. Over-grid images are
       // what the xlsx export keeps as pictures; an IMAGE() formula would not
-      // survive the conversion, and a Drive link is not a photo.
+      // survive the conversion, and a Drive link is not a photo. Each one is
+      // measured against Sheets' limits first and can only ever degrade to a
+      // link in its own cell — never fail the workbook.
       var photos = photoIndex_(l.listing_id);
       detail.variations.forEach(function (v, i) {
-        var rowIndex = h0 + 1 + i;
-        s2.setRowHeight(rowIndex, PHOTO_ROW_PX);
-        var blob = variantPhoto_(v, photos);
-        if (!blob) {
-          s2.getRange(rowIndex, 1).setValue('no photo').setFontColor('#888888');
-          return;
-        }
-        s2.insertImage(blob, 1, rowIndex, 6, 5).setWidth(PHOTO_PX).setHeight(PHOTO_PX);
+        if (placePhoto_(s2, h0 + 1 + i, v, photos, shop.brand)) photosPlaced++;
+        else photosMissing++;
       });
       // Numbers read best against the top of a tall row's picture.
       if (itemRows.length) {
@@ -400,13 +569,16 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     var folder = datedExportFolder_();
     var file = folder.createFile(blob);
     logEvent_(actor, 'export_orders', shop.brand,
-      filename + ' (' + chosen.length + ' listings)', 'ok');
+      filename + ' (' + chosen.length + ' listings, ' + photosPlaced + ' photos, ' +
+      photosMissing + ' missing)', 'ok');
 
     return {
       url: file.getUrl(),
       name: filename,
       folder: folderPath_(folder),
       folder_url: folder.getUrl(),
+      photos_placed: photosPlaced,
+      photos_missing: photosMissing,
       listings: chosen.length,
       units: summary.total_units,
       revenue: summary.total_revenue,

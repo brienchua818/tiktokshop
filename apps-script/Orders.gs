@@ -37,7 +37,7 @@ function ttSearchOrders_(prefix, fromEpoch, toEpoch, pageToken) {
     create_time_ge: Number(fromEpoch),
     create_time_lt: Number(toEpoch)
   });
-  if (r.code !== 0) throw new Error('Could not read orders: ' + (r.message || r.code));
+  if (r.code !== 0) throw fail_('TS-ORD-01', 'Could not read orders: ' + ttReason_(r));
 
   var data = r.data || {};
   return { orders: data.orders || [], nextPageToken: data.next_page_token || '' };
@@ -63,7 +63,7 @@ function ttAllOrders_(prefix, fromEpoch, toEpoch) {
     token = page.nextPageToken;
     pages++;
     if (pages >= MAX_PAGES && token) {
-      throw new Error(
+      throw fail_('TS-ORD-02', 
         'That range has more than ' + MAX_PAGES * ORDER_PAGE_SIZE + ' orders. ' +
         'Narrow the dates and sync again.'
       );
@@ -79,7 +79,7 @@ function sgtEpoch_(isoDate, hhmm) {
   // +08:00 written explicitly rather than relying on the script's timezone,
   // which is a project setting anyone could change.
   var d = new Date(isoDate + 'T' + time + ':00+08:00');
-  if (isNaN(d.getTime())) throw new Error('Not a date: ' + isoDate + ' ' + time);
+  if (isNaN(d.getTime())) throw fail_('TS-ORD-03', 'Not a date: ' + isoDate + ' ' + time);
   return Math.floor(d.getTime() / 1000);
 }
 
@@ -108,11 +108,11 @@ function sgtEndEpoch_(isoDate, hhmm) {
  */
 function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
   var shop = shopById_(shopId);
-  if (!shop) throw new Error('Unknown shop: ' + shopId);
+  if (!shop) throw fail_('TS-ORD-04', 'Unknown shop: ' + shopId);
 
   var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
   var toEpoch = sgtEndEpoch_(toDate, toTime);
-  if (toEpoch <= fromEpoch) throw new Error('The end of the range is before its start.');
+  if (toEpoch <= fromEpoch) throw fail_('TS-ORD-05', 'The end of the range is before its start.');
 
   var orders = ttAllOrders_(shopId, fromEpoch, toEpoch);
 
@@ -128,7 +128,7 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
     return t && (t < fromEpoch || t >= toEpoch);
   });
   if (strays.length) {
-    throw new Error(
+    throw fail_('TS-ORD-06', 
       'TikTok returned ' + strays.length + ' order(s) outside the requested window ' +
       '(for example ' + sgtStampFromEpoch_(strays[0].create_time) + '). ' +
       'The date filter is not being applied, so nothing was saved. Tell Brien.'

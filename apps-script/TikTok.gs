@@ -17,7 +17,7 @@ function ttCreds_(prefix) {
   var key = prop_(prefix + '_APP_KEY');
   var secret = prop_(prefix + '_APP_SECRET');
   if (!key || !secret) {
-    throw new Error('No app credentials for ' + prefix +
+    throw fail_('TS-TT-01', 'No app credentials for ' + prefix +
       '. Add ' + prefix + '_APP_KEY and ' + prefix + '_APP_SECRET in Script Properties.');
   }
   return { key: key, secret: secret };
@@ -64,7 +64,7 @@ function ttQuery_(q) {
 function ttAuthorizeUrl(prefix) {
   var serviceId = prop_(prefix + '_SERVICE_ID');
   if (!serviceId) {
-    throw new Error(
+    throw fail_('TS-TT-02', 
       'Set ' + prefix + '_SERVICE_ID in Script Properties first.\n\n' +
       'It comes from THIS project\'s ' + prefix + ' app in TikTok Partner Center — ' +
       'next to the App Key and App Secret, or as the number after "service_id=" in ' +
@@ -192,7 +192,7 @@ function ttHandleAuthCallback_(e) {
       grant_type: 'authorized_code'
     });
     var body = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText() || '{}');
-    if (body.code !== 0) throw new Error(body.message || 'token exchange failed');
+    if (body.code !== 0) throw fail_('TS-TT-03', ttReason_(body) || 'token exchange failed');
 
     var d = body.data;
     var set = {};
@@ -226,12 +226,12 @@ function ttHandleAuthCallback_(e) {
 function ttRefresh_(prefix) {
   var c = ttCreds_(prefix);
   var rt = prop_(prefix + '_REFRESH_TOKEN');
-  if (!rt) throw new Error(prefix + ' is not authorised yet.');
+  if (!rt) throw fail_('TS-TT-04', prefix + ' is not authorised yet.');
   var url = TT_AUTH_HOST + '/api/v2/token/refresh?' + ttQuery_({
     app_key: c.key, app_secret: c.secret, refresh_token: rt, grant_type: 'refresh_token'
   });
   var body = JSON.parse(UrlFetchApp.fetch(url, { muteHttpExceptions: true }).getContentText() || '{}');
-  if (body.code !== 0) throw new Error(prefix + ' refresh failed: ' + body.message);
+  if (body.code !== 0) throw fail_('TS-TT-05', prefix + ' refresh failed: ' + ttReason_(body));
   var d = body.data, set = {};
   set[prefix + '_ACCESS_TOKEN'] = d.access_token;
   set[prefix + '_ACCESS_EXPIRES'] = String(d.access_token_expire_in || 0);
@@ -247,7 +247,7 @@ function ttRefresh_(prefix) {
 function ttToken_(prefix) {
   var tok = prop_(prefix + '_ACCESS_TOKEN');
   var exp = Number(prop_(prefix + '_ACCESS_EXPIRES') || 0);
-  if (!tok) throw new Error(shopById_(prefix).brand + ' is not connected to TikTok yet.');
+  if (!tok) throw fail_('TS-TT-06', shopById_(prefix).brand + ' is not connected to TikTok yet.');
   // Refresh early: discovering an expired token mid-livestream is the
   // expensive case.
   if (exp && exp - Math.floor(Date.now() / 1000) < 86400) return ttRefresh_(prefix);
@@ -340,7 +340,7 @@ function ttSearchProducts_(prefix, pageToken) {
   var r = ttFetch_(prefix, 'post', '/product/202502/products/search', query, {
     status: 'ACTIVATE'
   });
-  if (r.code !== 0) throw new Error(r.message || 'Could not read products from TikTok.');
+  if (r.code !== 0) throw fail_('TS-TT-07', ttReason_(r) || 'Could not read products from TikTok.');
 
   var data = r.data || {};
   var products = (data.products || []).map(function (p) {
@@ -398,7 +398,7 @@ function inspectProduct() {
     { category_version: CATEGORY_VERSION }, null);
 
   if (r.code !== 0) {
-    Logger.log('TikTok refused: ' + (r.message || r.code));
+    Logger.log('TikTok refused: ' + ttReason_(r));
     return;
   }
 

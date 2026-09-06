@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Lock.gs', 'Sheet.gs', 'Export.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
+const FILES = ['Config.gs', 'Errors.gs', 'Lock.gs', 'Sheet.gs', 'Export.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -100,6 +100,7 @@ ${src}
     sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_, buildRemovePayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     relayoutRows_, exportFilename_, fileSafe_, driveFileId_, PHOTO_PX, listingUrl_, listingLinkFormula_,
+    imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -1136,6 +1137,94 @@ check('the listing id becomes a link Excel can open', () => {
      '=HYPERLINK("https://shop.tiktok.com/view/product/1734903629786286062?region=SG","1734903629786286062")')
   // A quote in a label would break the formula; it is dropped rather than trusted.
   eq(gs.listingLinkFormula_('1', 'a"b'), '=HYPERLINK("https://shop.tiktok.com/view/product/1?region=SG","ab")')
+})
+
+// --- Coded errors --------------------------------------------------------------
+
+check('fail_ carries a code and extra fields; codeOf_ names the uncoded case', () => {
+  const e = gs.fail_('TS-TST-01', 'boom', { listingId: 'x' })
+  eq(e.message, 'boom'); eq(e.code, 'TS-TST-01'); eq(e.listingId, 'x')
+  eq(gs.codeOf_(e), 'TS-TST-01')
+  eq(gs.codeOf_(new Error('plain')), 'TS-UNC-00')
+  eq(gs.codeOf_(null), 'TS-UNC-00')
+})
+
+check('ttReason_ keeps TikTok\'s own number next to its message', () => {
+  eq(gs.ttReason_({ code: 12052262, message: 'Chinese characters are not supported' }),
+     'Chinese characters are not supported (TikTok 12052262)')
+  eq(gs.ttReason_({ code: 36009002 }), 'TikTok code 36009002')
+  eq(gs.ttReason_(null), 'no response')
+})
+
+check('every error code is used exactly once and is in ERROR-CODES.md', () => {
+  const codes = []
+  for (const f of fs.readdirSync(DIR)) {
+    if (!f.endsWith('.gs') || f === 'TikShopBackend.gs') continue
+    const src = fs.readFileSync(path.join(DIR, f), 'utf8')
+    for (const m of src.matchAll(/(?:fail_\(\s*|code\s*[:=]\s*)'(TS-[A-Z]+-\d+)'/g)) codes.push(m[1])
+  }
+  if (codes.length < 50) throw new Error('too few codes found: ' + codes.length)
+  const dupes = codes.filter((c, i) => codes.indexOf(c) !== i)
+  if (dupes.length) throw new Error('duplicate codes: ' + dupes.join(', '))
+  const doc = fs.readFileSync(path.join(DIR, 'ERROR-CODES.md'), 'utf8')
+  const missing = codes.filter((c) => !doc.includes('`' + c + '`'))
+  if (missing.length) throw new Error('not in ERROR-CODES.md (run build-error-codes.py): ' + missing.join(', '))
+})
+
+// --- Images for the export ---------------------------------------------------------
+//
+// Sheets refuses an inserted image over 2 MB OR over 1,000,000 pixels. The
+// export on 7 Sep failed on the second limit with a 1600x1600 photo. These
+// are the headers the measurement reads.
+
+function pngBytes(w, h, pad = 100) {
+  const b = new Array(pad).fill(0)
+  ;[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].forEach((v, i) => (b[i] = v))
+  b[16] = (w >>> 24) & 255; b[17] = (w >>> 16) & 255; b[18] = (w >>> 8) & 255; b[19] = w & 255
+  b[20] = (h >>> 24) & 255; b[21] = (h >>> 16) & 255; b[22] = (h >>> 8) & 255; b[23] = h & 255
+  return b
+}
+function jpegBytes(w, h) {
+  // SOI, APP0 segment (16 bytes), then SOF0 with height/width, then padding.
+  const b = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]
+  for (let i = 0; i < 14; i++) b.push(0x4a)
+  b.push(0xff, 0xc0, 0x00, 0x11, 0x08, (h >> 8) & 255, h & 255, (w >> 8) & 255, w & 255)
+  while (b.length < 100) b.push(0)
+  return b
+}
+
+check('PNG and JPEG dimensions are read from the header', () => {
+  eq(JSON.stringify(gs.imageDims_(pngBytes(1600, 1600))), JSON.stringify({ width: 1600, height: 1600 }))
+  eq(JSON.stringify(gs.imageDims_(jpegBytes(400, 300))), JSON.stringify({ width: 400, height: 300 }))
+  eq(gs.imageDims_([1, 2, 3]), null)
+})
+
+check('the 1600x1600 factory photo is refused for pixels, not bytes', () => {
+  const fit = gs.sheetsImageFit_(pngBytes(1600, 1600))
+  eq(fit.ok, false); eq(fit.code, 'TS-EXP-13')
+  if (!/1600x1600/.test(fit.detail)) throw new Error(fit.detail)
+})
+
+check('a Drive-resized 400px copy fits', () => {
+  const fit = gs.sheetsImageFit_(jpegBytes(400, 400))
+  eq(fit.ok, true)
+  if (400 * 400 > gs.SHEETS_IMAGE_MAX_PIXELS) throw new Error('limit constant wrong')
+})
+
+check('exactly one million pixels is allowed; one more is not', () => {
+  eq(gs.sheetsImageFit_(pngBytes(1000, 1000)).ok, true)
+  eq(gs.sheetsImageFit_(pngBytes(1001, 1000)).code, 'TS-EXP-13')
+})
+
+check('an oversized file is refused for bytes before anything else', () => {
+  const big = pngBytes(10, 10, 2 * 1024 * 1024 + 1)
+  eq(gs.sheetsImageFit_(big).code, 'TS-EXP-11')
+})
+
+check('an unrecognised format is refused rather than guessed', () => {
+  const webp = new Array(100).fill(0); 'RIFF'.split('').forEach((c, i) => (webp[i] = c.charCodeAt(0)))
+  eq(gs.sheetsImageFit_(webp).code, 'TS-EXP-12')
+  eq(gs.sheetsImageFit_([]).code, 'TS-EXP-10')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

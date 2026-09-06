@@ -855,6 +855,13 @@ function pushSku_(body, user) {
     if (body.photo_base64) {
       photoUrl = savePhoto_(prefix, body.identifier, body.photo_base64,
                             body.photo_mime || 'image/jpeg', user.name);
+      // The small copy for the purchase order, filed beside the photo. Made
+      // by the phone; the backend cannot resize. Carried on `body` so the row
+      // writer, three calls down, can record it without a new parameter on
+      // every function in between.
+      body.photo_thumb_url = body.thumb_base64
+        ? savePhoto_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
+        : '';
       var blob = Utilities.newBlob(
         Utilities.base64Decode(body.photo_base64),
         body.photo_mime || 'image/jpeg', 'product.jpg'
@@ -1128,6 +1135,7 @@ function skuRow_(body, user, prefix, shop, addition, photoUrl, categoryId, produ
     weight_kg: body.weight_kg || DEFAULT_WEIGHT_KG,
     dims_cm: DEFAULT_DIMS.length + 'x' + DEFAULT_DIMS.width + 'x' + DEFAULT_DIMS.height,
     tiktok_image_uri: addition.imageUri, photo_url: photoUrl,
+    photo_thumb_url: String(body.photo_thumb_url || ''),
     category_id: categoryId || '',
     status: 'pushed', error: '', tiktok_product_id: productId,
     /**

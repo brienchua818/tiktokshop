@@ -167,8 +167,8 @@ function sheetsImageFit_(bytes) {
  *
  * The Drive API's thumbnailLink is a resizable URL: the trailing "=s220" is
  * the size, and asking for "=s400" returns a 400-pixel version. Null when
- * Drive has not generated a thumbnail yet (it can lag a fresh upload by a
- * few seconds) or the call fails; the caller decides what to do then.
+ * Drive has not generated a thumbnail yet (it lags a fresh upload by a few
+ * seconds); the caller retries.
  */
 function driveResized_(fileId, px) {
   var meta = UrlFetchApp.fetch(
@@ -191,6 +191,73 @@ function driveResized_(fileId, px) {
   return img.getBlob();
 }
 
+/** How long to give Drive to produce a thumbnail for a file it has just received. */
+var DRIVE_THUMB_ATTEMPTS = 5;
+var DRIVE_THUMB_WAIT_MS = 1500;
+
+/** driveResized_, retried across Drive's thumbnail lag. Null only after every attempt. */
+function driveResizedWithRetry_(fileId, px) {
+  for (var attempt = 1; attempt <= DRIVE_THUMB_ATTEMPTS; attempt++) {
+    var blob = driveResized_(fileId, px);
+    if (blob) return blob;
+    if (attempt < DRIVE_THUMB_ATTEMPTS) Utilities.sleep(DRIVE_THUMB_WAIT_MS);
+  }
+  return null;
+}
+
+/**
+ * The last resort resizer: render the image on a Google Slides page and take
+ * the page's thumbnail through the Slides API, which is produced on demand
+ * (no lag to wait out) at a fixed size — MEDIUM is 800 px wide, 360,000
+ * pixels, a third of Sheets' cap. Slower than Drive and the result has the
+ * page's white margins, so it is only used when both faster paths have
+ * failed; but it depends on nothing that can lag or be missing.
+ *
+ * One temporary presentation per export, trashed in exportOrders_'s finally.
+ */
+var SLIDES_TEMP_ = null;
+
+function slidesRender_(blob) {
+  if (!SLIDES_TEMP_) SLIDES_TEMP_ = SlidesApp.create('tikshop-photo-render-temp');
+  var pres = SLIDES_TEMP_;
+  var slide = pres.appendSlide(SlidesApp.PredefinedLayout.BLANK);
+  var w = pres.getPageWidth();
+  var h = pres.getPageHeight();
+  var side = Math.min(w, h);
+  var img = slide.insertImage(blob);
+  // Fit inside a centred square, keeping the photo's own aspect ratio.
+  var ratio = img.getWidth() / img.getHeight();
+  var iw = ratio >= 1 ? side : side * ratio;
+  var ih = ratio >= 1 ? side / ratio : side;
+  img.setWidth(iw).setHeight(ih).setLeft((w - iw) / 2).setTop((h - ih) / 2);
+  pres.saveAndClose();
+  SLIDES_TEMP_ = SlidesApp.openById(pres.getId());
+
+  var url = 'https://slides.googleapis.com/v1/presentations/' + pres.getId() +
+    '/pages/' + slide.getObjectId() + '/thumbnail?thumbnailProperties.thumbnailSize=MEDIUM';
+  var res = UrlFetchApp.fetch(url, {
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true
+  });
+  if (res.getResponseCode() !== 200) {
+    throw fail_('TS-EXP-19', 'Slides thumbnail failed: HTTP ' + res.getResponseCode() + ' ' +
+      res.getContentText().slice(0, 200));
+  }
+  var contentUrl = JSON.parse(res.getContentText()).contentUrl;
+  if (!contentUrl) throw fail_('TS-EXP-20', 'Slides returned no thumbnail URL.');
+  var png = UrlFetchApp.fetch(contentUrl, { muteHttpExceptions: true });
+  if (png.getResponseCode() !== 200) {
+    throw fail_('TS-EXP-21', 'Slides thumbnail download failed: HTTP ' + png.getResponseCode());
+  }
+  return png.getBlob();
+}
+
+/** Trash the Slides scratch file, if one was needed. Safe to call when it was not. */
+function discardSlidesTemp_() {
+  if (!SLIDES_TEMP_) return;
+  try { DriveApp.getFileById(SLIDES_TEMP_.getId()).setTrashed(true); } catch (e) { /* already gone */ }
+  SLIDES_TEMP_ = null;
+}
+
 /**
  * TikTok's picture of a variation, kept in Drive under Product Photos/_tiktok
  * so it is fetched from TikTok once and resized by Drive like our own photos.
@@ -211,36 +278,57 @@ function tiktokPhotoFile_(url, key) {
   return cache.createFile(blob);
 }
 
-/** identifier -> Drive photo link, from this listing's own SKU rows. */
+/** identifier -> { photo, thumb } Drive links, from this listing's own SKU rows. */
 function photoIndex_(listingId) {
   var idx = {};
   listSkus_(listingId).forEach(function (r) {
-    if (r.identifier && r.photo_url) idx[String(r.identifier)] = String(r.photo_url);
+    if (!r.identifier) return;
+    if (r.photo_url || r.photo_thumb_url) {
+      idx[String(r.identifier)] = {
+        photo: String(r.photo_url || ''),
+        thumb: String(r.photo_thumb_url || '')
+      };
+    }
   });
   return idx;
 }
 
 /**
+ * Where a variation's picture can come from, best first. Pure, so the order
+ * is tested rather than trusted.
+ *
+ *   thumb    the 400 px copy the phone made at push time — already the right
+ *            size, one Drive read, no resizing at all
+ *   photo    our full photo, resized by Drive
+ *   tiktok   TikTok's image of the variation as sold, cached to Drive, resized
+ *            by Drive
+ *
+ * Whichever file is reached first is also what the Slides renderer is handed
+ * if Drive cannot resize any of them.
+ */
+function photoCandidates_(ours, v) {
+  var out = [];
+  if (ours && ours.thumb) out.push({ source: 'thumb', fileId: driveFileId_(ours.thumb), direct: true });
+  if (ours && ours.photo) out.push({ source: 'photo', fileId: driveFileId_(ours.photo) });
+  if (v && v.sku_image) out.push({ source: 'tiktok', url: String(v.sku_image) });
+  return out;
+}
+
+/**
  * The picture for one variation, sized for Sheets, or the reason there is none.
  *
- * Returns { blob, link, code, detail }: `blob` is ready to insert (measured,
- * within both limits) or null; `link` is a URL to the full photo for the cell
- * to fall back to; `code` and `detail` say why there is no blob. Nothing here
- * throws to the caller — a picture is never allowed to fail the figures.
+ * Returns { blob, code, detail }. Nothing here throws to the caller; every
+ * path is tried in turn and every failure is kept in `detail` with its code,
+ * so the Log tab says exactly which resizer failed and why.
  *
- * Order of preference: our own Drive photo of the SKU, resized by Drive; then
- * TikTok's image of the variation as sold, cached to Drive and resized the
- * same way; then, if Drive has no thumbnail yet, the original — but only if
- * it measures within the limits.
+ * Three resizers, in order: the phone's thumbnail (already small), Drive
+ * (with retries for its thumbnail lag), Slides (on demand). The photo itself
+ * is never inserted unless it measures within both Sheets limits.
  */
 function variantPhoto_(v, photos) {
-  var out = { blob: null, link: '', code: '', detail: '' };
-  var driveUrl = photos[String(v.seller_sku || '')] || '';
+  var out = { blob: null, code: '', detail: '' };
   var key = String(v.seller_sku || v.sku_id || v.variation || 'variation');
-
-  var candidates = [];
-  if (driveUrl) candidates.push({ fileId: driveFileId_(driveUrl), link: driveUrl, source: 'drive' });
-  if (v.sku_image) candidates.push({ url: String(v.sku_image), link: String(v.sku_image), source: 'tiktok' });
+  var candidates = photoCandidates_(photos[String(v.seller_sku || '')], v);
   if (!candidates.length) {
     out.code = 'TS-EXP-17';
     out.detail = 'no photo on record for ' + key;
@@ -248,30 +336,56 @@ function variantPhoto_(v, photos) {
   }
 
   var problems = [];
-  for (var i = 0; i < candidates.length; i++) {
+  var firstFile = null;
+  var accept = function (blob, source) {
+    var fit = sheetsImageFit_(blob.getBytes());
+    if (fit.ok) { out.blob = blob; out.detail = source + ' ' + fit.detail; return true; }
+    problems.push(source + ': ' + fit.detail + ' [' + fit.code + ']');
+    out.code = fit.code;
+    return false;
+  };
+
+  for (var i = 0; i < candidates.length && !out.blob; i++) {
     var c = candidates[i];
     try {
       var file = c.fileId ? DriveApp.getFileById(c.fileId) : tiktokPhotoFile_(c.url, key);
-      out.link = out.link || c.link;
-      var blob = driveResized_(file.getId(), PHOTO_FETCH_PX) || file.getBlob();
-      var fit = sheetsImageFit_(blob.getBytes());
-      if (fit.ok) { out.blob = blob; out.code = ''; out.detail = fit.detail; return out; }
-      problems.push(c.source + ': ' + fit.detail + ' [' + fit.code + ']');
-      out.code = fit.code;
+      if (!firstFile) firstFile = file;
+      if (c.direct && accept(file.getBlob(), c.source)) break;
+      var resized = driveResizedWithRetry_(file.getId(), PHOTO_FETCH_PX);
+      if (resized) { if (accept(resized, c.source + ' via Drive')) break; }
+      else problems.push(c.source + ': Drive produced no thumbnail in ' +
+        (DRIVE_THUMB_ATTEMPTS * DRIVE_THUMB_WAIT_MS / 1000) + 's [TS-EXP-22]');
     } catch (e) {
       problems.push(c.source + ': ' + (e && e.message ? e.message : e) + ' [' + codeOf_(e) + ']');
       out.code = codeOf_(e);
     }
   }
-  out.detail = key + ' — ' + problems.join('; ');
+
+  // Both faster paths failed for every candidate; render the first file we
+  // could reach through Slides, which does not depend on Drive's thumbnailer.
+  if (!out.blob && firstFile) {
+    try {
+      accept(slidesRender_(firstFile.getBlob()), 'slides');
+    } catch (e) {
+      problems.push('slides: ' + (e && e.message ? e.message : e) + ' [' + codeOf_(e) + ']');
+      out.code = codeOf_(e);
+    }
+  }
+
+  if (!out.blob) {
+    if (!out.code) out.code = 'TS-EXP-22';
+    out.detail = key + ' — ' + problems.join('; ');
+  }
   return out;
 }
 
 /**
- * Put one variation's photo in its row, or a link where the photo would be.
+ * Put one variation's photo in its row.
  *
  * Whatever happens in here is recorded (a warn row in the Log tab, with the
- * code) and the export carries on. Returns true if a picture was placed.
+ * code) and the export carries on. Returns true if a picture was placed. When
+ * none could be, the cell says so with the code — the reason is in the Log
+ * tab and on the cell's note.
  */
 function placePhoto_(sheet, rowIndex, v, photos, brand) {
   sheet.setRowHeight(rowIndex, PHOTO_ROW_PX);
@@ -288,13 +402,10 @@ function placePhoto_(sheet, rowIndex, v, photos, brand) {
     }
   }
   warn_(photo.code, 'export photo: ' + photo.detail, brand);
-  var cell = sheet.getRange(rowIndex, 1);
-  if (photo.link) {
-    cell.setFormula('=HYPERLINK("' + String(photo.link).replace(/"/g, '') + '","photo (link)")');
-  } else {
-    cell.setValue('no photo');
-  }
-  cell.setFontColor('#888888').setNote('[' + photo.code + '] ' + photo.detail);
+  sheet.getRange(rowIndex, 1)
+    .setValue('photo unavailable [' + photo.code + ']')
+    .setFontColor('#888888')
+    .setNote('[' + photo.code + '] ' + photo.detail);
   return false;
 }
 
@@ -397,6 +508,7 @@ function exportListing_(listingId, actor) {
     // The temporary sheet is always removed, including when the export throws
     // — otherwise a failed export litters the drive with temp files.
     try { DriveApp.getFileById(temp.getId()).setTrashed(true); } catch (e) { /* already gone */ }
+    discardSlidesTemp_();
   }
 }
 

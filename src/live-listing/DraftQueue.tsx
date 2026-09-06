@@ -14,6 +14,7 @@ import {
 } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
+import { toSquareJpeg } from '../capture/camera'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 
 /**
@@ -25,6 +26,12 @@ import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
  * only in what the person should do about it.
  */
 export const LISTING_FULL_MARKER = '[listing-full]'
+
+/**
+ * Side of the export thumbnail made at push time. 400 px is 160,000 pixels —
+ * a sixth of Sheets' cap — and still three times the 128 px it is drawn at.
+ */
+export const EXPORT_THUMB_PX = 400
 
 /**
  * The draft queue: what has been built, what has landed, and what has not.
@@ -671,6 +678,18 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
     if (!photo) throw new Error('The photo for this SKU is missing from this device.')
     const photoBase64 = await toBase64(photo)
 
+    // The purchase-order export needs a small copy of this photo — Sheets caps
+    // an inserted image at 1,000,000 pixels and the full photo is 2.56M — and
+    // the phone is the only place in the system that can resize an image for
+    // free. Best effort: a SKU must never fail to list because a thumbnail
+    // could not be made.
+    let thumbBase64: string | undefined
+    try {
+      thumbBase64 = await toBase64(await toSquareJpeg(photo, { target: EXPORT_THUMB_PX, quality: 0.8 }))
+    } catch {
+      thumbBase64 = undefined
+    }
+
     const result = await api.pushDraft({
       shop_id: draft.shop_id,
       // Omitted for the first SKU of a stream, which creates the listing.
@@ -684,6 +703,7 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
       weight_kg: draft.weight_kg,
       photo_base64: photoBase64,
       photo_mime: photo.type || 'image/jpeg',
+      ...(thumbBase64 ? { thumb_base64: thumbBase64 } : {}),
       idempotency_key: draft.idempotency_key,
     })
 

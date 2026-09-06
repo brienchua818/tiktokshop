@@ -40,19 +40,23 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-API-01` | Api.gs:290 | Unknown role: |
 | `TS-API-02` | Api.gs:293 | The owner account cannot be demoted. |
 | `TS-API-03` | Api.gs:306 | No such user: |
-| `TS-EXP-01` | Export.gs:368 | Unknown listing: |
-| `TS-EXP-02` | Export.gs:423 | Unknown shop: |
-| `TS-EXP-03` | Export.gs:429 | The cost divisor must be greater than zero. |
-| `TS-EXP-04` | Export.gs:439 | No orders in that window for those listings. |
+| `TS-EXP-01` | Export.gs:479 | Unknown listing: |
+| `TS-EXP-02` | Export.gs:535 | Unknown shop: |
+| `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |
+| `TS-EXP-04` | Export.gs:551 | No orders in that window for those listings. |
 | `TS-EXP-10` | Export.gs:148 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-11` | Export.gs:150 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-12` | Export.gs:153 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-13` | Export.gs:157 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-14` | Export.gs:180 | Drive metadata read failed for : HTTP |
 | `TS-EXP-15` | Export.gs:189 | Drive thumbnail fetch failed for : HTTP |
-| `TS-EXP-16` | Export.gs:208 | TikTok image fetch failed for : HTTP |
-| `TS-EXP-17` | Export.gs:245 | Non-fatal reason attached to a result (see the line). |
-| `TS-EXP-18` | Export.gs:285 | Non-fatal reason attached to a result (see the line). |
+| `TS-EXP-16` | Export.gs:275 | TikTok image fetch failed for : HTTP |
+| `TS-EXP-17` | Export.gs:333 | Non-fatal reason attached to a result (see the line). |
+| `TS-EXP-18` | Export.gs:399 | Non-fatal reason attached to a result (see the line). |
+| `TS-EXP-19` | Export.gs:242 | Slides thumbnail failed: HTTP |
+| `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
+| `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
+| `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
 | `TS-ORD-01` | Orders.gs:40 | Could not read orders: |
 | `TS-ORD-02` | Orders.gs:66 | That range has more than orders. Narrow the dates and sync again. |
 | `TS-ORD-03` | Orders.gs:82 | Not a date: |
@@ -84,12 +88,12 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-23` | Product.gs:807 | A photo is required. |
 | `TS-PRD-24` | Product.gs:814 |  |
 | `TS-PRD-25` | Product.gs:818 |  |
-| `TS-PRD-26` | Product.gs:987 | TikTok refused the variation. |
-| `TS-PRD-27` | Product.gs:1058 | Could not read the title of the listing this continues, so the new one cannot be named. Try again in a moment. |
-| `TS-PRD-28` | Product.gs:1064 |  |
-| `TS-PRD-29` | Product.gs:1088 | Listing check failed. |
-| `TS-PRD-30` | Product.gs:1095 | TikTok returned no product ID. |
-| `TS-SHT-01` | Sheet.gs:220 | Unknown shop: |
+| `TS-PRD-26` | Product.gs:994 | TikTok refused the variation. |
+| `TS-PRD-27` | Product.gs:1065 | Could not read the title of the listing this continues, so the new one cannot be named. Try again in a moment. |
+| `TS-PRD-28` | Product.gs:1071 |  |
+| `TS-PRD-29` | Product.gs:1095 | Listing check failed. |
+| `TS-PRD-30` | Product.gs:1102 | TikTok returned no product ID. |
+| `TS-SHT-01` | Sheet.gs:224 | Unknown shop: |
 | `TS-TT-01` | TikTok.gs:20 | No app credentials for . Add _APP_KEY and _APP_SECRET in Script Properties. |
 | `TS-TT-02` | TikTok.gs:67 | Set _SERVICE_ID in Script Properties first.\n\n It comes from THIS project\'s app in TikTok Partner Center — next to the App Key and App Secret, or as the number after "service_id=" in the authorisation link Partner Cent… |
 | `TS-TT-03` | TikTok.gs:195 | token exchange failed |

@@ -32,9 +32,16 @@ the hard way, it goes here the same day, with the code that hit it.
 
 | Limit | Value | Source | Where handled |
 | --- | --- | --- | --- |
-| Thumbnails | `thumbnailLink` is generated asynchronously after upload; may be absent for seconds | Drive API v3 | `driveResized_` returns null; caller measures the original and uses it only if it fits. |
+| Thumbnails | `thumbnailLink` is generated asynchronously after upload; may be absent for seconds | Drive API v3 | `driveResizedWithRetry_` polls 5 × 1.5 s; if still absent, `slidesRender_` produces the small copy instead. The phone-made 400 px copy (`photo_thumb_url`) avoids both for SKUs pushed after 7 Sep. |
 | Thumbnail sizing | `=sNNN` suffix on `thumbnailLink` resizes the longest side | Drive API v3 | `PHOTO_FETCH_PX = 400`. |
 | File name characters | `/` is the only forbidden character, but Windows users of the export cannot open names with `\ : * ? " < > \|` | Excel/Windows | `fileSafe_` strips exactly that set. |
+
+## Google Slides API
+
+| Limit | Value | Source | Where handled |
+| --- | --- | --- | --- |
+| Page thumbnail sizes | `SMALL` 200 px, `MEDIUM` 800 px, `LARGE` 1600 px wide (16:9 page) | [pages.getThumbnail](https://developers.google.com/slides/api/reference/rest/v1/presentations.pages/getThumbnail) | `slidesRender_` uses MEDIUM: 800×450 = 360,000 pixels, inside the Sheets cap. LARGE would not fit. |
+| Rendering cost | ~1–2 s per page, and the presentation must be saved before the thumbnail reflects the insert | Observed pattern | Last resort only; one scratch presentation per export, trashed in `finally`. |
 
 ## TikTok Shop API
 

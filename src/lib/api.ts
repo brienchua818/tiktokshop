@@ -354,6 +354,8 @@ export const api = {
     weight_kg: string
     photo_base64?: string
     photo_mime?: string
+    /** A 400 px JPEG of the same photo, for the purchase-order export. */
+    thumb_base64?: string
     tiktok_image_uri?: string
     idempotency_key: string
   }) => call<PushResult>('pushSku', { body }),

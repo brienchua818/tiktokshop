@@ -101,6 +101,7 @@ ${src}
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     relayoutRows_, exportFilename_, fileSafe_, driveFileId_, PHOTO_PX, listingUrl_, listingLinkFormula_,
     imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
+    photoCandidates_, PHOTO_FETCH_PX,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -1225,6 +1226,25 @@ check('an unrecognised format is refused rather than guessed', () => {
   const webp = new Array(100).fill(0); 'RIFF'.split('').forEach((c, i) => (webp[i] = c.charCodeAt(0)))
   eq(gs.sheetsImageFit_(webp).code, 'TS-EXP-12')
   eq(gs.sheetsImageFit_([]).code, 'TS-EXP-10')
+})
+
+check('photo sources are tried cheapest-first: phone thumbnail, our photo, TikTok', () => {
+  const ours = { thumb: 'https://drive.google.com/file/d/T1/view', photo: 'https://drive.google.com/file/d/P1/view' }
+  const c = gs.photoCandidates_(ours, { sku_image: 'https://p16.example/x.jpeg' })
+  eq(c.map((x) => x.source).join(','), 'thumb,photo,tiktok')
+  eq(c[0].fileId, 'T1'); eq(c[0].direct, true)
+  eq(c[1].fileId, 'P1'); eq(Boolean(c[1].direct), false)
+  eq(c[2].url, 'https://p16.example/x.jpeg')
+})
+
+check('a variation this app never listed still has TikTok\'s image to resize', () => {
+  const c = gs.photoCandidates_(undefined, { sku_image: 'https://p16.example/y.jpeg' })
+  eq(c.length, 1); eq(c[0].source, 'tiktok')
+  eq(gs.photoCandidates_(undefined, {}).length, 0)
+})
+
+check('the phone thumbnail and Drive resize both sit well under the pixel cap', () => {
+  if (gs.PHOTO_FETCH_PX * gs.PHOTO_FETCH_PX * 4 > gs.SHEETS_IMAGE_MAX_PIXELS) throw new Error('too close to the cap')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

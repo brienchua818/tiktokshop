@@ -16,6 +16,10 @@ HEADERS[TAB_LISTINGS] = ['listing_id', 'shop_id', 'brand', 'product_name', 'supp
 HEADERS[TAB_SKUS] = [
   'sku_id', 'listing_id', 'shop_id', 'brand', 'identifier', 'title', 'variant',
   'price', 'stock', 'weight_kg', 'dims_cm', 'tiktok_image_uri', 'photo_url',
+  // A 400 px copy of the photo, made on the phone at push time. The purchase
+  // order needs a small image (Sheets caps inserted images at 1,000,000
+  // pixels) and the phone is the one place that can resize for free.
+  'photo_thumb_url',
   'category_id', 'status', 'error', 'tiktok_product_id', 'tiktok_sku_id',
   // When TikTok was first seen returning this variation. The difference
   // between "not shown yet" and "was shown, then removed" — which is the

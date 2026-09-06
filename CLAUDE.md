@@ -31,6 +31,11 @@ not style preferences.
   Non-fatal ones — a photo that would not fit, a thumbnail not yet generated —
   go through `warn_(code, detail)` so they appear in the Log tab with result
   `warn`. Silence is not an outcome.
+- **A failsafe means the same result by another route, not a lesser result.**
+  A photo that does not fit is resized by another resizer (phone copy, Drive,
+  Slides); it is not replaced with a link. Only when every route is exhausted
+  does the output say so, with the code. Offering the user a substitute for
+  the thing they asked for is not a failsafe.
 - **A failsafe.** Decide, per failure, what the user gets instead: the export
   without a picture but with a link; the SKU list without live state but with
   a refresh button; the push reported as "outcome unknown", never "failed",

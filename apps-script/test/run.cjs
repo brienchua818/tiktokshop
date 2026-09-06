@@ -99,7 +99,7 @@ ${src}
     cipherAllowed_, PATHS_WITHOUT_CIPHER, ttSign_,
     sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_, buildRemovePayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
-    relayoutRows_, exportFilename_, fileSafe_,
+    relayoutRows_, exportFilename_, fileSafe_, driveFileId_, PHOTO_PX, listingUrl_, listingLinkFormula_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -1116,6 +1116,26 @@ check('export filename carries when and who, and keeps the email readable', () =
 check('characters a filename cannot hold are removed, nothing else is', () => {
   eq(gs.fileSafe_('a/b\\c:d*e?f"g<h>i|j'), 'a b c d e f g h i j')
   eq(gs.fileSafe_('Table Matters - 7" bowl [Live]'), 'Table Matters - 7 bowl [Live]')
+})
+
+check('a Drive link in either shape yields its file id', () => {
+  eq(gs.driveFileId_('https://drive.google.com/file/d/1HQpuxgbbspCgETgd5NziGiu5MhbtRZYS/view?usp=drivesdk'), '1HQpuxgbbspCgETgd5NziGiu5MhbtRZYS')
+  eq(gs.driveFileId_('https://drive.google.com/open?id=1xSWKkHpiiwPT5W_eZVV-0lL2SzkeKghi'), '1xSWKkHpiiwPT5W_eZVV-0lL2SzkeKghi')
+  eq(gs.driveFileId_(''), '')
+})
+
+check('the purchase-order photo is readable at 100% zoom', () => {
+  // 96 px is roughly 2.5 cm on a laptop screen at 100%; below that two bowls
+  // of the same shape cannot be told apart, which defeats the column.
+  if (gs.PHOTO_PX < 96) throw new Error('photo too small: ' + gs.PHOTO_PX)
+})
+
+check('the listing id becomes a link Excel can open', () => {
+  eq(gs.listingUrl_('1734903629786286062'), 'https://shop.tiktok.com/view/product/1734903629786286062?region=SG')
+  eq(gs.listingLinkFormula_('1734903629786286062'),
+     '=HYPERLINK("https://shop.tiktok.com/view/product/1734903629786286062?region=SG","1734903629786286062")')
+  // A quote in a label would break the formula; it is dropped rather than trusted.
+  eq(gs.listingLinkFormula_('1', 'a"b'), '=HYPERLINK("https://shop.tiktok.com/view/product/1?region=SG","ab")')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -33,7 +33,11 @@ HEADERS[TAB_ORDERS] = [
 HEADERS[TAB_ORDER_ITEMS] = [
   'order_id', 'shop_id', 'listing_id', 'product_name', 'sku_id', 'seller_sku',
   'variation', 'quantity', 'sale_price', 'currency', 'status',
-  'created_at_sgt', 'created_epoch'
+  'created_at_sgt', 'created_epoch',
+  // TikTok's own picture of the variation, as sold. Present on every line item,
+  // including variations this app never created — which is what makes the
+  // purchase order's photo column complete rather than "ours only".
+  'sku_image'
 ];
 HEADERS[TAB_LOG] = ['timestamp_sgt', 'actor', 'action', 'shop', 'detail', 'result'];
 HEADERS[TAB_USERS] = ['email', 'name', 'role', 'first_seen', 'last_seen', 'approved_by', 'note'];

@@ -179,6 +179,7 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
         // there because we put it there. Grouping falls back to sku_id.
         seller_sku: String(li.seller_sku || ''),
         variation: String(li.sku_name || ''),
+        sku_image: String(li.sku_image || ''),
         quantity: 1,
         sale_price: String(li.sale_price || ''),
         currency: String(li.currency || 'SGD'),
@@ -396,8 +397,10 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     var key = String(r.sku_id || r.seller_sku || r.variation || '?');
     if (!byVariation[key]) {
       byVariation[key] = {
+        sku_id: String(r.sku_id || ''),
         seller_sku: String(r.seller_sku || ''),
         variation: String(r.variation || ''),
+        sku_image: String(r.sku_image || ''),
         units: 0,
         unsold_units: 0,
         revenue: 0,
@@ -405,6 +408,7 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
       };
     }
     var g = byVariation[key];
+    if (!g.sku_image && r.sku_image) g.sku_image = String(r.sku_image);
     var qty = Number(r.quantity || 0);
     if (UNSOLD_STATUSES[String(r.status || '').toUpperCase()]) {
       g.unsold_units += qty;

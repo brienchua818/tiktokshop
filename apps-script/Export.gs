@@ -63,6 +63,86 @@ function folderPath_(folder) {
   return parts.join('/');
 }
 
+/**
+ * Photo size in the purchase order, in pixels, as Excel draws it at 100%.
+ *
+ * 128 px is about 3.4 cm on screen: large enough to tell two similar bowls
+ * apart without zooming, which is the whole point of the column. The row is
+ * made a little taller than the picture so nothing is clipped.
+ */
+var PHOTO_PX = 128;
+var PHOTO_ROW_PX = PHOTO_PX + 10;
+var PHOTO_COL_PX = PHOTO_PX + 14;
+/** Sheets refuses an inserted image above this. Thumbnails are far under it. */
+var PHOTO_MAX_BYTES = 2 * 1024 * 1024;
+
+/** The file id inside a Drive link, in either of the two shapes Drive issues. */
+function driveFileId_(url) {
+  var m = String(url || '').match(/\/d\/([A-Za-z0-9_-]+)/) ||
+    String(url || '').match(/[?&]id=([A-Za-z0-9_-]+)/);
+  return m ? m[1] : '';
+}
+
+/** identifier -> Drive photo link, from this listing's own SKU rows. */
+function photoIndex_(listingId) {
+  var idx = {};
+  listSkus_(listingId).forEach(function (r) {
+    if (r.identifier && r.photo_url) idx[String(r.identifier)] = String(r.photo_url);
+  });
+  return idx;
+}
+
+/**
+ * The picture for one variation on the purchase order, or null.
+ *
+ * Our own Drive copy first, as a thumbnail: it is the photo taken at the
+ * factory, and a thumbnail keeps the workbook small. Otherwise the image TikTok
+ * attached to the order line, which exists for every variation TikTok has ever
+ * sold, including ones added in Seller Center. A failure here is a missing
+ * picture, never a failed export — the figures matter more than the photo.
+ */
+function variantPhoto_(v, photos) {
+  var driveUrl = photos[String(v.seller_sku || '')];
+  if (driveUrl) {
+    try {
+      var file = DriveApp.getFileById(driveFileId_(driveUrl));
+      var thumb = file.getThumbnail();
+      var blob = thumb || file.getBlob();
+      if (blob && blob.getBytes().length <= PHOTO_MAX_BYTES) return blob;
+    } catch (e) {
+      console.warn('Drive photo unavailable for ' + v.seller_sku + ': ' + e);
+    }
+  }
+  if (v.sku_image) {
+    try {
+      var res = UrlFetchApp.fetch(v.sku_image, { muteHttpExceptions: true });
+      if (res.getResponseCode() === 200) {
+        var b = res.getBlob();
+        if (b.getBytes().length <= PHOTO_MAX_BYTES) return b;
+      }
+    } catch (e2) {
+      console.warn('TikTok photo unavailable for ' + (v.seller_sku || v.sku_id) + ': ' + e2);
+    }
+  }
+  return null;
+}
+
+/**
+ * The public page of a TikTok Shop listing. What a factory or a colleague can
+ * open without a Seller Center login; the id alone is not something anyone
+ * can do anything with.
+ */
+function listingUrl_(listingId) {
+  return 'https://shop.tiktok.com/view/product/' + String(listingId) + '?region=SG';
+}
+
+/** A clickable cell: shows `label` (the id by default), opens the listing. */
+function listingLinkFormula_(listingId, label) {
+  var id = String(listingId).replace(/"/g, '');
+  var text = String(label === undefined ? id : label).replace(/"/g, '');
+  return '=HYPERLINK("' + listingUrl_(id) + '","' + text + '")';
+}
+
 /** Find or create a child folder. Never creates a duplicate. */
 function childFolder_(parent, name) {
   var it = parent.getFoldersByName(name);
@@ -204,12 +284,15 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     sh.getRange(1, 1, head.length, 1).setValues(head);
     sh.getRange(1, 1).setFontWeight('bold').setFontSize(13);
 
-    var sumHeader = ['Listing', 'TikTok listing ID', 'Orders', 'Units', 'Revenue (SGD)'];
+    // The id is a link (HYPERLINK survives the xlsx conversion; a rich-text
+    // link may not) and the URL is also written out in plain text, so it can
+    // be copied from a phone or a printout where a link cannot be tapped.
+    var sumHeader = ['Listing', 'TikTok listing ID', 'Listing URL', 'Orders', 'Units', 'Revenue (SGD)'];
     if (divisor) sumHeader.push('Cost (SGD)');
     var sumRows = chosen.map(function (l) {
       var row = [
-        l.product_name || l.listing_id, l.listing_id, l.order_count, l.units,
-        round2_(l.revenue)
+        l.product_name || l.listing_id, listingLinkFormula_(l.listing_id),
+        listingUrl_(l.listing_id), l.order_count, l.units, round2_(l.revenue)
       ];
       if (divisor) row.push(round2_(l.revenue / divisor));
       return row;
@@ -219,10 +302,14 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     sh.getRange(r0, 1, 1, sumHeader.length).setValues([sumHeader]).setFontWeight('bold');
     if (sumRows.length) sh.getRange(r0 + 1, 1, sumRows.length, sumHeader.length).setValues(sumRows);
 
-    var totalRow = ['TOTAL', '', sumRows.reduce(function (n, r) { return n + r[2]; }, 0),
-      sumRows.reduce(function (n, r) { return n + r[3]; }, 0),
-      round2_(sumRows.reduce(function (n, r) { return n + r[4]; }, 0))];
-    if (divisor) totalRow.push(round2_(sumRows.reduce(function (n, r) { return n + r[5]; }, 0)));
+    // Totals from the source figures, not from row positions, so adding a
+    // column here cannot silently sum the wrong one.
+    var sum = function (f) { return chosen.reduce(function (n, l) { return n + f(l); }, 0); };
+    var totalRow = ['TOTAL', '', '',
+      sum(function (l) { return l.order_count; }),
+      sum(function (l) { return l.units; }),
+      round2_(sum(function (l) { return l.revenue; }))];
+    if (divisor) totalRow.push(round2_(sum(function (l) { return l.revenue; }) / divisor));
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -236,14 +323,14 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       var name = safeName_(l.product_name || l.listing_id).slice(0, 90) || l.listing_id;
       var s2 = book.insertSheet(uniqueSheetName_(book, name));
 
-      var itemHeader = ['SKU', 'Variation', 'Units', 'Unit price (SGD)', 'Revenue (SGD)'];
+      var itemHeader = ['Photo', 'SKU', 'Variation', 'Units', 'Unit price (SGD)', 'Revenue (SGD)'];
       if (divisor) itemHeader.push('Unit cost (SGD)', 'Cost (SGD)');
       itemHeader.push('Cancelled / unpaid units');
 
       var itemRows = detail.variations.map(function (v) {
         var unitPrice = v.units ? v.revenue / v.units : Number(v.price || 0);
         var row = [
-          v.seller_sku || '', v.variation, v.units, round2_(unitPrice), round2_(v.revenue)
+          '', v.seller_sku || '', v.variation, v.units, round2_(unitPrice), round2_(v.revenue)
         ];
         if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.revenue / divisor));
         row.push(v.unsold_units);
@@ -252,7 +339,8 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
       var top = [
         [l.product_name || l.listing_id],
-        ['Listing ' + l.listing_id + '   ·   ' + window],
+        ['TikTok listing ' + l.listing_id + '   ·   ' + window],
+        [listingLinkFormula_(l.listing_id, listingUrl_(l.listing_id))],
         ['']
       ];
       s2.getRange(1, 1, top.length, 1).setValues(top);
@@ -264,14 +352,35 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
       }
 
-      var tot = ['TOTAL', '', detail.total_units, '', round2_(detail.total_revenue)];
+      var tot = ['', 'TOTAL', '', detail.total_units, '', round2_(detail.total_revenue)];
       if (divisor) tot.push('', round2_(detail.total_revenue / divisor));
       tot.push(detail.variations.reduce(function (n, v) { return n + v.unsold_units; }, 0));
       s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
         .setValues([tot]).setFontWeight('bold');
 
       s2.setFrozenRows(h0);
-      for (var k = 1; k <= itemHeader.length; k++) s2.autoResizeColumn(k);
+      // Text columns fit themselves; the photo column is fixed to the picture.
+      for (var k = 2; k <= itemHeader.length; k++) s2.autoResizeColumn(k);
+      s2.setColumnWidth(1, PHOTO_COL_PX);
+
+      // One picture per variation, anchored to its row. Over-grid images are
+      // what the xlsx export keeps as pictures; an IMAGE() formula would not
+      // survive the conversion, and a Drive link is not a photo.
+      var photos = photoIndex_(l.listing_id);
+      detail.variations.forEach(function (v, i) {
+        var rowIndex = h0 + 1 + i;
+        s2.setRowHeight(rowIndex, PHOTO_ROW_PX);
+        var blob = variantPhoto_(v, photos);
+        if (!blob) {
+          s2.getRange(rowIndex, 1).setValue('no photo').setFontColor('#888888');
+          return;
+        }
+        s2.insertImage(blob, 1, rowIndex, 6, 5).setWidth(PHOTO_PX).setHeight(PHOTO_PX);
+      });
+      // Numbers read best against the top of a tall row's picture.
+      if (itemRows.length) {
+        s2.getRange(h0 + 1, 2, itemRows.length, itemHeader.length - 1).setVerticalAlignment('middle');
+      }
     });
 
     SpreadsheetApp.flush();

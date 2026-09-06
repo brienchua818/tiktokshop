@@ -2224,6 +2224,21 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
       synced_at: new Date().toISOString()
     });
 
+    // ONE LINE ITEM IS ONE UNIT.
+    //
+    // There is no quantity field on a line item — confirmed against a real
+    // order, whose keys are: buyer_service_fee, currency, display_status,
+    // gift_retail_price, id, is_gift, original_price, package_id,
+    // package_status, platform_discount, product_id, product_name, rts_time,
+    // sale_price, seller_discount, seller_sku, sku_id, sku_image, sku_name,
+    // sku_type, tracking_number. Buying three of a SKU produces three line
+    // items, each with its own id, package and tracking, because TikTok tracks
+    // fulfilment per unit.
+    //
+    // So units are counted, not summed, and sale_price is the price of one
+    // unit. Recorded as quantity 1 per row to keep the arithmetic downstream
+    // uniform, and stated here because reading `Number(li.quantity || 1)`
+    // would look like a defensive default rather than the actual model.
     (o.line_items || []).forEach(function (li) {
       itemRows.push({
         order_id: String(o.id || ''),
@@ -2231,9 +2246,11 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
         listing_id: String(li.product_id || ''),
         product_name: String(li.product_name || ''),
         sku_id: String(li.sku_id || ''),
+        // Empty on products not created by this app; the identifier is only
+        // there because we put it there. Grouping falls back to sku_id.
         seller_sku: String(li.seller_sku || ''),
         variation: String(li.sku_name || ''),
-        quantity: Number(li.quantity || 1),
+        quantity: 1,
         sale_price: String(li.sale_price || ''),
         currency: String(li.currency || 'SGD'),
         status: String(li.display_status || o.status || ''),
@@ -2433,7 +2450,11 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
 
   var byVariation = {};
   items.forEach(function (r) {
-    var key = String(r.seller_sku || r.variation || r.sku_id || '?');
+    // sku_id first: seller_sku is empty on anything this app did not list,
+    // and two variations can share a sku_name. Only the id is guaranteed
+    // unique, and getting this wrong merges two variations into one row of a
+    // purchase order.
+    var key = String(r.sku_id || r.seller_sku || r.variation || '?');
     if (!byVariation[key]) {
       byVariation[key] = {
         seller_sku: String(r.seller_sku || ''),

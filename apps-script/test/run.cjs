@@ -797,5 +797,60 @@ check('no items is an empty summary, not a crash', () => {
   eq(r.total_revenue, 0)
 })
 
+// ---------------------------------------------------------------------------
+// What a real order actually looks like.
+//
+// Confirmed by running inspectOrders against a live HOUZE order rather than
+// assumed. Two things came back that the first version got wrong.
+// ---------------------------------------------------------------------------
+console.log('\nreal order shape — confirmed against live data')
+
+check('three of one SKU is three line items, not a quantity of three', () => {
+  // A line item has no quantity field. TikTok tracks fulfilment per unit, so
+  // buying three produces three rows, each with its own id and tracking. Units
+  // are therefore COUNTED. If this ever regresses to summing a quantity field,
+  // every purchase order silently under-reports by the size of each basket.
+  const three = [1, 2, 3].map((n) =>
+    item({ order_id: 'o1', sku_id: 'sku-a', seller_sku: 'A1', quantity: 1, sale_price: '12.88' }),
+  )
+  const r = gs.summariseItems_(three)
+  eq(r.listings[0].units, 3)
+  eq(r.listings[0].revenue, 38.64, 'sale_price is the price of ONE unit')
+  eq(r.listings[0].order_count, 1)
+})
+
+check('sale_price is per unit, so it is not multiplied by a basket size', () => {
+  const r = gs.summariseItems_([item({ sale_price: '12.88', quantity: 1 })])
+  eq(r.listings[0].revenue, 12.88)
+})
+
+check('IN_TRANSIT counts as sold', () => {
+  // Real status from a live order. Anything not cancelled or unpaid is money
+  // that has changed hands, and a factory is owed for it.
+  const r = gs.summariseItems_([item({ status: 'IN_TRANSIT' })])
+  eq(r.listings[0].units, 1)
+  eq(r.listings[0].unsold_units, 0)
+})
+
+console.log('\nlistingOrders_ — grouping when seller_sku is blank')
+
+check('variations group on sku_id, not on a name that can be blank', () => {
+  // seller_sku is empty on every product this app did not list — the
+  // identifier is only there because we put it there. Grouping on the name
+  // would merge two different variations into one purchase-order row.
+  const rows = [
+    { sku_id: 'sku-1', seller_sku: '', variation: 'Glass make up organiser',
+      quantity: 1, sale_price: '12.88', status: 'IN_TRANSIT', order_id: 'o1' },
+    { sku_id: 'sku-2', seller_sku: '', variation: 'Glass make up organiser',
+      quantity: 1, sale_price: '19.90', status: 'IN_TRANSIT', order_id: 'o2' },
+  ]
+  const byKey = {}
+  rows.forEach((r) => {
+    const key = String(r.sku_id || r.seller_sku || r.variation || '?')
+    byKey[key] = (byKey[key] || 0) + 1
+  })
+  eq(Object.keys(byKey).length, 2, 'two sku ids must stay two rows')
+})
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

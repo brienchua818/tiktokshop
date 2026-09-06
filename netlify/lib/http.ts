@@ -25,6 +25,55 @@ export function unauthorised(): Response {
 }
 
 /**
+ * An error whose message was written to be read by the person who hit it.
+ *
+ * Everything else is masked, and should be. But the blanket mask was also
+ * swallowing the messages this app writes on purpose — "the photo may be
+ * unreadable" became "Something went wrong", which sends the reader looking
+ * in the wrong place. Marking the deliberate ones keeps the default closed
+ * while letting the useful ones through.
+ */
+export class PublicError extends Error {
+  constructor(
+    message: string,
+    readonly status = 502,
+  ) {
+    super(message)
+    this.name = 'PublicError'
+  }
+}
+
+/**
+ * Describe an upstream API failure without quoting it.
+ *
+ * An HTTP status and an error type from a provider are diagnosis, not
+ * disclosure: 401 means the key, 429 means the rate limit, 400 means the
+ * request. Neither carries a credential or anything about the account, and
+ * without them a misconfigured key is indistinguishable from an unreadable
+ * photo — which cost an afternoon of guessing.
+ */
+function upstreamSummary(error: unknown): string | null {
+  const e = error as { status?: unknown; error?: { error?: { type?: unknown } } } | null
+  const status = typeof e?.status === 'number' ? e.status : null
+  if (status === null) return null
+
+  const type = e?.error?.error?.type
+  const kind = typeof type === 'string' ? type : 'error'
+
+  switch (status) {
+    case 401:
+    case 403:
+      return 'The AI service rejected our credentials (HTTP ' + status + '). The API key on this deployment is missing, wrong, or out of credit. Tell Brien.'
+    case 429:
+      return 'The AI service is rate limiting us right now. Wait a few seconds and try again, or type the name.'
+    case 529:
+      return 'The AI service is overloaded. Try again in a moment, or type the name.'
+    default:
+      return `The AI service refused the request (HTTP ${status}: ${kind}). Tell Brien.`
+  }
+}
+
+/**
  * Log the real error, return a safe one.
  *
  * Handlers that talk to TikTok pass `detail` through deliberately, because
@@ -33,6 +82,14 @@ export function unauthorised(): Response {
  */
 export function serverError(error: unknown, safeMessage = 'Something went wrong.'): Response {
   console.error('[tikshop]', error)
+
+  if (error instanceof PublicError) {
+    return json({ error: error.message }, error.status)
+  }
+
+  const upstream = upstreamSummary(error)
+  if (upstream) return json({ error: upstream }, 502)
+
   return json({ error: safeMessage }, 500)
 }
 

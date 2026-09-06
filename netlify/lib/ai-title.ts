@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { z } from 'zod'
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod'
+import { PublicError } from './http'
 import {
   validateTitle,
   validateVariantName,
@@ -112,7 +113,13 @@ let cached: Anthropic | undefined
 function client(): Anthropic {
   if (cached) return cached
   if (!process.env.ANTHROPIC_API_KEY) {
-    throw new Error('ANTHROPIC_API_KEY is not set.')
+    // Public on purpose: it names a deployment fault nobody using the app can
+    // fix, which is exactly what they need to be told rather than left to
+    // retry against.
+    throw new PublicError(
+      'The AI service is not configured on this deployment (no API key). Nothing you can fix from here — tell Brien.',
+      503,
+    )
   }
   cached = new Anthropic()
   return cached
@@ -234,7 +241,9 @@ Write a corrected name. If it was too long, cut adjectives before you cut distin
 
   const parsed = response.parsed_output
   if (!parsed) {
-    throw new Error('Claude returned no parseable variant name. The photo may be unreadable.')
+    throw new PublicError(
+      'Could not read a name from that photo. Try a clearer shot, or type the name.',
+    )
   }
   return parsed
 }

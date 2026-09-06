@@ -64,7 +64,16 @@ describe('describeMediaError', () => {
   it('tells the operator how to fix a blocked permission', () => {
     const msg = describeMediaError({ name: 'NotAllowedError' }, 'microphone')
     expect(msg).toMatch(/Microphone access was blocked/)
-    expect(msg).toMatch(/site settings/)
+    // Names the actual menu rather than "site settings" in the abstract.
+    expect(msg).toMatch(/Website Settings/)
+  })
+
+  it('says how to stop being asked every time, not just how to allow it once', () => {
+    // iOS grants this per browsing session, so the permission lapses rather
+    // than breaks. Telling someone to allow it again is advice they will need
+    // again tomorrow; installing to the Home Screen is the one that sticks.
+    const msg = describeMediaError({ name: 'NotAllowedError' }, 'camera')
+    expect(msg).toMatch(/Add to Home Screen/)
   })
 
   it('explains a camera already in use', () => {

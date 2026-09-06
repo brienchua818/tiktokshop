@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, ApiError } from '../lib/api'
+import { api, ApiError, type TikTokProduct } from '../lib/api'
 import type { Listing, Shop } from '../types'
 import ListingDetail from './ListingDetail'
 
@@ -84,9 +84,15 @@ export default function LiveListing({
       {loading ? (
         <p className="text-sm text-gray-500 py-10 text-center">Loading…</p>
       ) : listings.length === 0 ? (
-        <p className="text-sm text-gray-500 py-10 text-center">
-          No streams yet. Add one with its TikTok listing ID.
-        </p>
+        <div className="py-10 text-center space-y-3">
+          <p className="text-sm text-gray-500">No streams yet.</p>
+          <button
+            onClick={() => setAdding(true)}
+            className="text-xs px-4 py-2 bg-accent hover:bg-accent-hover text-white rounded-lg transition-colors"
+          >
+            Pick one from {shop.brand}
+          </button>
+        </div>
       ) : (
         <ul className="space-y-2">
           {listings.map((listing) => (
@@ -132,74 +138,180 @@ function AddListing({
   onClose: () => void
   onAdded: (listing: Listing) => void
 }) {
-  const [listingId, setListingId] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [products, setProducts] = useState<TikTokProduct[]>([])
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [filter, setFilter] = useState('')
+  const [busyId, setBusyId] = useState('')
+  // The id box is the fallback, not the front door. A product too new to
+  // appear, or a search that will not load, still has to be addable.
+  const [byHand, setByHand] = useState(false)
+  const [listingId, setListingId] = useState('')
 
-  async function submit() {
-    const id = listingId.trim()
-    if (!id) {
-      setError('Enter the TikTok listing ID.')
-      return
+  useEffect(() => {
+    let cancelled = false
+    api
+      .tiktokProducts(shopId)
+      .then((r) => !cancelled && setProducts(r.products))
+      .catch((e: unknown) => {
+        if (cancelled) return
+        setError(e instanceof ApiError ? e.message : String(e))
+        // Nothing to pick from is a dead end, so open the fallback rather than
+        // leaving someone looking at an error with no way forward.
+        setByHand(true)
+      })
+      .finally(() => !cancelled && setLoading(false))
+    return () => {
+      cancelled = true
     }
-    // TikTok listing ids are long numeric strings. Catching a pasted URL or a
-    // typo here is cheaper than a confusing API error.
+  }, [shopId])
+
+  async function add(id: string, name?: string) {
+    setBusyId(id)
+    setError('')
+    try {
+      onAdded(await api.addListing(shopId, id, name))
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setBusyId('')
+    }
+  }
+
+  async function submitTyped() {
+    const id = listingId.trim()
     if (!/^\d{6,}$/.test(id)) {
       setError('That does not look like a TikTok listing ID — it should be digits only.')
       return
     }
-    setBusy(true)
-    setError('')
-    try {
-      onAdded(await api.addListing(shopId, id))
-    } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.message : String(e))
-    } finally {
-      setBusy(false)
-    }
+    await add(id)
   }
+
+  const needle = filter.trim().toLowerCase()
+  const shown = needle
+    ? products.filter(
+        (p) =>
+          p.product_name.toLowerCase().includes(needle) || p.listing_id.includes(needle),
+      )
+    : products
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60"
       onClick={onClose}
     >
       <div
-        className="bg-surface border border-white/10 rounded-2xl p-6 w-full max-w-sm space-y-4"
+        className="bg-surface border border-white/10 rounded-t-2xl sm:rounded-2xl p-5 w-full sm:max-w-md max-h-[85vh] flex flex-col gap-3"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="text-sm font-semibold text-white">Add a factory stream</p>
-        <div className="space-y-1">
-          <label htmlFor="listing-id" className="text-xs text-gray-400">
-            TikTok listing ID
-          </label>
-          <input
-            id="listing-id"
-            autoFocus
-            inputMode="numeric"
-            value={listingId}
-            onChange={(e) => {
-              setListingId(e.target.value)
-              setError('')
-            }}
-            onKeyDown={(e) => e.key === 'Enter' && submit()}
-            placeholder="e.g. 1734906684322056174"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono outline-none focus:border-accent"
-          />
-        </div>
-        {error && <p className="text-xs text-red-400">{error}</p>}
-        <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="text-xs px-4 py-2 text-gray-400 hover:text-white">
-            Cancel
-          </button>
-          <button
-            onClick={submit}
-            disabled={busy}
-            className="text-xs px-4 py-2 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white rounded-lg transition-colors"
-          >
-            {busy ? 'Adding…' : 'Add'}
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-semibold text-white flex-1">Start a stream</p>
+          <button onClick={onClose} className="text-xs text-gray-400 hover:text-white px-2 py-1">
+            Close
           </button>
         </div>
+
+        {error && (
+          <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+            {error}
+          </p>
+        )}
+
+        {!byHand && (
+          <>
+            <input
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Search your products"
+              className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2.5 text-sm text-white outline-none focus:border-accent"
+            />
+
+            <div className="overflow-y-auto -mx-1 px-1 flex-1 min-h-0">
+              {loading ? (
+                <p className="text-sm text-gray-500 py-8 text-center">Loading products…</p>
+              ) : shown.length === 0 ? (
+                <p className="text-sm text-gray-500 py-8 text-center">
+                  {products.length === 0 ? 'No live products on this shop.' : 'Nothing matches.'}
+                </p>
+              ) : (
+                <ul className="space-y-2">
+                  {shown.map((p) => (
+                    <li key={p.listing_id}>
+                      <button
+                        onClick={() => add(p.listing_id, p.product_name)}
+                        disabled={Boolean(busyId)}
+                        className="w-full flex items-center gap-3 text-left bg-raised border border-white/8 rounded-xl p-2.5 hover:border-accent/50 disabled:opacity-50 transition-colors"
+                      >
+                        {p.image ? (
+                          <img
+                            src={p.image}
+                            alt=""
+                            className="w-11 h-11 rounded-lg object-cover shrink-0"
+                          />
+                        ) : (
+                          <span className="w-11 h-11 rounded-lg bg-sunken shrink-0" />
+                        )}
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm text-white truncate">
+                            {p.product_name || p.listing_id}
+                          </span>
+                          {/* Singapore caps a product at 100 variations, so how
+                              full it already is decides whether this stream can
+                              use it at all. */}
+                          <span className="block text-xs text-gray-500">
+                            {p.sku_count} variation{p.sku_count === 1 ? '' : 's'}
+                            {p.sku_count >= 100 && ' — full'}
+                          </span>
+                        </span>
+                        {busyId === p.listing_id && (
+                          <span className="text-xs text-gray-400 shrink-0">Adding…</span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </>
+        )}
+
+        {byHand && (
+          <div className="space-y-2">
+            <label htmlFor="listing-id" className="text-xs text-gray-400">
+              TikTok listing ID
+            </label>
+            <input
+              id="listing-id"
+              autoFocus
+              inputMode="numeric"
+              value={listingId}
+              onChange={(e) => {
+                setListingId(e.target.value)
+                setError('')
+              }}
+              onKeyDown={(e) => e.key === 'Enter' && submitTyped()}
+              placeholder="e.g. 1734906684322056174"
+              className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2.5 text-sm text-white font-mono outline-none focus:border-accent"
+            />
+            <button
+              onClick={submitTyped}
+              disabled={Boolean(busyId)}
+              className="w-full text-xs px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white rounded-lg transition-colors"
+            >
+              {busyId ? 'Adding…' : 'Add'}
+            </button>
+          </div>
+        )}
+
+        <button
+          onClick={() => {
+            setByHand((v) => !v)
+            setError('')
+          }}
+          className="text-xs text-gray-500 hover:text-gray-300 self-start"
+        >
+          {byHand ? '← Pick from my products' : 'Or paste a listing ID'}
+        </button>
       </div>
     </div>
   )

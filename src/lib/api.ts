@@ -86,6 +86,16 @@ export interface PushResult {
   photo_url?: string
 }
 
+/** One product on TikTok, as the stream picker shows it. */
+export interface TikTokProduct {
+  listing_id: string
+  product_name: string
+  /** Variations already on it — how full it is against Singapore's cap of 100. */
+  sku_count: number
+  status: string
+  image: string
+}
+
 /** Identity plus what the allowlist says this person may do. */
 export type Me = SignedInUser & { role: string; approved: boolean; admin: boolean }
 
@@ -97,8 +107,27 @@ export const api = {
 
   listings: (shopId: string) => call<Listing[]>('listings', { body: { shop_id: shopId } }),
 
-  addListing: (shopId: string, listingId: string) =>
-    call<Listing>('addListing', { body: { shop_id: shopId, listing_id: listingId } }),
+  /**
+   * The shop's live products on TikTok, so a stream can be picked from a list.
+   *
+   * The alternative is reading a nineteen-digit id off Seller Center and
+   * retyping it on a phone, in a factory — which is a transcription error
+   * waiting to happen, against credentials that can simply ask.
+   */
+  tiktokProducts: (shopId: string, pageToken?: string) =>
+    call<{ products: TikTokProduct[]; next_page_token: string }>('tiktokProducts', {
+      body: { shop_id: shopId, ...(pageToken ? { page_token: pageToken } : {}) },
+    }),
+
+  /** `productName` is passed when the picker already knows it, saving a lookup. */
+  addListing: (shopId: string, listingId: string, productName?: string) =>
+    call<Listing>('addListing', {
+      body: {
+        shop_id: shopId,
+        listing_id: listingId,
+        ...(productName ? { product_name: productName } : {}),
+      },
+    }),
 
   /**
    * Variations already live on TikTok, used to continue the A1/A2 sequence.

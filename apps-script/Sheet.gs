@@ -109,7 +109,7 @@ function listListings_(shopId) {
     .sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); });
 }
 
-function addListing_(shopId, listingId, actor) {
+function addListing_(shopId, listingId, actor, productName) {
   var shop = shopById_(shopId);
   if (!shop) throw new Error('Unknown shop: ' + shopId);
 
@@ -118,11 +118,25 @@ function addListing_(shopId, listingId, actor) {
   })[0];
   if (existing) return existing;
 
+  // The picker already knows the name, so it sends it. A hand-typed id does
+  // not, and a card showing nothing but a nineteen-digit number is no use to
+  // someone choosing between streams — so it is looked up. Failing that lookup
+  // must not stop the listing being added: an unnamed stream still works, and
+  // refusing one because TikTok was slow would be the worse outcome.
+  var name = String(productName || '').trim();
+  if (!name) {
+    try {
+      name = ttGetProduct_(shopId, String(listingId)).title || '';
+    } catch (e) {
+      logEvent_(actor, 'add_listing_name_lookup', shop.brand, String(e), 'warn');
+    }
+  }
+
   var row = {
     listing_id: String(listingId),
     shop_id: shopId,
     brand: shop.brand,
-    product_name: '',
+    product_name: name,
     supplier: '',
     created_at: new Date().toISOString()
   };

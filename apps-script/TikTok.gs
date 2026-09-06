@@ -297,6 +297,44 @@ function ttParse_(res) {
   catch (e) { return { code: -1, message: 'Non-JSON response: ' + txt.slice(0, 200) }; }
 }
 
+/**
+ * The shop's own products, newest first.
+ *
+ * So a stream can be picked from a list rather than by pasting a TikTok
+ * listing id. The id is a nineteen-digit number that has to be found in Seller
+ * Center and carried across by hand, which on a factory floor is a transcription
+ * error waiting to happen — and the app already holds credentials that can just
+ * ask.
+ *
+ * ACTIVATE and its siblings only: a draft or a deleted product is not something
+ * a livestream can add variations to, and offering one is offering a dead end.
+ */
+function ttSearchProducts_(prefix, pageToken) {
+  var query = { page_size: '50' };
+  if (pageToken) query.page_token = pageToken;
+
+  var r = ttFetch_(prefix, 'post', '/product/202502/products/search', query, {
+    status: 'ACTIVATE'
+  });
+  if (r.code !== 0) throw new Error(r.message || 'Could not read products from TikTok.');
+
+  var data = r.data || {};
+  var products = (data.products || []).map(function (p) {
+    // A product carries its variation count in its skus array; showing it is
+    // what tells someone at a glance whether a listing is nearly full at 100.
+    var skus = p.skus || [];
+    return {
+      listing_id: String(p.id),
+      product_name: p.title || '',
+      sku_count: skus.length,
+      status: p.status || '',
+      image: (p.main_images && p.main_images[0] && p.main_images[0].thumb_urls &&
+              p.main_images[0].thumb_urls[0]) || ''
+    };
+  });
+  return { products: products, next_page_token: data.next_page_token || '' };
+}
+
 function ttAuthorizedShops_(prefix, accessToken) {
   var c = ttCreds_(prefix);
   var path = '/authorization/202309/shops';

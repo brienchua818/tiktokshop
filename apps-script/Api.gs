@@ -126,6 +126,13 @@ function route_(action, params, body, user) {
     case 'shops':
       return json_(shopsForClient_());
 
+    // The shop's live products, so a stream can be chosen rather than typed.
+    case 'tiktokProducts':
+      return json_(ttSearchProducts_(
+        params.shop_id || body.shop_id,
+        params.page_token || body.page_token || ''
+      ));
+
     case 'listings':
       return json_(listListings_(params.shop_id || body.shop_id));
 
@@ -141,7 +148,8 @@ function route_(action, params, body, user) {
       return json_(addListing_(
         params.shop_id || body.shop_id,
         params.listing_id || body.listing_id,
-        user.name
+        user.name,
+        params.product_name || body.product_name || ''
       ));
 
     case 'skus':

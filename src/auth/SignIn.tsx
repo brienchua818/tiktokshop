@@ -22,8 +22,23 @@ import {
  * hardcoded password in the browser and set a localStorage flag, so anyone
  * could read the password out of the public bundle or skip the check entirely.
  */
+/**
+ * Backend refusals that are configuration, not credentials.
+ *
+ * The distinction matters on this screen: for everything else "try again" is
+ * sound advice, and for these it is a loop.
+ */
+const CONFIG_FAULTS = new Set(['BACKEND_NOT_CONFIGURED', 'CLIENT_ID_MISMATCH'])
+
 export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void }) {
   const [error, setError] = useState('')
+  /**
+   * True when the backend refused for a reason no amount of clicking will fix.
+   * Signing in again is the natural thing to try, and against a misconfigured
+   * backend it fails identically every time — so the screen says so instead of
+   * inviting another round.
+   */
+  const [fatal, setFatal] = useState(false)
   const [pendingApproval, setPendingApproval] = useState('')
   const [busy, setBusy] = useState(false)
   const buttonRef = useRef<HTMLDivElement>(null)
@@ -56,11 +71,12 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
         })
         .catch((e: unknown) => {
           setIdToken(null)
-          setError(
-            e instanceof ApiError
-              ? e.message
-              : 'Signed in with Google, but the app could not confirm it. Try again.',
-          )
+          if (e instanceof ApiError) {
+            setError(e.message)
+            setFatal(CONFIG_FAULTS.has(String(e.code)))
+            return
+          }
+          setError('Signed in with Google, but the app could not confirm it. Try again.')
         })
         .finally(() => setBusy(false))
     })
@@ -94,9 +110,15 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
         </div>
 
         {error && (
-          <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
-            {error}
-          </p>
+          <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 space-y-1">
+            <p>{error}</p>
+            {fatal && (
+              <p className="text-red-400/70">
+                Signing in again will not help — this is a setup problem on the server. Send
+                Brien this message.
+              </p>
+            )}
+          </div>
         )}
 
         {/* Not an error, and styled so it does not read as one: the account is

@@ -84,7 +84,15 @@ var ROLE_PENDING = 'pending';// signed in, waiting for approval, can do nothing
 var ROLE_BLOCKED = 'blocked';
 
 function props_() { return PropertiesService.getScriptProperties(); }
-function prop_(k) { return props_().getProperty(k) || ''; }
+/**
+ * Read a script property.
+ *
+ * Trimmed, because these are pasted by hand out of consoles that helpfully
+ * append a newline. An untrimmed client id compares unequal to the same id
+ * inside a token, and the only symptom is that sign-in silently fails — which
+ * is exactly the kind of fault that costs an evening.
+ */
+function prop_(k) { return String(props_().getProperty(k) || '').trim(); }
 function setProps_(o) { props_().setProperties(o, false); }
 
 function shopById_(id) {
@@ -147,9 +155,20 @@ function checkSetup() {
 
   lines.push('');
   lines.push('GOOGLE SIGN-IN');
-  prop_('GOOGLE_CLIENT_ID')
-    ? ok('GOOGLE_CLIENT_ID set')
-    : bad('GOOGLE_CLIENT_ID — nobody can sign in without it');
+  // Presence is not the useful question — a client id that is present but
+  // wrong refuses every sign-in just as completely as one that is missing,
+  // and looks fine in a list of properties. So print it and check its shape.
+  // It is not a secret: it ships inside the app's public JavaScript.
+  var clientId = prop_('GOOGLE_CLIENT_ID');
+  if (!clientId) {
+    bad('GOOGLE_CLIENT_ID — not set, so nobody can sign in');
+  } else if (clientId.indexOf('.apps.googleusercontent.com') === -1) {
+    bad('GOOGLE_CLIENT_ID does not end in .apps.googleusercontent.com: ' + clientId);
+    note('  that is probably the client SECRET or a project number, not the client ID');
+  } else {
+    ok('GOOGLE_CLIENT_ID = ' + clientId);
+    note('  this must match VITE_GOOGLE_CLIENT_ID in Netlify exactly');
+  }
 
   SHOPS.forEach(function (shop) {
     lines.push('');

@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Lock.gs', 'Product.gs']
+const FILES = ['Config.gs', 'Lock.gs', 'Product.gs', 'Auth.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -35,14 +35,24 @@ const lockState = { held: false, refused: false, acquisitions: 0 }
 const sandbox = `
   var SpreadsheetApp = { flush: function () {} };
   var PropertiesService = { getScriptProperties: function () {
-    return { getProperty: function () { return '' }, setProperties: function () {} }
+    return {
+      getProperty: function (k) { return AUTH_STATE.props[k] },
+      setProperties: function () {}
+    }
   } };
   var Utilities = {
     getUuid: function () { return 'uuid' },
     newBlob: function () { return {} },
     base64Decode: function () { return [] }
   };
-  var DriveApp = {}, UrlFetchApp = {}, Session = {};
+  var DriveApp = {}, Session = {};
+  var UrlFetchApp = { fetch: function () {
+    if (AUTH_STATE.throws) throw new Error('network');
+    return {
+      getResponseCode: function () { return AUTH_STATE.status },
+      getContentText: function () { return AUTH_STATE.bodyText }
+    }
+  } };
   var LockService = { getScriptLock: function () {
     return {
       tryLock: function () {
@@ -60,6 +70,7 @@ ${src}
     variantValueName_, buildAppendPayload_, buildPayload_, validateTitle_,
     validateVariantName_, continuationTitle_,
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
+    verifyIdToken_, shortClient_, prop_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -67,8 +78,13 @@ ${src}
 // Written to a temp file rather than eval'd, so a syntax error reports a real
 // line number in a real file.
 const loaded = path.join(os.tmpdir(), 'tikshop-gs-loaded.cjs')
-fs.writeFileSync(loaded, 'const LOCK_STATE = global.__LOCK_STATE__;\n' + sandbox)
+const authState = { props: {}, status: 200, bodyText: '{}', throws: false }
+fs.writeFileSync(
+  loaded,
+  'const LOCK_STATE = global.__LOCK_STATE__;\nconst AUTH_STATE = global.__AUTH_STATE__;\n' + sandbox,
+)
 global.__LOCK_STATE__ = lockState
+global.__AUTH_STATE__ = authState
 const gs = require(loaded)
 
 let pass = 0, fail = 0
@@ -396,6 +412,130 @@ check('optional work runs when already nested', () => {
   eq(r, 'ran')
   eq(lockState.acquisitions, 1)
 })
+
+
+// ---------------------------------------------------------------------------
+// verifyIdToken_ — the refusal that used to be one message for five causes.
+//
+// This is the path that stranded a real sign-in: a misconfigured backend and a
+// user who had simply not signed in produced identical output, so the screen
+// looped with nothing to act on. Every case below asserts the CODE, because
+// that is what makes the difference visible.
+// ---------------------------------------------------------------------------
+// Shaped like a real one — the random segment is long, which is what makes
+// an abbreviation worth having at all.
+const CLIENT = '418799041411-i6rin2ejph0qu3l9ekjbgl0ksgbnpr1b.apps.googleusercontent.com'
+
+function auth({ props = {}, status = 200, body = {}, throws = false } = {}) {
+  const st = global.__AUTH_STATE__
+  st.props = props
+  st.status = status
+  st.bodyText = typeof body === 'string' ? body : JSON.stringify(body)
+  st.throws = throws
+}
+
+console.log('\nverifyIdToken_ — why a sign-in was refused')
+
+check('accepts a token issued for our own client', () => {
+  auth({
+    props: { GOOGLE_CLIENT_ID: CLIENT },
+    body: { aud: CLIENT, email: 'Brien@Sheldonglobal.com', email_verified: 'true', name: 'Brien' },
+  })
+  const r = gs.verifyIdToken_('t')
+  eq(r.ok, true)
+  eq(r.email, 'brien@sheldonglobal.com', 'email is lowercased')
+  eq(r.name, 'Brien')
+})
+
+check('no token at all says so', () => {
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT } })
+  eq(gs.verifyIdToken_('').code, 'NO_TOKEN')
+})
+
+check('an unset client id names the missing property', () => {
+  auth({ props: {}, body: { aud: CLIENT, email: 'a@b.com' } })
+  const r = gs.verifyIdToken_('t')
+  eq(r.ok, false)
+  eq(r.code, 'BACKEND_NOT_CONFIGURED')
+  if (!/GOOGLE_CLIENT_ID/.test(r.message)) throw new Error(r.message)
+})
+
+check('a client id from a different project is called a mismatch', () => {
+  auth({
+    props: { GOOGLE_CLIENT_ID: '999888777-zzqqwweerrttyyuuiiooppaassdd.apps.googleusercontent.com' },
+    body: { aud: CLIENT, email: 'a@b.com', email_verified: 'true' },
+  })
+  const r = gs.verifyIdToken_('t')
+  eq(r.code, 'CLIENT_ID_MISMATCH')
+  if (!/different/.test(r.message)) throw new Error(r.message)
+})
+
+// The whole reason prop_ now trims: a console paste carries a newline, and the
+// resulting refusal is indistinguishable from a wrong client id.
+check('a trailing newline on the property does NOT break sign-in', () => {
+  auth({
+    props: { GOOGLE_CLIENT_ID: CLIENT + '\n' },
+    body: { aud: CLIENT, email: 'a@b.com', email_verified: 'true' },
+  })
+  eq(gs.verifyIdToken_('t').ok, true)
+})
+
+check('surrounding spaces on the property do not break sign-in', () => {
+  auth({
+    props: { GOOGLE_CLIENT_ID: '  ' + CLIENT + '  ' },
+    body: { aud: CLIENT, email: 'a@b.com', email_verified: 'true' },
+  })
+  eq(gs.verifyIdToken_('t').ok, true)
+})
+
+check('an expired token asks for a fresh sign-in, not a config fix', () => {
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, status: 400, body: { error: 'invalid_token' } })
+  const r = gs.verifyIdToken_('t')
+  eq(r.code, 'TOKEN_REJECTED')
+  if (!/expired/.test(r.message)) throw new Error(r.message)
+})
+
+check('Google being unreachable is not reported as a bad sign-in', () => {
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, throws: true })
+  eq(gs.verifyIdToken_('t').code, 'GOOGLE_UNREACHABLE')
+})
+
+check('an unparseable response is its own case', () => {
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, body: 'not json' })
+  eq(gs.verifyIdToken_('t').code, 'TOKEN_UNREADABLE')
+})
+
+check('an unverified email is refused', () => {
+  auth({
+    props: { GOOGLE_CLIENT_ID: CLIENT },
+    body: { aud: CLIENT, email: 'a@b.com', email_verified: 'false' },
+  })
+  eq(gs.verifyIdToken_('t').code, 'EMAIL_UNVERIFIED')
+})
+
+check('a token with no email is refused', () => {
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, body: { aud: CLIENT, email_verified: 'true' } })
+  eq(gs.verifyIdToken_('t').code, 'NO_EMAIL')
+})
+
+check('every refusal carries a code and a message', () => {
+  const cases = [
+    () => { auth({ props: {} }); return gs.verifyIdToken_('t') },
+    () => { auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, status: 401 }); return gs.verifyIdToken_('t') },
+    () => { auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, throws: true }); return gs.verifyIdToken_('t') },
+  ]
+  cases.forEach((f, i) => {
+    const r = f()
+    if (r.ok !== false || !r.code || !r.message) throw new Error('case ' + i + ': ' + JSON.stringify(r))
+  })
+})
+
+console.log('\nshortClient_ — two ids comparable by eye')
+check('keeps the project number and a little more', () =>
+  eq(gs.shortClient_(CLIENT), '418799041411-i6rin2…'))
+check('handles an id with no dash', () => eq(gs.shortClient_('abcdefghijklmnop'), 'abcdefghijkl…'))
+check('says (none) rather than printing undefined', () => eq(gs.shortClient_(undefined), '(none)'))
+
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

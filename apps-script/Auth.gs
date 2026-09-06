@@ -36,15 +36,34 @@ function currentEmail_() {
  * would make the whole allowlist decorative.
  */
 function verifyIdToken_(idToken) {
-  if (!idToken) return null;
-  var res = UrlFetchApp.fetch(
-    'https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken),
-    { muteHttpExceptions: true }
-  );
-  if (res.getResponseCode() !== 200) return null;
+  if (!idToken) {
+    return refuse_('NO_TOKEN', 'Sign in with Google to continue.');
+  }
+
+  var res;
+  try {
+    res = UrlFetchApp.fetch(
+      'https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(idToken),
+      { muteHttpExceptions: true }
+    );
+  } catch (e) {
+    // Google unreachable is not the caller's fault, and telling them to sign
+    // in again sends them round a loop that cannot terminate.
+    return refuse_('GOOGLE_UNREACHABLE',
+      'Could not reach Google to check your sign-in. Try again in a moment.');
+  }
+
+  if (res.getResponseCode() !== 200) {
+    return refuse_('TOKEN_REJECTED',
+      'Your Google sign-in has expired. Sign in again.');
+  }
 
   var info;
-  try { info = JSON.parse(res.getContentText()); } catch (e) { return null; }
+  try {
+    info = JSON.parse(res.getContentText());
+  } catch (e) {
+    return refuse_('TOKEN_UNREADABLE', 'Google returned a sign-in we could not read.');
+  }
 
   // The token must have been issued for OUR client.
   //
@@ -53,12 +72,55 @@ function verifyIdToken_(idToken) {
   // from any app on the internet — anyone could mint one against their own
   // client and be treated as a signed-in user. A backend that cannot say who
   // it is must refuse everyone, not everyone's token.
+  //
+  // Both refusals below name the configuration, because the alternative is a
+  // sign-in screen that loops with no way to tell why. Neither leaks anything:
+  // a client id is published inside the app's own JavaScript, and the message
+  // says nothing about the person holding the token.
   var expectedClient = prop_('GOOGLE_CLIENT_ID');
-  if (!expectedClient) return null;
-  if (info.aud !== expectedClient) return null;
-  if (!info.email || info.email_verified === 'false') return null;
+  if (!expectedClient) {
+    return refuse_('BACKEND_NOT_CONFIGURED',
+      'This backend cannot verify sign-ins yet: GOOGLE_CLIENT_ID is not set in ' +
+      'the Apps Script project settings. Nothing you can fix from here.');
+  }
+  if (info.aud !== expectedClient) {
+    return refuse_('CLIENT_ID_MISMATCH',
+      'Signed in with Google, but this backend is configured for a different ' +
+      'Google client. The app signed you in as ' + shortClient_(info.aud) +
+      ' and the backend expects ' + shortClient_(expectedClient) + '. ' +
+      'Run checkSetup for the exact values.');
+  }
 
-  return { email: String(info.email).toLowerCase(), name: info.name || info.email };
+  if (!info.email) {
+    return refuse_('NO_EMAIL', 'That Google account did not return an email address.');
+  }
+  // Google sends this as the string "false", not a boolean.
+  if (String(info.email_verified) === 'false') {
+    return refuse_('EMAIL_UNVERIFIED', 'That Google account has an unverified email address.');
+  }
+
+  return {
+    ok: true,
+    email: String(info.email).toLowerCase(),
+    name: info.name || info.email
+  };
+}
+
+/** A refusal carrying why, so the sign-in screen can say something useful. */
+function refuse_(code, message) {
+  return { ok: false, code: code, message: message };
+}
+
+/**
+ * Enough of a client id to compare two by eye, without a wall of base64.
+ * These are not secrets — they ship in the frontend — but the full string is
+ * 72 characters and unreadable on a phone.
+ */
+function shortClient_(id) {
+  var s = String(id || '');
+  if (!s) return '(none)';
+  var dash = s.indexOf('-');
+  return dash === -1 ? s.slice(0, 12) + '…' : s.slice(0, dash + 7) + '…';
 }
 
 function usersAll_() { return readAll_(TAB_USERS); }

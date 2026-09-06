@@ -46,7 +46,13 @@ function handle_(e, method) {
     // Identity comes from a Google ID token the frontend forwards, verified
     // against Google — never from a claim the caller simply asserts.
     var identity = verifyIdToken_(body.id_token || params.id_token);
-    if (!identity) return json_({ error: 'Sign in with Google to continue.' }, 401);
+    if (!identity.ok) {
+      // The reason travels with the refusal. Every one of these used to read
+      // "Sign in with Google to continue.", so a backend that was merely
+      // misconfigured looked exactly like a user who had not signed in — and
+      // the screen looped with nothing to act on.
+      return json_({ error: identity.message, code: identity.code }, 401);
+    }
 
     var user = resolveUser_(identity);
 

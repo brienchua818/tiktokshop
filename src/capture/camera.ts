@@ -124,11 +124,49 @@ export async function openCamera(): Promise<MediaStream> {
   }
 }
 
+/**
+ * Wait until a video element actually has a frame to read.
+ *
+ * `play()` resolving does not mean there are pixels. On iOS the dimensions
+ * arrive with `loadedmetadata`, which can be a few hundred milliseconds after
+ * the element is attached — so anyone quick enough to tap the shutter straight
+ * away used to get "The camera is not ready yet." and a black square.
+ */
+export function waitForFrame(video: HTMLVideoElement, timeoutMs = 5000): Promise<void> {
+  if (video.videoWidth && video.videoHeight) return Promise.resolve()
+
+  return new Promise((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer)
+      video.removeEventListener('loadedmetadata', check)
+      video.removeEventListener('loadeddata', check)
+      video.removeEventListener('canplay', check)
+    }
+    function check() {
+      if (!video.videoWidth || !video.videoHeight) return
+      done()
+      resolve()
+    }
+    // Which of these fires first differs between browsers, so all three are
+    // listened for and the check is idempotent.
+    video.addEventListener('loadedmetadata', check)
+    video.addEventListener('loadeddata', check)
+    video.addEventListener('canplay', check)
+
+    const timer = setTimeout(() => {
+      done()
+      reject(new Error('The camera did not start. Close any other app using it, then try again.'))
+    }, timeoutMs)
+
+    check()
+  })
+}
+
 /** Grab a still from a live video element and encode it. */
 export async function captureFrame(video: HTMLVideoElement): Promise<Blob> {
-  if (!video.videoWidth || !video.videoHeight) {
-    throw new Error('The camera is not ready yet.')
-  }
+  // Waits rather than refusing. Being half a second early is not a mistake
+  // worth making someone repeat mid-broadcast.
+  await waitForFrame(video)
   const canvas = document.createElement('canvas')
   canvas.width = video.videoWidth
   canvas.height = video.videoHeight
@@ -153,7 +191,17 @@ export function describeMediaError(cause: unknown, device: 'camera' | 'microphon
   switch (name) {
     case 'NotAllowedError':
     case 'SecurityError':
-      return `${device === 'camera' ? 'Camera' : 'Microphone'} access was blocked. Allow it in your browser's site settings, then try again.`
+      // Naming the exact menu matters more than usual here, because iOS grants
+      // this per browsing session by default: the permission is not broken,
+      // it has simply lapsed again, and "allow it in site settings" does not
+      // say how to stop being asked tomorrow.
+      return (
+        `${device === 'camera' ? 'Camera' : 'Microphone'} access was blocked. ` +
+        'On iPhone: tap "ᴀA" in the address bar → Website Settings → ' +
+        `${device === 'camera' ? 'Camera' : 'Microphone'} → Allow. ` +
+        'To stop being asked every time, add this app to your Home Screen ' +
+        '(Share → Add to Home Screen) and open it from there.'
+      )
     case 'NotFoundError':
     case 'OverconstrainedError':
       return `No ${device} was found on this device.`

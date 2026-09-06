@@ -241,13 +241,12 @@ Write a corrected name. If it was too long, cut adjectives before you cut distin
         content: [imageBlock(request.image), { type: 'text', text: instruction }],
       },
     ],
-    output_config: {
-      format: zodOutputFormat(VariantSchema),
-      // Naming what is in a photograph is not a hard problem, and this call is
-      // in the hot path of a livestream where seconds are the cost that
-      // matters.
-      effort: 'low',
-    },
+    // Deliberately the minimum request that can work: model, tokens, system,
+    // content, format. A 400 is being chased and every optional field is a
+    // suspect, so `effort` — an optimisation, not a requirement — is out until
+    // the call succeeds. It can come back once there is a baseline to compare
+    // against.
+    output_config: { format: zodOutputFormat(VariantSchema) },
   })
 
   const parsed = response.parsed_output

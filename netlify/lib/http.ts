@@ -53,12 +53,24 @@ export class PublicError extends Error {
  * photo — which cost an afternoon of guessing.
  */
 function upstreamSummary(error: unknown): string | null {
-  const e = error as { status?: unknown; error?: { error?: { type?: unknown } } } | null
+  const e = error as
+    | { status?: unknown; error?: { error?: { type?: unknown; message?: unknown } } }
+    | null
   const status = typeof e?.status === 'number' ? e.status : null
   if (status === null) return null
 
   const type = e?.error?.error?.type
   const kind = typeof type === 'string' ? type : 'error'
+  const detail = typeof e?.error?.error?.message === 'string' ? e.error.error.message : ''
+
+  // A 4xx that is not about credentials is about the request WE built, and the
+  // provider's message says exactly what is wrong with it. That text describes
+  // our own payload — it carries no key and nothing about the account — and
+  // withholding it means the person in the factory reports "HTTP 400" and I
+  // guess from here. Quoted for those two statuses only, and capped.
+  if ((status === 400 || status === 422) && detail) {
+    return `The AI service refused the request (HTTP ${status}): ${detail.slice(0, 300)}`
+  }
 
   switch (status) {
     case 401:

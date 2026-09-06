@@ -188,6 +188,28 @@ function checkSetup() {
     bad('cannot read the Users tab: ' + e.message);
   }
 
+  // The single most misconfigured value in this whole setup, and the one with
+  // the least helpful failure: TikTok redirects to whatever Partner Center has
+  // registered, and if that is a deployment id which no longer exists, Google
+  // answers with "Sorry, unable to open the file at present" — a Drive error
+  // page that says nothing about TikTok, Apps Script or deployments. Printing
+  // the live URL turns that into a two-string comparison.
+  lines.push('');
+  lines.push('CALLBACK URL — must match Partner Center exactly, for every shop');
+  try {
+    var execUrl = ScriptApp.getService().getUrl();
+    if (execUrl) {
+      ok(execUrl);
+      note('  Partner Center > your app > Redirect URL. One character off and');
+      note('  authorising fails with a Google Drive error that mentions none of this.');
+      note('  It changes ONLY if you make a new DEPLOYMENT; a new version keeps it.');
+    } else {
+      bad('no deployment URL — deploy this project as a web app first');
+    }
+  } catch (e) {
+    bad('could not read the deployment URL: ' + e.message);
+  }
+
   lines.push('');
   lines.push('GOOGLE SIGN-IN');
   // Presence is not the useful question — a client id that is present but
@@ -909,6 +931,22 @@ function authorizeAll() {
   if (pending === 0) {
     lines.push('Nothing to authorise. Run checkSetup to confirm the rest.');
   } else {
+    // Printed here rather than only in checkSetup, because this is the moment
+    // it matters. TikTok redirects to whatever Partner Center has registered,
+    // and a stale deployment id there fails as a Google Drive page reading
+    // "Sorry, unable to open the file at present" — which names nothing that
+    // would lead you back to this setting.
+    try {
+      var execUrl = ScriptApp.getService().getUrl();
+      if (execUrl) {
+        lines.push('BEFORE YOU CLICK: each app\'s Redirect URL in Partner Center');
+        lines.push('must be EXACTLY this, or approving lands on a Google Drive error:');
+        lines.push('');
+        lines.push('   ' + execUrl);
+        lines.push('');
+      }
+    } catch (e) { /* not deployed yet; checkSetup reports that properly */ }
+
     lines.push(pending + ' shop(s) to go.');
     lines.push('A private window per shop, or the second sign-in reuses the first.');
     lines.push('After approving, TikTok returns you to this script and stores the');

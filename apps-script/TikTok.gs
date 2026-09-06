@@ -135,6 +135,22 @@ function authorizeAll() {
   if (pending === 0) {
     lines.push('Nothing to authorise. Run checkSetup to confirm the rest.');
   } else {
+    // Printed here rather than only in checkSetup, because this is the moment
+    // it matters. TikTok redirects to whatever Partner Center has registered,
+    // and a stale deployment id there fails as a Google Drive page reading
+    // "Sorry, unable to open the file at present" — which names nothing that
+    // would lead you back to this setting.
+    try {
+      var execUrl = ScriptApp.getService().getUrl();
+      if (execUrl) {
+        lines.push('BEFORE YOU CLICK: each app\'s Redirect URL in Partner Center');
+        lines.push('must be EXACTLY this, or approving lands on a Google Drive error:');
+        lines.push('');
+        lines.push('   ' + execUrl);
+        lines.push('');
+      }
+    } catch (e) { /* not deployed yet; checkSetup reports that properly */ }
+
     lines.push(pending + ' shop(s) to go.');
     lines.push('A private window per shop, or the second sign-in reuses the first.');
     lines.push('After approving, TikTok returns you to this script and stores the');

@@ -158,6 +158,28 @@ function checkSetup() {
     bad('cannot read the Users tab: ' + e.message);
   }
 
+  // The single most misconfigured value in this whole setup, and the one with
+  // the least helpful failure: TikTok redirects to whatever Partner Center has
+  // registered, and if that is a deployment id which no longer exists, Google
+  // answers with "Sorry, unable to open the file at present" — a Drive error
+  // page that says nothing about TikTok, Apps Script or deployments. Printing
+  // the live URL turns that into a two-string comparison.
+  lines.push('');
+  lines.push('CALLBACK URL — must match Partner Center exactly, for every shop');
+  try {
+    var execUrl = ScriptApp.getService().getUrl();
+    if (execUrl) {
+      ok(execUrl);
+      note('  Partner Center > your app > Redirect URL. One character off and');
+      note('  authorising fails with a Google Drive error that mentions none of this.');
+      note('  It changes ONLY if you make a new DEPLOYMENT; a new version keeps it.');
+    } else {
+      bad('no deployment URL — deploy this project as a web app first');
+    }
+  } catch (e) {
+    bad('could not read the deployment URL: ' + e.message);
+  }
+
   lines.push('');
   lines.push('GOOGLE SIGN-IN');
   // Presence is not the useful question — a client id that is present but

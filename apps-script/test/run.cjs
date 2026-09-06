@@ -71,6 +71,7 @@ ${src}
     validateVariantName_, continuationTitle_,
     withScriptLock_, withScriptLockOptional_, holdsScriptLock_,
     verifyIdToken_, shortClient_, prop_, SHOPS,
+    googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
   };
 `
@@ -452,12 +453,46 @@ check('no token at all says so', () => {
   eq(gs.verifyIdToken_('').code, 'NO_TOKEN')
 })
 
-check('an unset client id names the missing property', () => {
-  auth({ props: {}, body: { aud: CLIENT, email: 'a@b.com' } })
-  const r = gs.verifyIdToken_('t')
-  eq(r.ok, false)
-  eq(r.code, 'BACKEND_NOT_CONFIGURED')
-  if (!/GOOGLE_CLIENT_ID/.test(r.message)) throw new Error(r.message)
+// The client id used to be a Script Property and nothing else, so a
+// deployment where nobody had typed it in refused every sign-in while looking
+// entirely healthy. It is not a secret — the same string is in the app's public
+// JavaScript — so it now lives in the code, and the property is an override.
+check('with no property set, the built-in client id is used', () => {
+  auth({
+    props: {},
+    body: {
+      aud: gs.DEFAULT_GOOGLE_CLIENT_ID,
+      email: 'a@b.com',
+      email_verified: 'true',
+    },
+  })
+  eq(gs.verifyIdToken_('t').ok, true)
+})
+
+check('the built-in id is a real Google client id', () => {
+  const id = gs.DEFAULT_GOOGLE_CLIENT_ID
+  if (!/^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$/.test(id)) {
+    throw new Error('not shaped like a client id: ' + id)
+  }
+})
+
+check('a property still overrides the built-in', () => {
+  const other = '555000111-qqwweerrttyyuuiiooppaassddffg.apps.googleusercontent.com'
+  auth({
+    props: { GOOGLE_CLIENT_ID: other },
+    body: { aud: other, email: 'a@b.com', email_verified: 'true' },
+  })
+  eq(gs.verifyIdToken_('t').ok, true)
+  eq(gs.googleClientId_(), other)
+})
+
+check('an override means the built-in is no longer accepted', () => {
+  const other = '555000111-qqwweerrttyyuuiiooppaassddffg.apps.googleusercontent.com'
+  auth({
+    props: { GOOGLE_CLIENT_ID: other },
+    body: { aud: gs.DEFAULT_GOOGLE_CLIENT_ID, email: 'a@b.com', email_verified: 'true' },
+  })
+  eq(gs.verifyIdToken_('t').code, 'CLIENT_ID_MISMATCH')
 })
 
 check('a client id from a different project is called a mismatch', () => {
@@ -520,7 +555,7 @@ check('a token with no email is refused', () => {
 
 check('every refusal carries a code and a message', () => {
   const cases = [
-    () => { auth({ props: {} }); return gs.verifyIdToken_('t') },
+    () => { auth({ props: {}, status: 400 }); return gs.verifyIdToken_('t') },
     () => { auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, status: 401 }); return gs.verifyIdToken_('t') },
     () => { auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, throws: true }); return gs.verifyIdToken_('t') },
   ]

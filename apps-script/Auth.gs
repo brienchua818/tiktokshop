@@ -77,11 +77,11 @@ function verifyIdToken_(idToken) {
   // sign-in screen that loops with no way to tell why. Neither leaks anything:
   // a client id is published inside the app's own JavaScript, and the message
   // says nothing about the person holding the token.
-  var expectedClient = prop_('GOOGLE_CLIENT_ID');
+  var expectedClient = googleClientId_();
   if (!expectedClient) {
     return refuse_('BACKEND_NOT_CONFIGURED',
-      'This backend cannot verify sign-ins yet: GOOGLE_CLIENT_ID is not set in ' +
-      'the Apps Script project settings. Nothing you can fix from here.');
+      'This backend has no Google client id, so it cannot verify sign-ins. ' +
+      'Nothing you can fix from here.');
   }
   if (info.aud !== expectedClient) {
     return refuse_('CLIENT_ID_MISMATCH',

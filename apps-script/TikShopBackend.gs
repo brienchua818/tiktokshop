@@ -59,6 +59,29 @@ var TT_AUTH_HOST = 'https://auth.tiktok-shops.com';
 // print a name a person can actually pick from the Run dropdown — and the one
 // it used to print, ttAuthorizeUrl('HZ'), cannot be run that way at all, since
 // the editor has no way to pass an argument.
+/**
+ * The Google client this backend accepts sign-ins for.
+ *
+ * Hardcoded, and not a secret: the same string ships inside the app's public
+ * JavaScript, because that is where the browser gets it from to start a
+ * sign-in at all. Putting it here changes nothing an attacker can do — the
+ * check that matters is still that a token's `aud` equals this value.
+ *
+ * It was a Script Property alone, which was the wrong shape. A value the
+ * backend cannot work without, that is not secret and does not vary, should
+ * not be something a person has to type into a settings page — the only thing
+ * that achieves is a deployment that is silently unable to sign anyone in. The
+ * property still wins when set, so a second deployment against a different
+ * client stays a one-line change.
+ */
+var DEFAULT_GOOGLE_CLIENT_ID =
+  '418799041411-i6rin2ejph0qu3l9ekjbgl0ksgbnpr1b.apps.googleusercontent.com';
+
+/** The client id in force: the property if set, otherwise the constant. */
+function googleClientId_() {
+  return prop_('GOOGLE_CLIENT_ID') || DEFAULT_GOOGLE_CLIENT_ID;
+}
+
 var SHOPS = [
   { id: 'HZ', brand: 'HOUZE',            handle: '@houze.com.sg',    entity: 'Sheldon Global Pte Ltd', authorizeFn: 'authorizeHOUZE' },
   { id: 'TM', brand: 'Table Matters',    handle: '@tablematterssg',  entity: 'Audrey Global Pte Ltd',  authorizeFn: 'authorizeTableMatters' },
@@ -216,12 +239,14 @@ function checkSetup() {
   // wrong refuses every sign-in just as completely as one that is missing,
   // and looks fine in a list of properties. So print it and check its shape.
   // It is not a secret: it ships inside the app's public JavaScript.
-  var clientId = prop_('GOOGLE_CLIENT_ID');
+  var override = prop_('GOOGLE_CLIENT_ID');
+  var clientId = googleClientId_();
   if (!clientId) {
-    bad('GOOGLE_CLIENT_ID — not set, so nobody can sign in');
-    note('  add it here: Project Settings (gear, left) > Script Properties > Add');
-    note('  it is the SAME value as VITE_GOOGLE_CLIENT_ID in Netlify, and ends');
-    note('  in .apps.googleusercontent.com');
+    bad('no Google client id at all — sign-in cannot work');
+  } else if (!override) {
+    ok('GOOGLE_CLIENT_ID = ' + clientId);
+    note('  built in, no Script Property needed');
+    note('  set a GOOGLE_CLIENT_ID property only to point at a different client');
   } else if (clientId.indexOf('.apps.googleusercontent.com') === -1) {
     bad('GOOGLE_CLIENT_ID does not end in .apps.googleusercontent.com: ' + clientId);
     note('  that is probably the client SECRET or a project number, not the client ID');
@@ -659,11 +684,11 @@ function verifyIdToken_(idToken) {
   // sign-in screen that loops with no way to tell why. Neither leaks anything:
   // a client id is published inside the app's own JavaScript, and the message
   // says nothing about the person holding the token.
-  var expectedClient = prop_('GOOGLE_CLIENT_ID');
+  var expectedClient = googleClientId_();
   if (!expectedClient) {
     return refuse_('BACKEND_NOT_CONFIGURED',
-      'This backend cannot verify sign-ins yet: GOOGLE_CLIENT_ID is not set in ' +
-      'the Apps Script project settings. Nothing you can fix from here.');
+      'This backend has no Google client id, so it cannot verify sign-ins. ' +
+      'Nothing you can fix from here.');
   }
   if (info.aud !== expectedClient) {
     return refuse_('CLIENT_ID_MISMATCH',

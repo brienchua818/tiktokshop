@@ -123,13 +123,28 @@ function ensureHeaders_(name, sh) {
   var want = HEADERS[name];
   if (!want || !want.length) return;
 
-  var width = Math.max(sh.getLastColumn(), want.length);
-  var have = sh.getRange(1, 1, 1, width).getValues()[0]
-    .map(function (h) { return String(h || '').trim(); });
-  while (have.length && !have[have.length - 1]) have.pop();
-  if (have.join('\u0001') === want.join('\u0001')) return;
+  var readHeader = function () {
+    var width = Math.max(sh.getLastColumn(), want.length);
+    var have = sh.getRange(1, 1, 1, width).getValues()[0]
+      .map(function (h) { return String(h || '').trim(); });
+    while (have.length && !have[have.length - 1]) have.pop();
+    return { have: have, width: width, current: have.join('\u0001') === want.join('\u0001') };
+  };
+
+  // Cheap check outside the lock, so the common case costs one read and no
+  // lock. Then the SAME check again inside it: on 7 Sep three requests from
+  // one phone arrived within four seconds, each read the old header before
+  // the first had written the new one, and the migration ran three times.
+  // Re-laying rows out against a header that is no longer theirs is exactly
+  // the corruption this function exists to repair, so the decision to
+  // migrate is only ever taken while holding the lock.
+  if (readHeader().current) return;
 
   withScriptLock_(30000, function () {
+    var h = readHeader();
+    if (h.current) return;
+    var have = h.have;
+    var width = h.width;
     var lastRow = sh.getLastRow();
     var oldWidth = have.length;
     var rows = lastRow > 1 ? sh.getRange(2, 1, lastRow - 1, width).getValues() : [];

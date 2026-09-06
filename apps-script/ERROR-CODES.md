@@ -95,7 +95,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-28` | Product.gs:1071 |  |
 | `TS-PRD-29` | Product.gs:1095 | Listing check failed. |
 | `TS-PRD-30` | Product.gs:1102 | TikTok returned no product ID. |
-| `TS-SHT-01` | Sheet.gs:224 | Unknown shop: |
+| `TS-SHT-01` | Sheet.gs:239 | Unknown shop: |
 | `TS-TT-01` | TikTok.gs:20 | No app credentials for . Add _APP_KEY and _APP_SECRET in Script Properties. |
 | `TS-TT-02` | TikTok.gs:67 | Set _SERVICE_ID in Script Properties first.\n\n It comes from THIS project\'s app in TikTok Partner Center — next to the App Key and App Secret, or as the number after "service_id=" in the authorisation link Partner Cent… |
 | `TS-TT-03` | TikTok.gs:195 | token exchange failed |

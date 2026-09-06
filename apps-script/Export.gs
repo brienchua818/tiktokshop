@@ -109,3 +109,179 @@ function exportListing_(listingId, actor) {
     try { DriveApp.getFileById(temp.getId()).setTrashed(true); } catch (e) { /* already gone */ }
   }
 }
+
+
+/**
+ * The purchase order: what each factory supplied, and what it is owed.
+ *
+ * One workbook, a summary sheet and one sheet per listing, filed in the same
+ * dated folder as everything else. Scoped to a date and time window, because a
+ * listing outlives the stream that filled it — the whole reason the Orders
+ * screen has a clock on it.
+ *
+ * > [!important] Cost is derived, not recorded
+ * > The factory price is the selling price divided by a margin figure, which is
+ * > how this business has always priced. That makes it an ARITHMETIC RESULT and
+ * > not a fact about the goods: change the divisor and every cost on the sheet
+ * > changes. The divisor is printed on the summary sheet for exactly that
+ * > reason — a purchase order that cannot be reproduced from its own contents
+ * > is not one anyone should sign.
+ */
+function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
+                       costDivisor, actor) {
+  var shop = shopById_(shopId);
+  if (!shop) throw new Error('Unknown shop: ' + shopId);
+
+  var divisor = Number(costDivisor || 0);
+  // A divisor of zero or less is a division by zero or a negative price. Caught
+  // here rather than producing Infinity in a column someone pays against.
+  if (divisor && divisor <= 0) {
+    throw new Error('The cost divisor must be greater than zero.');
+  }
+
+  var summary = orderSummary_(shopId, fromDate, fromTime, toDate, toTime);
+  var wanted = {};
+  (listingIds || []).forEach(function (id) { wanted[String(id)] = 1; });
+
+  var chosen = summary.listings.filter(function (l) {
+    return !listingIds || !listingIds.length || wanted[l.listing_id];
+  });
+  if (!chosen.length) throw new Error('No orders in that window for those listings.');
+
+  var temp = SpreadsheetApp.create('tikshop-orders-temp');
+  try {
+    var book = temp;
+    var sh = book.getActiveSheet();
+    sh.setName('Summary');
+
+    var window = summary.from + '  to  ' + summary.to + '  (Singapore time)';
+    var head = [
+      ['Purchase order — ' + shop.brand],
+      [window],
+      [divisor ? 'Cost = selling price / ' + divisor : 'Selling prices only, no cost column'],
+      ['Prepared by ' + actor + ' on ' + sgtStamp_()],
+      []
+    ];
+    sh.getRange(1, 1, head.length, 1).setValues(head);
+    sh.getRange(1, 1).setFontWeight('bold').setFontSize(13);
+
+    var sumHeader = ['Listing', 'TikTok listing ID', 'Orders', 'Units', 'Revenue (SGD)'];
+    if (divisor) sumHeader.push('Cost (SGD)');
+    var sumRows = chosen.map(function (l) {
+      var row = [
+        l.product_name || l.listing_id, l.listing_id, l.order_count, l.units,
+        round2_(l.revenue)
+      ];
+      if (divisor) row.push(round2_(l.revenue / divisor));
+      return row;
+    });
+
+    var r0 = head.length + 1;
+    sh.getRange(r0, 1, 1, sumHeader.length).setValues([sumHeader]).setFontWeight('bold');
+    if (sumRows.length) sh.getRange(r0 + 1, 1, sumRows.length, sumHeader.length).setValues(sumRows);
+
+    var totalRow = ['TOTAL', '', sumRows.reduce(function (n, r) { return n + r[2]; }, 0),
+      sumRows.reduce(function (n, r) { return n + r[3]; }, 0),
+      round2_(sumRows.reduce(function (n, r) { return n + r[4]; }, 0))];
+    if (divisor) totalRow.push(round2_(sumRows.reduce(function (n, r) { return n + r[5]; }, 0)));
+    sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
+      .setValues([totalRow]).setFontWeight('bold');
+
+    sh.setFrozenRows(r0);
+    for (var c = 1; c <= sumHeader.length; c++) sh.autoResizeColumn(c);
+
+    // One sheet per listing: this is what a factory actually receives, and a
+    // factory should not be handed another factory's figures.
+    chosen.forEach(function (l) {
+      var detail = listingOrders_(l.listing_id, fromDate, fromTime, toDate, toTime);
+      var name = safeName_(l.product_name || l.listing_id).slice(0, 90) || l.listing_id;
+      var s2 = book.insertSheet(uniqueSheetName_(book, name));
+
+      var itemHeader = ['SKU', 'Variation', 'Units', 'Unit price (SGD)', 'Revenue (SGD)'];
+      if (divisor) itemHeader.push('Unit cost (SGD)', 'Cost (SGD)');
+      itemHeader.push('Cancelled / unpaid units');
+
+      var itemRows = detail.variations.map(function (v) {
+        var unitPrice = v.units ? v.revenue / v.units : Number(v.price || 0);
+        var row = [
+          v.seller_sku || '', v.variation, v.units, round2_(unitPrice), round2_(v.revenue)
+        ];
+        if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.revenue / divisor));
+        row.push(v.unsold_units);
+        return row;
+      });
+
+      var top = [
+        [l.product_name || l.listing_id],
+        ['Listing ' + l.listing_id + '   ·   ' + window],
+        []
+      ];
+      s2.getRange(1, 1, top.length, 1).setValues(top);
+      s2.getRange(1, 1).setFontWeight('bold').setFontSize(12);
+
+      var h0 = top.length + 1;
+      s2.getRange(h0, 1, 1, itemHeader.length).setValues([itemHeader]).setFontWeight('bold');
+      if (itemRows.length) {
+        s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
+      }
+
+      var tot = ['TOTAL', '', detail.total_units, '', round2_(detail.total_revenue)];
+      if (divisor) tot.push('', round2_(detail.total_revenue / divisor));
+      tot.push(detail.variations.reduce(function (n, v) { return n + v.unsold_units; }, 0));
+      s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
+        .setValues([tot]).setFontWeight('bold');
+
+      s2.setFrozenRows(h0);
+      for (var k = 1; k <= itemHeader.length; k++) s2.autoResizeColumn(k);
+    });
+
+    SpreadsheetApp.flush();
+
+    var url = 'https://docs.google.com/spreadsheets/d/' + book.getId() +
+      '/export?format=xlsx';
+    var blob = UrlFetchApp.fetch(url, {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }
+    }).getBlob();
+
+    var filename = shop.brand + ' - Orders ' + fromDate +
+      (fromDate === toDate ? '' : ' to ' + toDate) +
+      ' - ' + safeName_(actor) + ' - ' + sgtStamp_() + '.xlsx';
+    blob.setName(filename);
+
+    var file = datedExportFolder_().createFile(blob);
+    logEvent_(actor, 'export_orders', shop.brand,
+      filename + ' (' + chosen.length + ' listings)', 'ok');
+
+    return {
+      url: file.getUrl(),
+      name: filename,
+      listings: chosen.length,
+      units: summary.total_units,
+      revenue: summary.total_revenue,
+      cost_divisor: divisor || null
+    };
+  } finally {
+    try { DriveApp.getFileById(temp.getId()).setTrashed(true); } catch (e) { /* already gone */ }
+  }
+}
+
+/** Money, to cents. Float addition otherwise leaves 0.30000000000000004 on a PO. */
+function round2_(n) {
+  return Math.round(Number(n || 0) * 100) / 100;
+}
+
+/**
+ * A sheet name that is free, and legal.
+ *
+ * Two factories can share a product name, and Sheets refuses a duplicate name
+ * with an exception that would lose the whole export at the last step.
+ */
+function uniqueSheetName_(book, base) {
+  var name = String(base || 'Listing').slice(0, 90);
+  var n = 2;
+  while (book.getSheetByName(name)) {
+    name = String(base).slice(0, 85) + ' (' + n + ')';
+    n++;
+  }
+  return name;
+}

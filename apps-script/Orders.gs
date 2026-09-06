@@ -84,6 +84,21 @@ function sgtEpoch_(isoDate, hhmm) {
 }
 
 /**
+ * The end of a window, as an exclusive bound.
+ *
+ * Someone picking 18:00 to 23:59 means the whole evening, including the
+ * fifty-nine seconds after 23:59:00. Treating the chosen minute as the
+ * exclusive bound silently dropped them from every window — invisible in
+ * testing, and an order in that minute simply would not appear.
+ *
+ * So the bound is the END of the chosen minute. Still exclusive, so two
+ * adjacent windows partition the day instead of both claiming an order.
+ */
+function sgtEndEpoch_(isoDate, hhmm) {
+  return sgtEpoch_(isoDate, hhmm || '23:59') + 60;
+}
+
+/**
  * Pull a window of orders into the Sheet.
  *
  * Rows are replaced rather than appended, keyed by order id, so re-syncing the
@@ -96,10 +111,29 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
   if (!shop) throw new Error('Unknown shop: ' + shopId);
 
   var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
-  var toEpoch = sgtEpoch_(toDate, toTime || '23:59');
+  var toEpoch = sgtEndEpoch_(toDate, toTime);
   if (toEpoch <= fromEpoch) throw new Error('The end of the range is before its start.');
 
   var orders = ttAllOrders_(shopId, fromEpoch, toEpoch);
+
+  // Prove the window was actually applied.
+  //
+  // create_time_ge / create_time_lt are the documented filter names, but the
+  // documentation could not be read from here and an ignored filter does not
+  // error — it returns the most recent orders, which would then be exported as
+  // though they belonged to the requested window. A factory would be paid for
+  // someone else's stream. Cheap to check, and impossible to notice otherwise.
+  var strays = orders.filter(function (o) {
+    var t = Number(o.create_time || 0);
+    return t && (t < fromEpoch || t >= toEpoch);
+  });
+  if (strays.length) {
+    throw new Error(
+      'TikTok returned ' + strays.length + ' order(s) outside the requested window ' +
+      '(for example ' + sgtStampFromEpoch_(strays[0].create_time) + '). ' +
+      'The date filter is not being applied, so nothing was saved. Tell Brien.'
+    );
+  }
 
   var orderRows = [];
   var itemRows = [];
@@ -191,7 +225,7 @@ var UNSOLD_STATUSES = {
  */
 function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
   var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
-  var toEpoch = sgtEpoch_(toDate, toTime || '23:59');
+  var toEpoch = sgtEndEpoch_(toDate, toTime);
 
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (shopId && String(r.shop_id) !== String(shopId)) return false;
@@ -335,7 +369,7 @@ function inspectOrders() {
  */
 function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
   var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
-  var toEpoch = sgtEpoch_(toDate, toTime || '23:59');
+  var toEpoch = sgtEndEpoch_(toDate, toTime);
 
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (String(r.listing_id) !== String(listingId)) return false;

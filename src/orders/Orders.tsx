@@ -1,5 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, ApiError, type ListingOrders, type OrderSummary, type Window } from '../lib/api'
+import {
+  api,
+  ApiError,
+  type ExportResult,
+  type ListingOrders,
+  type OrderSummary,
+  type DateWindow,
+} from '../lib/api'
 import type { Shop } from '../types'
 
 /**
@@ -28,7 +35,7 @@ export default function Orders({ shop }: { shop: Shop }) {
   // Defaults to the whole of today. A stream is normally the evening just
   // gone, and narrowing from a full day is easier than widening from an
   // arbitrary hour.
-  const [win, setWin] = useState<Window>({
+  const [win, setWin] = useState<DateWindow>({
     from_date: today,
     from_time: '00:00',
     to_date: today,
@@ -40,6 +47,15 @@ export default function Orders({ shop }: { shop: Shop }) {
   const [detail, setDetail] = useState<ListingOrders | null>(null)
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [exported, setExported] = useState<ExportResult | null>(null)
+  /**
+   * Selling price divided by this gives the factory price.
+   *
+   * Kept as text, not a number: an input bound to a number turns "1." into 1
+   * mid-typing and the cursor jumps. Parsed once, at the point of use.
+   */
+  const [divisor, setDivisor] = useState('')
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
 
@@ -84,6 +100,30 @@ export default function Orders({ shop }: { shop: Shop }) {
     }
   }
 
+  async function exportPo() {
+    const d = divisor.trim() ? Number(divisor) : undefined
+    if (d !== undefined && (!Number.isFinite(d) || d <= 0)) {
+      setError('The cost divisor has to be a number greater than zero.')
+      return
+    }
+    setExporting(true)
+    setError('')
+    setExported(null)
+    try {
+      setExported(
+        await api.exportOrders({
+          shop_id: shop.shop_id,
+          ...win,
+          ...(d !== undefined ? { cost_divisor: d } : {}),
+        }),
+      )
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
+  }
+
   async function openDetail(listingId: string) {
     if (openListing === listingId) {
       setOpenListing(null)
@@ -99,7 +139,7 @@ export default function Orders({ shop }: { shop: Shop }) {
     }
   }
 
-  function set(patch: Partial<Window>) {
+  function set(patch: Partial<DateWindow>) {
     setWin((w) => ({ ...w, ...patch }))
   }
 
@@ -204,10 +244,57 @@ export default function Orders({ shop }: { shop: Shop }) {
         </div>
       ) : (
         <>
-          <div className="flex gap-4 text-sm bg-raised border border-white/8 rounded-xl px-4 py-3">
-            <Stat label="Listings" value={String(summary.listings.length)} />
-            <Stat label="Units" value={String(summary.total_units)} />
-            <Stat label="Revenue" value={`$${summary.total_revenue.toFixed(2)}`} />
+          <div className="bg-raised border border-white/8 rounded-xl px-4 py-3 space-y-3">
+            <div className="flex gap-4 text-sm">
+              <Stat label="Listings" value={String(summary.listings.length)} />
+              <Stat label="Units" value={String(summary.total_units)} />
+              <Stat label="Revenue" value={`$${summary.total_revenue.toFixed(2)}`} />
+            </div>
+
+            <div className="flex items-end gap-2 flex-wrap border-t border-white/5 pt-3">
+              <div className="space-y-1">
+                <label htmlFor="divisor" className="text-xs text-gray-400 block">
+                  Cost divisor
+                </label>
+                <input
+                  id="divisor"
+                  inputMode="decimal"
+                  value={divisor}
+                  onChange={(e) => setDivisor(e.target.value)}
+                  placeholder="e.g. 1.6"
+                  className="w-28 bg-sunken border border-white/10 rounded-lg px-2.5 min-h-11 text-sm text-white outline-none focus:border-accent"
+                />
+              </div>
+              <button
+                onClick={() => void exportPo()}
+                disabled={exporting}
+                className="min-h-11 px-4 rounded-lg bg-accent hover:bg-accent-hover disabled:opacity-50 text-white text-sm font-medium"
+              >
+                {exporting ? 'Building…' : 'Export purchase order'}
+              </button>
+              <p className="text-xs text-gray-600 basis-full">
+                Factory price = selling price ÷ this number. Leave it blank for selling prices
+                only. Either way the figure is printed in the file, so the sheet can be checked
+                against itself.
+              </p>
+            </div>
+
+            {exported && (
+              <a
+                href={exported.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block text-xs text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2.5 hover:border-emerald-400/60"
+              >
+                <span className="font-medium">{exported.name}</span>
+                <span className="block text-emerald-300/70 mt-0.5">
+                  {exported.listings} listing{exported.listings === 1 ? '' : 's'} ·{' '}
+                  {exported.units} units · ${exported.revenue.toFixed(2)}
+                  {exported.cost_divisor ? ` · cost ÷ ${exported.cost_divisor}` : ''} — tap to
+                  open in Drive
+                </span>
+              </a>
+            )}
           </div>
 
           <ul className="space-y-2">

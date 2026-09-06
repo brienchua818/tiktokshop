@@ -28,7 +28,9 @@ function doPost(e) {
 var WRITE_ACTIONS = {
   addListing: 1, saveSku: 1, pushSku: 1, exportListing: 1, setRole: 1,
   // Rewrites whole tabs, so it must not interleave with another sync.
-  syncOrders: 1
+  syncOrders: 1,
+  // Creates a file in the shared drive, so it serialises with the rest.
+  exportOrders: 1
 };
 
 /** Actions callable without an approved role. */
@@ -193,6 +195,15 @@ function route_(action, params, body, user) {
         params.listing_id || body.listing_id,
         params.from_date || body.from_date, params.from_time || body.from_time,
         params.to_date || body.to_date, params.to_time || body.to_time
+      ));
+
+    // The purchase order: one workbook, a summary and a sheet per listing,
+    // scoped to the same window as the screen it was launched from.
+    case 'exportOrders':
+      return json_(exportOrders_(
+        body.shop_id, body.listing_ids || [],
+        body.from_date, body.from_time, body.to_date, body.to_time,
+        body.cost_divisor, user.name
       ));
 
     case 'exportListing':

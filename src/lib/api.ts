@@ -127,8 +127,14 @@ export interface ListingState {
   checked_at: string
 }
 
-/** A date and time range in Singapore time — the only timezone this app uses. */
-export interface Window {
+/**
+ * A date and time range in Singapore time — the only timezone this app uses.
+ *
+ * Named DateWindow rather than Window because the latter is a DOM global, and
+ * shadowing it in a module that other files import is the kind of thing that
+ * compiles fine until someone types `window` and gets a date range.
+ */
+export interface DateWindow {
   from_date: string
   from_time: string
   to_date: string
@@ -179,6 +185,22 @@ export interface ListingOrders {
   order_count: number
   total_units: number
   total_revenue: number
+}
+
+export interface ExportRequest extends DateWindow {
+  shop_id: string
+  /** Empty or omitted means every listing with orders in the window. */
+  listing_ids?: string[]
+  cost_divisor?: number
+}
+
+export interface ExportResult {
+  url: string
+  name: string
+  listings: number
+  units: number
+  revenue: number
+  cost_divisor: number | null
 }
 
 /** Identity plus what the allowlist says this person may do. */
@@ -245,12 +267,27 @@ export const api = {
   }) => call<SyncResult>('syncOrders', { body }),
 
   /** Per-listing totals inside a date and time window. */
-  orderSummary: (shopId: string, w: Window) =>
+  orderSummary: (shopId: string, w: DateWindow) =>
     call<OrderSummary>('orderSummary', { body: { shop_id: shopId, ...w } }),
 
   /** The variations behind one listing's total, in the same window. */
-  listingOrders: (listingId: string, w: Window) =>
+  listingOrders: (listingId: string, w: DateWindow) =>
     call<ListingOrders>('listingOrders', { body: { listing_id: listingId, ...w } }),
+
+  /**
+   * Build the purchase order for a window and file it in Drive.
+   *
+   * `costDivisor` derives the factory price from the selling price. Omit it for
+   * a sheet with selling prices only — the figure is printed in the workbook
+   * either way, since a purchase order nobody can reproduce is not one anyone
+   * should sign.
+   */
+  exportOrders: (body: ExportRequest) =>
+    // Spread rather than passed straight through: an interface is not
+    // assignable to Record<string, unknown>, because TypeScript cannot rule out
+    // a subtype adding an incompatible field. Spreading produces the plain
+    // object the call actually sends.
+    call<ExportResult>('exportOrders', { body: { ...body } }),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>

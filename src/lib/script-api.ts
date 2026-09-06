@@ -143,9 +143,13 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
     throw new ScriptError(401, 'Sign in with Google to continue.')
   }
 
+  // Narrowed once, then passed down. The check above cannot narrow a
+  // module-level binding for a different function, and re-checking it in each
+  // helper invites the two to disagree.
+  const base: string = BASE
   const payload = { ...options.body, ...(token ? { id_token: token } : {}) }
 
-  const posted = await send(action, payload, 'POST')
+  const posted = await send(base, action, payload, 'POST')
   if (posted.json) return unwrap<T>(posted.json)
 
   // The POST came back as an HTML page rather than data.
@@ -161,8 +165,8 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   // so the same call can simply be made again as a GET. That is not a
   // workaround for a bug in this code — it is the request the redirect was
   // going to turn into anyway.
-  if (fitsInAUrl(action, payload)) {
-    const got = await send(action, payload, 'GET')
+  if (fitsInAUrl(base, action, payload)) {
+    const got = await send(base, action, payload, 'GET')
     if (got.json) return unwrap<T>(got.json)
     throw pageInsteadOfData(got)
   }
@@ -179,14 +183,15 @@ interface Attempt {
 }
 
 async function send(
+  base: string,
   action: string,
   payload: Record<string, unknown>,
   method: 'GET' | 'POST',
 ): Promise<Attempt> {
   const url =
     method === 'GET'
-      ? `${BASE}?${new URLSearchParams({ action, ...stringify(payload) }).toString()}`
-      : `${BASE}?action=${encodeURIComponent(action)}`
+      ? `${base}?${new URLSearchParams({ action, ...stringify(payload) }).toString()}`
+      : `${base}?action=${encodeURIComponent(action)}`
 
   let response: Response
   try {
@@ -222,11 +227,11 @@ async function send(
 }
 
 /** Query strings are not a place to put a photo. */
-function fitsInAUrl(action: string, payload: Record<string, unknown>): boolean {
+function fitsInAUrl(base: string, action: string, payload: Record<string, unknown>): boolean {
   const query = new URLSearchParams({ action, ...stringify(payload) }).toString()
   // Apps Script stops well before a browser does; 6000 leaves room and still
   // covers every read, whose largest field is the ID token at roughly 1 KB.
-  return BASE.length + query.length < 6000
+  return base.length + query.length < 6000
 }
 
 /** URLSearchParams wants strings, and an object would arrive as [object Object]. */

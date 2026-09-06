@@ -639,6 +639,42 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
     if (returned[j].seller_sku === addition.identifier) skuId = returned[j].id || '';
   }
 
+  /**
+   * Warn when a variation we pushed is not in what TikTok just returned.
+   *
+   * The append payload is built entirely from the snapshot, so any variation
+   * TikTok omits is dropped from the product without a word. The guard in the
+   * variants engine cannot catch this: it compares the payload against the
+   * same snapshot, and something absent from the snapshot is absent from both.
+   *
+   * This is not hypothetical. B1 was pushed and recorded as pushed; the next
+   * push eighteen minutes later read the product and found two variations, not
+   * three, and wrote back a payload without it. The only reason anyone noticed
+   * is that the status check later reported it Missing.
+   *
+   * Recorded rather than refused, because the cause is not established — a
+   * variation invisible while under review and one that never persisted look
+   * identical from here, and blocking a livestream on a guess about which is
+   * worse than a warning that names the SKU. The count is our own arithmetic
+   * either way, which is why it agreed with itself while being wrong.
+   */
+  var ours = {};
+  listSkus_(listingId).forEach(function (r) {
+    if (String(r.status) === 'pushed') ours[String(r.identifier)] = true;
+  });
+  var onTikTok = {};
+  snapshot.skus.forEach(function (sku) {
+    if (sku.sellerSku) onTikTok[String(sku.sellerSku)] = true;
+  });
+  var missing = Object.keys(ours).filter(function (id) {
+    return id !== addition.identifier && !onTikTok[id];
+  });
+  if (missing.length) {
+    logEvent_(user.name, 'variations_missing', shop.brand,
+      'Pushed but not on TikTok when ' + addition.identifier + ' was added: ' +
+      missing.join(', '), 'warn');
+  }
+
   var variationsNow = snapshot.skus.length + 1;
   recordSku_(skuRow_(body, user, prefix, shop, addition, photoUrl, '', snapshot.productId));
   logEvent_(user.name, 'add_variation', shop.brand,
@@ -650,6 +686,9 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
     listing_id: listingId, product_id: snapshot.productId, sku_id: skuId,
     variant_name: variantValueName_(addition.identifier, addition.variantName),
     variations_now: variationsNow,
+    // Named so the app can say it at the moment it happens, rather than
+    // leaving it to be discovered by a status check later.
+    variations_missing: missing,
     remaining: MAX_SKUS_PER_PRODUCT - variationsNow,
     // Adding a variation resends the product for review. The existing
     // variations stay live and buyable throughout — "If the audit passes, v2 is

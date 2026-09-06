@@ -189,8 +189,18 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
     });
   });
 
-  replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
-  replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
+  /**
+   * The lock goes here, around the write, and not around the fetch above.
+   *
+   * Fetching a busy window is dozens of TikTok calls and takes minutes. Held
+   * across that, a SKU push during a broadcast would queue behind an order
+   * sync — the one thing in this app that must never wait. The two tabs are
+   * rewritten together so a reader never sees orders without their items.
+   */
+  withScriptLock_(30000, function () {
+    replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
+    replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
+  });
 
   logEvent_(actor, 'sync_orders', shop.brand,
     orders.length + ' orders ' + fromDate + ' to ' + toDate, 'ok');

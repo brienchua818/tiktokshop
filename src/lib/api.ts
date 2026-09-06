@@ -111,6 +111,13 @@ export interface LiveVariant {
    * loss. Only a variation with no TikTok id is genuinely unaccounted for.
    */
   under_review: boolean
+  /**
+   * Not returned, and no TikTok id to prove it was ever taken.
+   *
+   * Ambiguous by nature — pending and never-created are indistinguishable
+   * here. Rows pushed before the id was recorded all land in this state.
+   */
+  unaccounted: boolean
   stock_set: number
   /** Null when TikTok has no such variation. */
   stock_available: number | null

@@ -24,13 +24,21 @@ function doPost(e) {
   return handle_(e, 'POST');
 }
 
-/** Actions that must serialise, because they read-then-write the Sheet. */
+/**
+ * Actions that must serialise, because they read-then-write the Sheet.
+ *
+ * Deliberately short. The lock is held for the WHOLE action, and during a
+ * broadcast every SKU push needs it — so anything slow in here stalls the one
+ * thing that cannot wait.
+ *
+ * The exports and the order sync are not here on purpose. They make dozens of
+ * TikTok calls and build a spreadsheet, which is minutes; holding the lock
+ * across that would make a push mid-stream queue behind an export. They touch
+ * different tabs from a push, so they never needed to serialise against one —
+ * only against themselves, which each does internally around its own write.
+ */
 var WRITE_ACTIONS = {
-  addListing: 1, saveSku: 1, pushSku: 1, exportListing: 1, setRole: 1,
-  // Rewrites whole tabs, so it must not interleave with another sync.
-  syncOrders: 1,
-  // Creates a file in the shared drive, so it serialises with the rest.
-  exportOrders: 1
+  addListing: 1, saveSku: 1, pushSku: 1, setRole: 1
 };
 
 /** Actions callable without an approved role. */

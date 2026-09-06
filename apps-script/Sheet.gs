@@ -201,14 +201,61 @@ function replaceByKey_(tabName, keyField, rows) {
   });
 
   var sheet = sheet_(tabName);
-  if (sheet.getLastRow() > 1) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).clearContent();
-  }
+  var before = sheet.getLastRow();
+
+  /**
+   * Write first, then clear what is left over.
+   *
+   * The other order — clear everything, then write — leaves the tab EMPTY for
+   * the duration of the write, and an Apps Script execution is killed at six
+   * minutes. A sync large enough to hit that would have deleted every order on
+   * record and written nothing back. This way an interruption leaves stale
+   * rows rather than no rows, and re-running fixes it.
+   */
   if (all.length) {
     sheet.getRange(2, 1, all.length, headers.length).setValues(all);
   }
+  var surplus = before - (all.length + 1);
+  if (surplus > 0) {
+    sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
+  }
   SpreadsheetApp.flush();
   return rows.length;
+}
+
+/**
+ * Fill in TikTok's sku id on rows that predate it being recorded.
+ *
+ * One targeted write per row rather than a whole-tab rewrite: this runs on a
+ * status check, which can happen mid-broadcast, and rewriting the SKUs tab
+ * while a push is appending to it is the kind of race worth not having.
+ */
+function backfillSkuIds_(repairs) {
+  if (!repairs || !repairs.length) return 0;
+  return withScriptLock_(30000, function () {
+    var sheet = sheet_(TAB_SKUS);
+    var headers = HEADERS[TAB_SKUS];
+    var keyCol = headers.indexOf('sku_id') + 1;
+    var idCol = headers.indexOf('tiktok_sku_id') + 1;
+    if (keyCol < 1 || idCol < 1) return 0;
+
+    var last = sheet.getLastRow();
+    if (last < 2) return 0;
+    var keys = sheet.getRange(2, keyCol, last - 1, 1).getValues();
+
+    var byKey = {};
+    repairs.forEach(function (r) { byKey[String(r.sku_id)] = String(r.tiktok_sku_id); });
+
+    var written = 0;
+    for (var i = 0; i < keys.length; i++) {
+      var found = byKey[String(keys[i][0])];
+      if (!found) continue;
+      sheet.getRange(i + 2, idCol).setValue(found);
+      written++;
+    }
+    if (written) SpreadsheetApp.flush();
+    return written;
+  });
 }
 
 /** A prior push with this idempotency key, so a retry cannot duplicate. */

@@ -646,14 +646,61 @@ function replaceByKey_(tabName, keyField, rows) {
   });
 
   var sheet = sheet_(tabName);
-  if (sheet.getLastRow() > 1) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, headers.length).clearContent();
-  }
+  var before = sheet.getLastRow();
+
+  /**
+   * Write first, then clear what is left over.
+   *
+   * The other order — clear everything, then write — leaves the tab EMPTY for
+   * the duration of the write, and an Apps Script execution is killed at six
+   * minutes. A sync large enough to hit that would have deleted every order on
+   * record and written nothing back. This way an interruption leaves stale
+   * rows rather than no rows, and re-running fixes it.
+   */
   if (all.length) {
     sheet.getRange(2, 1, all.length, headers.length).setValues(all);
   }
+  var surplus = before - (all.length + 1);
+  if (surplus > 0) {
+    sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
+  }
   SpreadsheetApp.flush();
   return rows.length;
+}
+
+/**
+ * Fill in TikTok's sku id on rows that predate it being recorded.
+ *
+ * One targeted write per row rather than a whole-tab rewrite: this runs on a
+ * status check, which can happen mid-broadcast, and rewriting the SKUs tab
+ * while a push is appending to it is the kind of race worth not having.
+ */
+function backfillSkuIds_(repairs) {
+  if (!repairs || !repairs.length) return 0;
+  return withScriptLock_(30000, function () {
+    var sheet = sheet_(TAB_SKUS);
+    var headers = HEADERS[TAB_SKUS];
+    var keyCol = headers.indexOf('sku_id') + 1;
+    var idCol = headers.indexOf('tiktok_sku_id') + 1;
+    if (keyCol < 1 || idCol < 1) return 0;
+
+    var last = sheet.getLastRow();
+    if (last < 2) return 0;
+    var keys = sheet.getRange(2, keyCol, last - 1, 1).getValues();
+
+    var byKey = {};
+    repairs.forEach(function (r) { byKey[String(r.sku_id)] = String(r.tiktok_sku_id); });
+
+    var written = 0;
+    for (var i = 0; i < keys.length; i++) {
+      var found = byKey[String(keys[i][0])];
+      if (!found) continue;
+      sheet.getRange(i + 2, idCol).setValue(found);
+      written++;
+    }
+    if (written) SpreadsheetApp.flush();
+    return written;
+  });
 }
 
 /** A prior push with this idempotency key, so a retry cannot duplicate. */
@@ -1557,6 +1604,26 @@ function listingState_(listingId) {
 
   var live = ttGetProduct_(shopId, String(listingId));
 
+  /**
+   * Heal rows written before TikTok's sku id was being kept.
+   *
+   * Those rows cannot be carried forward if they go under review, because
+   * there is nothing to keep them by. Every time one is visible here its id is
+   * available, so it is recorded — which quietly repairs the listings that
+   * existed before that field did, without anyone re-pushing.
+   */
+  var repairs = [];
+  listSkus_(listingId).forEach(function (r) {
+    if (String(r.status) !== 'pushed' || String(r.tiktok_sku_id || '')) return;
+    var found = live.skus.filter(function (s) {
+      return String(s.sellerSku) === String(r.identifier);
+    })[0];
+    if (found && found.id) {
+      repairs.push({ sku_id: String(r.sku_id), tiktok_sku_id: String(found.id) });
+    }
+  });
+  if (repairs.length) backfillSkuIds_(repairs);
+
   // Keyed by seller_sku, which is the identifier the app assigns and the only
   // field both sides agree on — a TikTok sku id is not known until after the
   // push, and a row pushed from another device would not have it locally.
@@ -1585,6 +1652,16 @@ function listingState_(listingId) {
        * variation really is unaccounted for.
        */
       under_review: !match && Boolean(String(r.tiktok_sku_id || '')),
+      /**
+       * Not returned, and we have no id to prove TikTok ever took it.
+       *
+       * Genuinely ambiguous: under review and never created look identical
+       * from here. It must not be reported as lost, because telling someone to
+       * retry a variation that is merely pending adds a second copy — and it
+       * must not be reported as fine either. Rows written before the id was
+       * kept all land here, which is why this state exists at all.
+       */
+      unaccounted: !match && !String(r.tiktok_sku_id || ''),
       stock_set: set,
       stock_available: available,
       // Never negative: someone raising stock in Seller Center would otherwise
@@ -1954,12 +2031,25 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
   var listingId = String(body.listing_id);
   var snapshot = ttGetProduct_(prefix, listingId);
 
-  // Idempotency from the snapshot rather than from the Sheet.
-  //
-  // TikTok's `idempotency_key` only exists on Create Product, so an append that
-  // times out on factory Wi-Fi has no server-side guard. It does not need one:
-  // the product itself records whether this identifier is already a variation,
-  // and that answer is authoritative.
+  /**
+   * Has this identifier already been added?
+   *
+   * TikTok's `idempotency_key` only exists on Create Product, so an append
+   * whose reply is lost has no server-side guard and the question has to be
+   * answered here. It used to be answered from the snapshot alone, on the
+   * belief that "the product itself records whether this identifier is already
+   * a variation, and that answer is authoritative".
+   *
+   * That belief was wrong, and in the same way that cost a variation: a SKU
+   * still under review is absent from Get Product. So a retry of a pending
+   * push found nothing, decided it was new, and tried to add a second copy —
+   * which the duplicate-value check then refused with a message about a
+   * repeated identifier. Safe, but a wasted push and a misleading reason.
+   *
+   * Both sources are consulted now. TikTok's read settles it when the
+   * variation is visible; our own row settles it when TikTok is not showing
+   * one it has already issued an id for.
+   */
   for (var i = 0; i < snapshot.skus.length; i++) {
     if (snapshot.skus[i].sellerSku === addition.identifier) {
       return {
@@ -1970,6 +2060,20 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
         remaining: MAX_SKUS_PER_PRODUCT - snapshot.skus.length
       };
     }
+  }
+  var alreadyOurs = listSkus_(listingId).filter(function (r) {
+    return String(r.identifier) === addition.identifier &&
+      String(r.status) === 'pushed' &&
+      String(r.tiktok_sku_id || '');
+  })[0];
+  if (alreadyOurs) {
+    return {
+      mode: 'variation_added', deduplicated: true, audit: 'pending',
+      listing_id: listingId, product_id: snapshot.productId,
+      sku_id: String(alreadyOurs.tiktok_sku_id),
+      variations_now: snapshot.skus.length,
+      remaining: MAX_SKUS_PER_PRODUCT - snapshot.skus.length
+    };
   }
 
   /**
@@ -2417,8 +2521,18 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
     });
   });
 
-  replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
-  replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
+  /**
+   * The lock goes here, around the write, and not around the fetch above.
+   *
+   * Fetching a busy window is dozens of TikTok calls and takes minutes. Held
+   * across that, a SKU push during a broadcast would queue behind an order
+   * sync — the one thing in this app that must never wait. The two tabs are
+   * rewritten together so a reader never sees orders without their items.
+   */
+  withScriptLock_(30000, function () {
+    replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
+    replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
+  });
 
   logEvent_(actor, 'sync_orders', shop.brand,
     orders.length + ' orders ' + fromDate + ' to ' + toDate, 'ok');
@@ -2974,13 +3088,21 @@ function doPost(e) {
   return handle_(e, 'POST');
 }
 
-/** Actions that must serialise, because they read-then-write the Sheet. */
+/**
+ * Actions that must serialise, because they read-then-write the Sheet.
+ *
+ * Deliberately short. The lock is held for the WHOLE action, and during a
+ * broadcast every SKU push needs it — so anything slow in here stalls the one
+ * thing that cannot wait.
+ *
+ * The exports and the order sync are not here on purpose. They make dozens of
+ * TikTok calls and build a spreadsheet, which is minutes; holding the lock
+ * across that would make a push mid-stream queue behind an export. They touch
+ * different tabs from a push, so they never needed to serialise against one —
+ * only against themselves, which each does internally around its own write.
+ */
 var WRITE_ACTIONS = {
-  addListing: 1, saveSku: 1, pushSku: 1, exportListing: 1, setRole: 1,
-  // Rewrites whole tabs, so it must not interleave with another sync.
-  syncOrders: 1,
-  // Creates a file in the shared drive, so it serialises with the rest.
-  exportOrders: 1
+  addListing: 1, saveSku: 1, pushSku: 1, setRole: 1
 };
 
 /** Actions callable without an approved role. */

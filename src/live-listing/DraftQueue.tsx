@@ -406,7 +406,13 @@ function StockLine({ v }: { v: LiveVariant }) {
         </p>
       )
     }
-    return <p className="text-xs text-red-400 mt-0.5">Not on TikTok — retry this SKU.</p>
+    // Ambiguous, and said so. Telling someone to retry a variation that is
+    // merely pending adds a second copy, so this stops short of advising it.
+    return (
+      <p className="text-xs text-amber-400/90 mt-0.5">
+        Not shown by TikTok yet. If it has not appeared in 30 minutes it was not added.
+      </p>
+    )
   }
   return (
     <p className="text-xs text-gray-500 mt-0.5">
@@ -438,11 +444,7 @@ function StatusBadge({
 }) {
   if (draft.status === 'pushed') {
     if (live && !live.on_tiktok) {
-      return live.under_review ? (
-        <span className="text-xs text-amber-400">Reviewing</span>
-      ) : (
-        <span className="text-xs text-red-400">Missing</span>
-      )
+      return <span className="text-xs text-amber-400">Reviewing</span>
     }
     // Buyable requires two things: TikTok has the variation, and the product
     // it belongs to has cleared review. A variation can exist while the

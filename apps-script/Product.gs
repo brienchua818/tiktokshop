@@ -231,6 +231,26 @@ function listingState_(listingId) {
 
   var live = ttGetProduct_(shopId, String(listingId));
 
+  /**
+   * Heal rows written before TikTok's sku id was being kept.
+   *
+   * Those rows cannot be carried forward if they go under review, because
+   * there is nothing to keep them by. Every time one is visible here its id is
+   * available, so it is recorded — which quietly repairs the listings that
+   * existed before that field did, without anyone re-pushing.
+   */
+  var repairs = [];
+  listSkus_(listingId).forEach(function (r) {
+    if (String(r.status) !== 'pushed' || String(r.tiktok_sku_id || '')) return;
+    var found = live.skus.filter(function (s) {
+      return String(s.sellerSku) === String(r.identifier);
+    })[0];
+    if (found && found.id) {
+      repairs.push({ sku_id: String(r.sku_id), tiktok_sku_id: String(found.id) });
+    }
+  });
+  if (repairs.length) backfillSkuIds_(repairs);
+
   // Keyed by seller_sku, which is the identifier the app assigns and the only
   // field both sides agree on — a TikTok sku id is not known until after the
   // push, and a row pushed from another device would not have it locally.
@@ -259,6 +279,16 @@ function listingState_(listingId) {
        * variation really is unaccounted for.
        */
       under_review: !match && Boolean(String(r.tiktok_sku_id || '')),
+      /**
+       * Not returned, and we have no id to prove TikTok ever took it.
+       *
+       * Genuinely ambiguous: under review and never created look identical
+       * from here. It must not be reported as lost, because telling someone to
+       * retry a variation that is merely pending adds a second copy — and it
+       * must not be reported as fine either. Rows written before the id was
+       * kept all land here, which is why this state exists at all.
+       */
+      unaccounted: !match && !String(r.tiktok_sku_id || ''),
       stock_set: set,
       stock_available: available,
       // Never negative: someone raising stock in Seller Center would otherwise
@@ -628,12 +658,25 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
   var listingId = String(body.listing_id);
   var snapshot = ttGetProduct_(prefix, listingId);
 
-  // Idempotency from the snapshot rather than from the Sheet.
-  //
-  // TikTok's `idempotency_key` only exists on Create Product, so an append that
-  // times out on factory Wi-Fi has no server-side guard. It does not need one:
-  // the product itself records whether this identifier is already a variation,
-  // and that answer is authoritative.
+  /**
+   * Has this identifier already been added?
+   *
+   * TikTok's `idempotency_key` only exists on Create Product, so an append
+   * whose reply is lost has no server-side guard and the question has to be
+   * answered here. It used to be answered from the snapshot alone, on the
+   * belief that "the product itself records whether this identifier is already
+   * a variation, and that answer is authoritative".
+   *
+   * That belief was wrong, and in the same way that cost a variation: a SKU
+   * still under review is absent from Get Product. So a retry of a pending
+   * push found nothing, decided it was new, and tried to add a second copy —
+   * which the duplicate-value check then refused with a message about a
+   * repeated identifier. Safe, but a wasted push and a misleading reason.
+   *
+   * Both sources are consulted now. TikTok's read settles it when the
+   * variation is visible; our own row settles it when TikTok is not showing
+   * one it has already issued an id for.
+   */
   for (var i = 0; i < snapshot.skus.length; i++) {
     if (snapshot.skus[i].sellerSku === addition.identifier) {
       return {
@@ -644,6 +687,20 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl) {
         remaining: MAX_SKUS_PER_PRODUCT - snapshot.skus.length
       };
     }
+  }
+  var alreadyOurs = listSkus_(listingId).filter(function (r) {
+    return String(r.identifier) === addition.identifier &&
+      String(r.status) === 'pushed' &&
+      String(r.tiktok_sku_id || '');
+  })[0];
+  if (alreadyOurs) {
+    return {
+      mode: 'variation_added', deduplicated: true, audit: 'pending',
+      listing_id: listingId, product_id: snapshot.productId,
+      sku_id: String(alreadyOurs.tiktok_sku_id),
+      variations_now: snapshot.skus.length,
+      remaining: MAX_SKUS_PER_PRODUCT - snapshot.skus.length
+    };
   }
 
   /**

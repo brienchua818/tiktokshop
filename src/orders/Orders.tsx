@@ -232,7 +232,15 @@ export default function Orders({ shop }: { shop: Shop }) {
             ${summary.total_revenue.toFixed(2)}
           </span>
           <span className="flex-1" />
-          {syncedAt && <span className="text-xs text-faint">synced {syncedAt}</span>}
+          {/* When the last read failed, the numbers beside it are from an
+              earlier one. Saying so is the difference between figures and
+              figures somebody trusts: an error banner over live-looking totals
+              invites reading them as current. */}
+          {error ? (
+            <span className="text-xs text-warn">from the last good read</span>
+          ) : (
+            syncedAt && <span className="text-xs text-faint">synced {syncedAt}</span>
+          )}
         </div>
       )}
 

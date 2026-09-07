@@ -336,12 +336,26 @@ export const api = {
   }) => call<SyncResult>('syncOrders', { body, timeoutMs: 180_000 }),
 
   /** Per-listing totals inside a date and time window. */
+  /**
+   * 60 seconds, not the 25 second default.
+   *
+   * The backend reads the WHOLE Order Items tab and filters it in memory, so
+   * this read costs what the whole history costs, not what the chosen window
+   * costs. It gets slower every stream. Brien saw the 25 second deadline fire
+   * on 7 Sep, and that deadline was telling the truth: the request really had
+   * not answered. Giving up on it and starting again only makes the backend do
+   * the same expensive work twice.
+   *
+   * A wider deadline is the honest short-term answer, not the real one. The
+   * real one is to stop reading the entire tab per request.
+   */
   orderSummary: (shopId: string, w: DateWindow) =>
-    call<OrderSummary>('orderSummary', { body: { shop_id: shopId, ...w } }),
+    call<OrderSummary>('orderSummary', { body: { shop_id: shopId, ...w }, timeoutMs: 60_000 }),
 
   /** The variations behind one listing's total, in the same window. */
+  /** Same whole-tab read as the summary, so the same deadline. */
   listingOrders: (listingId: string, w: DateWindow) =>
-    call<ListingOrders>('listingOrders', { body: { listing_id: listingId, ...w } }),
+    call<ListingOrders>('listingOrders', { body: { listing_id: listingId, ...w }, timeoutMs: 60_000 }),
 
   /**
    * Build the purchase order for a window and file it in Drive.

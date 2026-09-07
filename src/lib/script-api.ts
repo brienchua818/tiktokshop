@@ -61,6 +61,28 @@ export class ScriptError extends Error {
     return this.status === 401
   }
 
+  /**
+   * The credential this device holds is genuinely dead, so signing out is right.
+   *
+   * Not the same question as `isAuthError`, and conflating the two is what
+   * signed people out mid-stream. A 401 has several causes and only some of
+   * them mean the person must sign in again:
+   *
+   *   SESSION_EXPIRED / SESSION_INVALID / TOKEN_REJECTED   really dead
+   *   NO_EMAIL / EMAIL_UNVERIFIED                          the account cannot be used
+   *   NO_TOKEN                                             the request lost its body
+   *   GOOGLE_UNREACHABLE                                   Google is down, not them
+   *   BACKEND_NOT_CONFIGURED / CLIENT_ID_MISMATCH          a deployment fault
+   *
+   * A timeout or a dropped connection is not a 401 at all and must never
+   * discard a credential: the session is fine, the request was not.
+   */
+  get isCredentialDead(): boolean {
+    if (this.status !== 401) return false
+    const dead = ['SESSION_EXPIRED', 'SESSION_INVALID', 'TOKEN_REJECTED', 'NO_EMAIL', 'EMAIL_UNVERIFIED', 'NO_CREDENTIAL_ON_DEVICE']
+    return dead.includes(String(this.code ?? ''))
+  }
+
   /** Signed in, but not yet approved to act — a different thing from not signed in. */
   get isPending(): boolean {
     return this.status === 403
@@ -249,8 +271,10 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   const session = options.anonymous ? null : hasLiveSession() ? getSessionToken() : null
   const token = options.anonymous ? undefined : getIdToken()
   if (!options.anonymous && !token && !session) {
-    throw new ScriptError(401, 'Sign in with Google to continue.')
+    throw new ScriptError(401, 'Sign in with Google to continue.', 'NO_CREDENTIAL_ON_DEVICE')
   }
+  /** Whether this call carried an identity, which decides what a 401 means. */
+  const sentCredential = Boolean(session || token)
 
   // Narrowed once, then passed down. The check above cannot narrow a
   // module-level binding for a different function, and re-checking it in each
@@ -264,7 +288,48 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   const timeoutMs = options.timeoutMs ?? READ_TIMEOUT_MS
 
   const posted = await send(base, action, payload, 'POST', timeoutMs)
-  if (posted.json) return unwrap<T>(posted.json)
+  if (posted.json) {
+    /**
+     * A 401 saying no credential arrived, when we know one was sent.
+     *
+     * Brien's Orders screen, 7 Sep: "Sign in with Google to continue.
+     * [NO_TOKEN]" over a summary that had loaded and a sync that had
+     * succeeded. He was signed in the whole time.
+     *
+     * NO_TOKEN is only reachable in the backend when the request carried
+     * neither a session token nor a Google token. This client refuses to send
+     * a request without one, and puts it in the POST body. So the body did not
+     * arrive: the same redirect quirk handled below, in the case where the
+     * browser downgrades the POST to a GET instead of failing it. The body
+     * goes with the method, and the credential with the body.
+     *
+     * The retry below already exists for that quirk; it was simply unreachable
+     * here, because a JSON reply returns before it and a 401 IS valid JSON. So
+     * the one situation the fallback was built for was the one it never saw.
+     *
+     * Retried once, with the credential in the query where a dropped body
+     * cannot take it. A URL-borne token is the cost, and it is the same cost
+     * the read fallback below has always paid; it is confined to a recovery
+     * that only happens after a request has already failed this way.
+     */
+    if (sentCredential && credentialMissing(posted.json)) {
+      if (fitsInAUrl(base, action, payload)) {
+        const retried = await send(base, action, payload, 'GET', timeoutMs)
+        if (retried.json && !credentialMissing(retried.json)) return unwrap<T>(retried.json)
+        if (!retried.json) throw pageInsteadOfData(retried)
+      }
+      // Both legs lost it. Say what happened rather than telling somebody who
+      // is signed in to sign in: that is the message Brien photographed, and
+      // acting on it would have thrown away a session that was working.
+      throw new ScriptError(
+        401,
+        `The "${action}" request reached the backend without its sign-in, twice. Your session is still good, so try again.`,
+        'CREDENTIAL_LOST_IN_TRANSIT',
+        posted.json,
+      )
+    }
+    return unwrap<T>(posted.json)
+  }
 
   // The POST came back as an HTML page rather than data.
   //
@@ -351,7 +416,14 @@ async function send(
   } catch (cause) {
     clearTimeout(timer)
     if (controller.signal.aborted) {
-      throw new ScriptError(0, `No reply after ${Math.round(timeoutMs / 1000)}s — the request may still have gone through`, 'TIMEOUT')
+      // Names the action, because a photographed banner is the only diagnosis
+      // anybody gets mid-broadcast, and "no reply after 25s" on its own does
+      // not say which of a dozen calls gave up.
+      throw new ScriptError(
+        0,
+        `"${action}" gave no reply after ${Math.round(timeoutMs / 1000)}s. It may still have gone through, so check before repeating it.`,
+        'TIMEOUT',
+      )
     }
     throw new ScriptError(0, `No connection: ${(cause as Error).message}`)
   }
@@ -417,6 +489,18 @@ function pageInsteadOfData(attempt: Attempt): ScriptError {
 }
 
 /** Quirk: the real status is in the body, not the HTTP response. */
+/**
+ * A refusal that means the credential never reached the backend.
+ *
+ * Distinct from "your session has ended", which is the same HTTP status and a
+ * completely different situation: one is retryable and invisible, the other
+ * needs the person to sign in. Only the backend's own code can tell them
+ * apart, which is why every refusal carries one.
+ */
+function credentialMissing(payload: Record<string, unknown>): boolean {
+  return Number(payload._status ?? 200) === 401 && String(payload.code ?? '') === 'NO_TOKEN'
+}
+
 function unwrap<T>(payload: Record<string, unknown>): T {
   const status = Number(payload._status ?? 200)
   if (status >= 400) {

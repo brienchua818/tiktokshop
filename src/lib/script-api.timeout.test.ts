@@ -86,3 +86,97 @@ describe('backend session token', () => {
     mod.setSessionToken(null)
   })
 })
+
+/**
+ * A 401 is not one thing, and treating it as one signed people out mid-stream.
+ *
+ * Brien's Orders screen, 7 Sep: "Sign in with Google to continue. [NO_TOKEN]"
+ * over a summary that had loaded and a sync that had just succeeded. He was
+ * signed in the whole time. NO_TOKEN is only reachable when the request
+ * carried no credential at all, and this client refuses to send one without
+ * it, so the body was lost in the redirect Apps Script answers with. The
+ * retry built for exactly that was unreachable, because a JSON reply returns
+ * before it and a 401 is valid JSON.
+ */
+describe('a 401 that means the request lost its credential', () => {
+  const live = () => 'header.' + btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })) + '.sig'
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_APPS_SCRIPT_URL', 'https://script.google.com/macros/s/test/exec')
+    vi.resetModules()
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('retries as a GET carrying the credential, and succeeds', async () => {
+    const seen: { method: string; url: string }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        seen.push({ method: String(init.method), url })
+        // The POST loses its body in the redirect, exactly as observed.
+        if (init.method === 'POST') {
+          return new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 })
+        }
+        return new Response(JSON.stringify({ _status: 200, total_orders: 17 }), { status: 200 })
+      }),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken(live())
+
+    const out = await mod.call<{ total_orders: number }>('orderSummary', { body: { shop_id: 'HZ' } })
+    expect(out.total_orders).toBe(17)
+    expect(seen.map((s) => s.method)).toEqual(['POST', 'GET'])
+    // The credential must actually be on the retry, or it is the same request.
+    expect(seen[1]!.url).toContain('id_token=')
+  })
+
+  it('when both legs lose it, does not tell a signed-in person to sign in', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 }),
+      ),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken(live())
+
+    const err = await mod.call('orderSummary', { body: {} }).then(() => null, (e: unknown) => e) as InstanceType<typeof mod.ScriptError>
+    expect(err.code).toBe('CREDENTIAL_LOST_IN_TRANSIT')
+    expect(err.message).not.toMatch(/Sign in with Google/)
+    expect(err.message).toMatch(/orderSummary/)
+    expect(err.message).toMatch(/still good/)
+    // And it must NOT be read as a reason to throw the session away.
+    expect(err.isCredentialDead).toBe(false)
+  })
+
+  it('a genuinely dead session is still a reason to sign out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ _status: 401, error: 'Your sign-in has expired.', code: 'SESSION_EXPIRED' }), { status: 200 }),
+      ),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken(live())
+    const err = await mod.call('orderSummary', { body: {} }).then(() => null, (e: unknown) => e) as InstanceType<typeof mod.ScriptError>
+    expect(err.code).toBe('SESSION_EXPIRED')
+    expect(err.isCredentialDead).toBe(true)
+  })
+
+  it('a timeout is never a reason to sign out', async () => {
+    // The bug behind "the app times out after a while and forces us to log in
+    // again": one slow request on factory wifi discarded a good 14-hour
+    // session, because the bootstrap treated every failure as a dead session.
+    const mod = await import('./script-api')
+    const timeout = new mod.ScriptError(0, 'Timed out', 'TIMEOUT')
+    expect(timeout.isCredentialDead).toBe(false)
+    expect(timeout.isAuthError).toBe(false)
+    const unreachable = new mod.ScriptError(401, 'Could not reach Google', 'GOOGLE_UNREACHABLE')
+    expect(unreachable.isCredentialDead).toBe(false)
+    const misconfigured = new mod.ScriptError(401, 'no client id', 'BACKEND_NOT_CONFIGURED')
+    expect(misconfigured.isCredentialDead).toBe(false)
+  })
+})

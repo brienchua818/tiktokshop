@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { api } from './lib/api'
+import { ApiError, api } from './lib/api'
 import { hasCredential, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
@@ -58,11 +58,26 @@ export default function App() {
     api
       .me()
       .then((me) => setUser(me.approved ? me : null))
-      .catch(() => {
-        // Expired or revoked. Drop both, rather than retrying with credentials
-        // that will fail every call from here on.
-        setIdToken(null)
-        setSessionToken(null)
+      .catch((e: unknown) => {
+        /**
+         * Only sign out when the credential is actually dead.
+         *
+         * This used to drop both credentials on ANY failure, which made a
+         * slow morning indistinguishable from a revoked account: one request
+         * exceeding its deadline on factory wifi, and the whole team was back
+         * at the sign-in screen with a good 14-hour session thrown away.
+         * That is Brien's "the app seems to time out after being used for a
+         * while, forcing us to log in again".
+         *
+         * A timeout, a dropped connection or a backend that is merely
+         * misconfigured leaves the session intact, so it is kept and the app
+         * asks again on the next action. `isCredentialDead` is the narrow
+         * question, and only the backend's own code can answer it.
+         */
+        if (e instanceof ApiError && e.isCredentialDead) {
+          setIdToken(null)
+          setSessionToken(null)
+        }
         setUser(null)
       })
       .finally(() => setCheckingSession(false))

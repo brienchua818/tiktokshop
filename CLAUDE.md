@@ -147,3 +147,11 @@ then fix it back. A check that has never gone red is not known to work.
 Point form, emojis fine, the answer first. State what was verified and how;
 state what was not. He should not be the regression suite: if he reports one
 instance, he expects the class fixed.
+
+**A caveat does not expire.** The way this rule actually gets broken is not by
+inventing something — it is by restating a conclusion from an earlier note and
+dropping the "unverified" that was attached to it. The claim then reads as
+settled because it has been repeated, not because anything was checked. So
+before repeating a conclusion, go back to where it was written down and carry
+its caveat with it, or re-verify it. Summarising is where confidence gets
+manufactured.

@@ -115,7 +115,8 @@ ${src}
     photoCandidates_, PHOTO_FETCH_PX, identifierFromVariation_, describeResolution_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME,
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
-    skuImageUrl_
+    skuImageUrl_,
+    groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES
   };
 `
 
@@ -1394,6 +1395,89 @@ check('the deprecated 202306 url_list spelling is not read anywhere', () => {
     })
   }
   eq(offenders.join(', '), '')
+})
+
+/**
+ * The sold count a factory is paid against.
+ *
+ * It used to be `stock_we_set - stock_TikTok_has`, which is wrong the moment
+ * anybody changes stock: topping a variation up by five made three genuine
+ * sales read as zero. Now it is counted from order line items, which are
+ * append-only and cannot be moved by any stock write.
+ */
+const line = (over) => Object.assign({
+  order_id: 'o1', listing_id: 'L', shop_id: 'HZ', sku_id: '9001', seller_sku: 'L5',
+  variation: 'L5 Basket', sku_image: '', quantity: 1, sale_price: '10.00',
+  status: 'AWAITING_SHIPMENT', created_epoch: 1000,
+}, over)
+
+check('one line item is one unit, so three of a SKU is three', () => {
+  // A TikTok order line carries no quantity field, so buying three produces
+  // three lines and the sync records quantity 1 on each.
+  const g = gs.groupVariationSales_([line({}), line({ order_id: 'o2' }), line({ order_id: 'o3' })])
+  eq(g['9001'].units, 3)
+  eq(g['9001'].revenue, 30)
+})
+
+check('cancelled and unpaid are split out, never netted off the sold count', () => {
+  const g = gs.groupVariationSales_([
+    line({}),
+    line({ order_id: 'o2', status: 'CANCELLED' }),
+    line({ order_id: 'o3', status: 'UNPAID' }),
+  ])
+  eq(g['9001'].units, 1)
+  eq(g['9001'].unsold_units, 2)
+  // Revenue counts only what was actually sold.
+  eq(g['9001'].revenue, 10)
+})
+
+check('two variations are kept apart by sku_id even when the name matches', () => {
+  // Keying on the name would merge them into one row of a purchase order,
+  // which is the expensive version of this mistake.
+  const g = gs.groupVariationSales_([
+    line({ sku_id: '9001', seller_sku: 'L5' }),
+    line({ sku_id: '9002', seller_sku: 'L6', order_id: 'o2' }),
+  ])
+  eq(Object.keys(g).length, 2)
+  eq(g['9001'].units, 1)
+  eq(g['9002'].units, 1)
+})
+
+check('a Seller Center line with no seller_sku is still counted, under its id', () => {
+  const g = gs.groupVariationSales_([line({ seller_sku: '', sku_id: '9003' })])
+  eq(g['9003'].units, 1)
+  eq(g['9003'].seller_sku, '')
+})
+
+check('the index can be matched by TikTok id or by identifier', () => {
+  const idx = gs.salesIndex_(gs.groupVariationSales_([
+    line({}),
+    line({ order_id: 'o2', status: 'CANCELLED' }),
+  ]))
+  // A variation this app listed matches either way.
+  eq(gs.salesFor_(idx, '9001', 'L5').units, 1)
+  eq(gs.salesFor_(idx, '', 'L5').units, 1)
+  eq(gs.salesFor_(idx, '9001', '').unsold, 1)
+  // The id wins, because it is the only key guaranteed unique.
+  eq(gs.salesFor_(idx, '9001', 'WRONG').units, 1)
+})
+
+check('no orders for a variation reads as unknown, not as zero sold', () => {
+  // The screen renders null as "no sold figure" and 0 as "none sold". A
+  // listing whose orders have never been synced must not claim nothing sold.
+  const idx = gs.salesIndex_(gs.groupVariationSales_([]))
+  eq(gs.salesFor_(idx, '9001', 'L5'), null)
+  eq(gs.salesFor_(null, '9001', 'L5'), null)
+  eq(gs.salesFor_(idx, '', ''), null)
+})
+
+check('a stock change cannot move the sold count, which was the whole point', () => {
+  // The old arithmetic: stock_set 10, TikTok says 15 after a top-up, so
+  // 10 - 15 = -5, clamped to 0. Three real sales reported as none.
+  eq(Math.max(0, 10 - 15), 0)
+  // The new one reads the same three lines regardless of any stock level.
+  const lines = [line({}), line({ order_id: 'o2' }), line({ order_id: 'o3' })]
+  eq(gs.salesIndex_(gs.groupVariationSales_(lines))['id:9001'].units, 3)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -312,6 +312,26 @@ function listingState_(listingId) {
   if (updates.length) markSkus_(updates);
   if (updates.length) rows = listSkus_(listingId);
 
+  /**
+   * Units sold per variation, from the orders already synced for this listing.
+   *
+   * Cached for a minute, because reading it costs a full pass over the Order
+   * Items tab and this screen refreshes throughout a broadcast. A sold count
+   * up to sixty seconds old is indistinguishable from a live one here: orders
+   * land minutes after a SKU is called.
+   *
+   * Failure is not fatal. An empty map means every row reports `sold: null`,
+   * which the screen already renders as "no sold figure" rather than zero —
+   * the listing screen's job is to say whether a push landed, and that must
+   * not depend on the orders tab being readable.
+   */
+  var sales = {};
+  try {
+    sales = variationSalesCached_(listingId) || {};
+  } catch (e) {
+    warn_('TS-ORD-22', 'Could not read sales for ' + listingId + ': ' + e);
+  }
+
   // Keyed by seller_sku, which is the identifier the app assigns and the only
   // field both sides agree on — a TikTok sku id is not known until after the
   // push, and a row pushed from another device would not have it locally.
@@ -326,6 +346,7 @@ function listingState_(listingId) {
     var match = bySellerSku[String(r.identifier)];
     var set = Number(r.stock || 0);
     var available = match ? Number(match.quantity || 0) : null;
+    var sale = salesFor_(sales, (match && match.id) || r.tiktok_sku_id, r.identifier);
     return {
       identifier: String(r.identifier || ''),
       variant: String(r.variant || ''),
@@ -368,9 +389,24 @@ function listingState_(listingId) {
       removed: String(r.status) === 'removed',
       stock_set: set,
       stock_available: available,
-      // Never negative: someone raising stock in Seller Center would otherwise
-      // read as negative sales, which is worse than showing nothing.
-      sold: available === null ? null : Math.max(0, set - available)
+      /**
+       * Sold, from the order line items. Not from stock arithmetic.
+       *
+       * This was `Math.max(0, set - available)`, with a comment explaining
+       * that the clamp existed because raising stock in Seller Center made it
+       * read as negative sales. The clamp was treating the symptom: the whole
+       * derivation is wrong the moment anybody changes stock, which is exactly
+       * what Brien asked to be able to do. Topping a variation up by five made
+       * three genuine sales read as zero.
+       *
+       * Order lines are append-only, so no stock write by anybody can move
+       * this number. `null` means orders have not been synced for this listing
+       * yet, which is a different thing from zero and must stay
+       * distinguishable.
+       */
+      sold: sale ? sale.units : null,
+      /** Ordered then cancelled or unpaid. Shown separately, never netted. */
+      cancelled: sale ? sale.unsold : null
     };
   });
 
@@ -381,6 +417,7 @@ function listingState_(listingId) {
   rows.forEach(function (r) { oursByIdentifier[String(r.identifier)] = true; });
   live.skus.forEach(function (s) {
     if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
+    var extSale = salesFor_(sales, s.id, s.sellerSku);
     variants.push({
       identifier: String(s.sellerSku || ''),
       variant: String(s.valueName || ''),
@@ -395,7 +432,12 @@ function listingState_(listingId) {
       under_review: false, unaccounted: false, removed: false,
       stock_set: null,
       stock_available: Number(s.quantity || 0),
-      sold: null
+      // A variation added in Seller Center still sells, and its line items
+      // carry TikTok's sku id, so it can be matched and counted like any
+      // other. Previously it was hardcoded to null purely because the stock
+      // arithmetic had no `set` figure to subtract from.
+      sold: extSale ? extSale.units : null,
+      cancelled: extSale ? extSale.unsold : null
     });
   });
 

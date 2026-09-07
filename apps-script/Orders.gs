@@ -478,14 +478,30 @@ function describeResolution_(c) {
  * supply — a list of two hundred order rows is not a purchase order, and
  * "A7 × 14" is.
  */
-function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
-  var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
-  var toEpoch = sgtEndEpoch_(toDate, toTime);
-
+/**
+ * Units sold per variation of one listing, from the order line items.
+ *
+ * Extracted so the live listing screen can show the same number the purchase
+ * order does. It was inline in `listingOrders_`, which meant the export had a
+ * trustworthy sold count and the screen somebody watches during a stream had
+ * an estimate derived from stock levels — an estimate that goes DOWN when
+ * stock is topped up. See the vault note on variation stock.
+ *
+ * One line item is one unit: a TikTok order line carries no quantity field, so
+ * three of a SKU arrive as three lines, and the sync records `quantity: 1` per
+ * row for that reason.
+ *
+ * `toEpoch` may be null for "everything ever", which is what the listing
+ * screen wants: a variation's lifetime sales, not this window's.
+ */
+function variationSales_(listingId, fromEpoch, toEpoch) {
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (String(r.listing_id) !== String(listingId)) return false;
+    if (fromEpoch === null && toEpoch === null) return true;
     var t = Number(r.created_epoch || 0);
-    return t >= fromEpoch && t < toEpoch;
+    if (fromEpoch !== null && t < fromEpoch) return false;
+    if (toEpoch !== null && t >= toEpoch) return false;
+    return true;
   });
 
   // Rows synced before seller_sku was being filled at sync time get the same
@@ -495,6 +511,19 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     if (shopId) resolveSellerSkus_(shopId, items);
   }
 
+  return { byVariation: groupVariationSales_(items), items: items };
+}
+
+/**
+ * Line items to per-variation totals. Pure, so it can be asserted.
+ *
+ * The one number in this app that a factory is paid against, so it is a
+ * function with tests rather than a loop inside a Sheet read. It was the
+ * latter, which is part of why the listing screen ended up with a different
+ * and wrong sold figure: the correct arithmetic was not reachable from
+ * anywhere else.
+ */
+function groupVariationSales_(items) {
   var byVariation = {};
   items.forEach(function (r) {
     // sku_id first: seller_sku is empty on anything this app did not list,
@@ -525,7 +554,80 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
       g.revenue += Number(r.sale_price || 0) * qty;
     }
   });
+  return byVariation;
+}
 
+/** The compact per-variation index the listing screen matches against. */
+function salesIndex_(byVariation) {
+  var compact = {};
+  Object.keys(byVariation).forEach(function (k) {
+    var g = byVariation[k];
+    // Indexed by both keys the listing screen can match on. A variation this
+    // app listed has a seller_sku; one added in Seller Center has only an id.
+    if (g.sku_id) compact['id:' + g.sku_id] = { units: g.units, unsold: g.unsold_units };
+    if (g.seller_sku) compact['sku:' + g.seller_sku] = { units: g.units, unsold: g.unsold_units };
+  });
+  return compact;
+}
+
+/**
+ * Lifetime sold and cancelled units per variation, cheap enough for the queue.
+ *
+ * `variationSales_` reads the WHOLE Order Items tab and filters in memory, so
+ * it costs what the entire order history costs. That is already why the orders
+ * summary needed its deadline raised from 25 to 60 seconds. The listing screen
+ * refreshes repeatedly during a broadcast and has a 40 second budget, so it
+ * cannot pay that price on every tap.
+ *
+ * Cached for a minute, keyed per listing. During a stream a sold count that is
+ * up to sixty seconds old is indistinguishable from a live one: orders arrive
+ * minutes after a SKU is called, and nothing anybody does on this screen
+ * depends on the difference. A stock write, when that ships, will clear the
+ * key rather than wait for it to lapse.
+ *
+ * Only the two counts are cached, not the rows, so the payload stays far
+ * inside the 100 KB per-key limit even for a 200-SKU stream.
+ */
+var SALES_CACHE_TTL_S = 60;
+
+function variationSalesCached_(listingId) {
+  var key = 'sales:' + String(listingId);
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch (e) {
+    // A cache that is unavailable must not stop the screen loading; it only
+    // means paying full price for this read.
+    warn_('TS-ORD-20', 'Sales cache unavailable: ' + e);
+  }
+
+  var compact = salesIndex_(variationSales_(listingId, null, null).byVariation);
+
+  try {
+    if (cache) cache.put(key, JSON.stringify(compact), SALES_CACHE_TTL_S);
+  } catch (e) {
+    warn_('TS-ORD-21', 'Could not cache sales for ' + listingId + ': ' + e);
+  }
+  return compact;
+}
+
+/** Sold and cancelled for one variation, by TikTok id then by identifier. */
+function salesFor_(sales, tiktokSkuId, identifier) {
+  if (!sales) return null;
+  return sales['id:' + String(tiktokSkuId || '')] ||
+         sales['sku:' + String(identifier || '')] ||
+         null;
+}
+
+function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
+  var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
+  var toEpoch = sgtEndEpoch_(toDate, toTime);
+
+  var grouped = variationSales_(listingId, fromEpoch, toEpoch);
+  var items = grouped.items;
+  var byVariation = grouped.byVariation;
   var rows = Object.keys(byVariation).map(function (k) {
     var g = byVariation[k];
     g.revenue = Math.round(g.revenue * 100) / 100;

@@ -747,6 +747,18 @@ function StockLine({ v }: { v: LiveVariant }) {
       </p>
     )
   }
+  /**
+   * Sold now comes from order line items, so it is a count rather than a
+   * subtraction and cannot be moved by a stock change. Cancelled is shown
+   * beside it and never netted off: a single silently-net number is the one
+   * that changes after the fact and cannot be explained to a factory.
+   */
+  const sold = v.sold !== null && v.sold > 0 ? <span className="text-ok/80"> · {v.sold} sold</span> : null
+  const cancelled =
+    v.cancelled !== null && v.cancelled > 0 ? (
+      <span className="text-warn/80"> · {v.cancelled} cancelled</span>
+    ) : null
+
   // Nothing left. Said in red and in words, because "0 left of 2" is the same
   // shape as every other stock line and gets read as a number rather than as
   // the one state that needs acting on mid-broadcast.
@@ -757,15 +769,15 @@ function StockLine({ v }: { v: LiveVariant }) {
         {v.sold !== null && v.sold > 0 && (
           <span className="text-faint"> · all {v.sold} sold</span>
         )}
+        {cancelled}
       </p>
     )
   }
   return (
     <p className="text-xs text-faint mt-0.5">
       <span className="text-fg2">{v.stock_available}</span> left of {v.stock_set}
-      {v.sold !== null && v.sold > 0 && (
-        <span className="text-ok/80"> · {v.sold} sold</span>
-      )}
+      {sold}
+      {cancelled}
     </p>
   )
 }

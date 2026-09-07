@@ -65,7 +65,7 @@ const variant = (over = {}) => ({
   identifier: 'A1', variant: 'A1 Ceramic Serving Bowl', price: '18.90', status: 'pushed',
   external: false, tiktok_sku_id: '9001', image_url: '', created_at: '2026-09-07T01:00:00Z',
   created_by: 'Brien Chua', on_tiktok: true, under_review: false, unaccounted: false,
-  removed: false, stock_set: 50, stock_available: 48, sold: 2, ...over,
+  removed: false, stock_set: 50, stock_available: 48, sold: 2, cancelled: 0, ...over,
 })
 
 /** The backend, as far as the app can tell. Keyed by `?action=`. */

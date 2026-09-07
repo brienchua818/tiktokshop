@@ -21,6 +21,7 @@ function variant(over: Partial<LiveVariant>): LiveVariant {
     stock_set: 1,
     stock_available: null,
     sold: null,
+    cancelled: null,
     ...over,
   }
 }

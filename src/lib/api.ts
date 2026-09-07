@@ -188,7 +188,15 @@ export interface LiveVariant {
   /** Null when TikTok has no such variation. */
   stock_available: number | null
   /** Derived as set − available, not a figure TikTok reports. */
+  /**
+   * Units sold, counted from order line items rather than derived from stock.
+   *
+   * `null` means orders have not been synced for this listing yet, which is a
+   * different thing from zero and stays distinguishable on screen.
+   */
   sold: number | null
+  /** Ordered then cancelled or unpaid. Shown separately, never netted off. */
+  cancelled: number | null
 }
 
 /** A listing's live review state and stock, read back from TikTok. */

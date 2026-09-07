@@ -6,7 +6,7 @@
       "y": 0,
       "w": 390,
       "h": 844,
-      "title": "Now — Live Listing (your screenshot)"
+      "title": "Now — Live Listing (7 Sep screenshot)"
     },
     {
       "file": "Main.dc.html",
@@ -25,20 +25,28 @@
       "title": "Proposed — Live Listing · Day"
     },
     {
-      "file": "More.dc.html",
-      "x": 1560,
+      "file": "Timeout.dc.html",
+      "x": 1480,
       "y": 0,
       "w": 390,
       "h": 844,
-      "title": "Proposed — More tab (theme switch, Users, Sign out) · Dark"
+      "title": "Proposed — when a check times out (no more freezing)"
     },
     {
-      "file": "MoreDay.dc.html",
+      "file": "More.dc.html",
       "x": 2040,
       "y": 0,
       "w": 390,
       "h": 844,
-      "title": "Proposed — More tab · Day"
+      "title": "Proposed — More: theme, Users, session · Dark"
+    },
+    {
+      "file": "MoreDay.dc.html",
+      "x": 2520,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "title": "Proposed — More · Day"
     },
     {
       "file": "NowOrders.dc.html",
@@ -46,7 +54,7 @@
       "y": 1000,
       "w": 390,
       "h": 844,
-      "title": "Now — Orders (your screenshot)"
+      "title": "Now — Orders (screenshot)"
     },
     {
       "file": "OrdersPhone.dc.html",
@@ -66,7 +74,7 @@
     },
     {
       "file": "OrdersRange.dc.html",
-      "x": 1560,
+      "x": 1480,
       "y": 1000,
       "w": 390,
       "h": 844,
@@ -93,21 +101,21 @@
     {
       "id": "audit-now",
       "x": 0,
-      "y": -420,
+      "y": -460,
       "w": 400,
       "text": "WHERE THE HEIGHT GOES TODAY (iPhone 15, 844 px)\nHeader, 2 rows: 96\nListing bar: 56\nIdentifier card: 130\nNew SKU card: ~420\nBulk add card: 70\nSKU header + review banner: 100\n= ~870 px before the first SKU row.\nWhile adding a SKU, the queue is never on screen."
     },
     {
       "id": "audit-after",
       "x": 520,
-      "y": -420,
+      "y": -460,
       "w": 400,
       "text": "PROPOSED\nTop strip: 44 (shop + waiting count)\nListing bar: 44 (title · 10/100 · Live pill — replaces the review banner)\nNew SKU: ~292 (identifier moves into the card header; prefix help → ⓘ; value-name preview sits under the field instead of its own box; Bulk add is a link)\nQueue header: 44\n= first SKU row at ~430 px. 4–5 SKUs visible while adding.\nSave and the tabs sit at the bottom, under the thumb."
     },
     {
       "id": "right-hand",
       "x": 1000,
-      "y": -420,
+      "y": -460,
       "w": 400,
       "text": "RIGHT-HAND RULE\nEverything tapped repeatedly lives in the bottom-right 60% of the screen: Save, tabs, Camera, Voice, Check TikTok (↻), Sync, Export.\nTop-left holds only things you read (shop, listing title, counts).\nDelete = swipe a SKU row left; the × per row goes, saving 44 px of width on every row.\nSign out moves to the More tab."
     },
@@ -120,8 +128,8 @@
     },
     {
       "id": "kept",
-      "x": 1560,
-      "y": -420,
+      "x": 2040,
+      "y": -460,
       "w": 400,
       "text": "NOTHING REMOVED, ONLY MOVED\nBulk add → link in the SKU header\nPrefix change → tap the identifier\nCheck TikTok → ↻ on the queue header\nReview state → Live / Reviewing pill in the listing bar\nExternal variants → one expandable line under the queue\nExplanatory text → ⓘ on each header\nNumbers shown are today's real data. Static mockups, nothing changed in the app until you approve."
     },
@@ -134,10 +142,17 @@
     },
     {
       "id": "theme",
-      "x": 2040,
-      "y": -420,
+      "x": 2520,
+      "y": -460,
       "w": 400,
       "text": "DAY AND DARK\nThree settings under More → Appearance: Auto (follows the phone), Day, Dark. Remembered per device.\nDay is a warm off-white (#f4f4f2) with the same roles: pink for the primary action, amber for identifiers, green for live — each darkened just enough to keep 4.5:1 text contrast on white.\nOne set of components, two palettes, so nothing can drift between modes.\nDefault stays Dark (what the team knows); Auto is one tap."
+    },
+    {
+      "id": "merged",
+      "x": 1480,
+      "y": -460,
+      "w": 400,
+      "text": "UPDATED 7 SEP — WHAT SHIPPED\nThe list is no longer this phone's drafts. It is everything on the listing, in creation order: mine, Judy's from the other phone (TikTok's own picture, \"listed by Judy\"), and Seller Center rows inline instead of a footnote. Header counts the listing (12), not one device.\n\nEvery call now has a deadline. When the check does not answer in 40s the header says so, keeps the last good time, and offers Retry — the screen never freezes again.\n\nA push that times out reads \"may already be listed\" and asks the backend before calling it failed."
     }
   ],
   "launch": {

@@ -151,26 +151,54 @@ def skuform(t, photo_px=112):
   </div>
 </div>'''
 
+# One row per variation, with WHERE IT CAME FROM, because the shipped queue is
+# now the union of this phone's drafts and everything the backend and TikTok
+# know about the listing. Source decides the thumbnail and the caption:
+#   mine   — this phone made it, photo from this device
+#   other  — listed from another phone, TikTok's own picture, named lister
+#   sc     — added in Seller Center, no identifier of ours
 ROWS = [
-  ('B9','Off White Wireless Mouse','$999','1 of 1'),
-  ('B8','Black Laptop with Numeric Keypad','$8888','1 of 1'),
-  ('B7','Double Wall Rounded Glass Tumbler','$999','1 of 1'),
-  ('B6','Silver Magnetic Charging Stand','$9999','1 of 1'),
-  ('A1','Orange Label Clear Glass Bottle','$9.90','1 of 1'),
-  ('B4','No Smoking Or Vaping Wall Sign','$999','1 of 1'),
-  ('B3','Silver Bezel Turbo Boost Gauge','$22.99','131 of 131'),
-  ('B2','Clear Dimpled Base Tumbler','$8.88','2 of 2'),
+  ('B9','Off White Wireless Mouse','$999','1 of 1','Live','mine'),
+  ('L11','Chrome 3 Tier Kitchen Trolley','$83','0 of 1 · 1 sold','Live','other'),
+  ('B8','Black Laptop with Numeric Keypad','$8888','1 of 1','Live','mine'),
+  ('L12','Ceramic Cat Treat Jar','$65','1 of 1','Reviewing','other'),
+  ('','Diatomite Absorbent Mat','$88','1 in stock','Live','sc'),
+  ('B7','Double Wall Rounded Glass Tumbler','$999','1 of 1','Live','mine'),
+  ('B6','Silver Magnetic Charging Stand','$9999','1 of 1','Live','mine'),
+  ('A1','Orange Label Clear Glass Bottle','$9.90','1 of 1','Live','mine'),
 ]
-def skurow(t, idf, name, price, stock, retry=False):
-    st = (f'<span style="font-size: 12px; font-weight: 600; color: {t["warn"]};">Retrying</span>' if retry
-          else f'<span style="font-size: 12px; font-weight: 600; color: {t["live"]};">Live</span>')
-    sub = (f'<span style="font-size: 12px; color: {t["warn"]};">No connection · attempt 1 of 6, will retry</span>' if retry
-           else f'<span style="font-size: 12px; color: {t["faint"]};">{stock} · {price}</span>')
+
+def thumb(t, source):
+    if source == 'sc':
+        return (f'<div style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 6px; '
+                f'background: {t["sunken"]}; border: 1px solid {t["line2"]}; flex-shrink: 0;">'
+                f'<span style="font-size: 10px; font-weight: 600; color: {t["ghost"]};">SC</span></div>')
+    return f'<div style="width: 40px; height: 40px; border-radius: 6px; background: {t["thumb"]}; flex-shrink: 0;"></div>'
+
+def skurow(t, idf, name, price, stock, status, source):
+    colour = {'Live': t['live'], 'Reviewing': t['warn'], 'Retrying': t['warn'], 'Removed': t['faint']}[status]
+    st = f'<span style="font-size: 12px; font-weight: 600; color: {colour};">{status}</span>'
+    if status == 'Retrying':
+        text, col = 'No reply after 120s · may already be listed', t['warn']
+    elif status == 'Reviewing':
+        text, col = 'listed by Judy · under review', t['faint']
+    elif source == 'other':
+        text, col = f'listed by Judy · {stock} · {price}', t['faint']
+    elif source == 'sc':
+        text, col = f'added outside this app · {stock}', t['faint']
+    else:
+        text, col = f'{stock} · {price}', t['faint']
+    # One line, always: the row is a fixed 56 px and a wrapped caption shunts
+    # every SKU below it down the screen.
+    sub = (f'<span style="font-size: 12px; color: {col}; white-space: nowrap; overflow: hidden; '
+           f'text-overflow: ellipsis;">{text}</span>')
+    label = (f'<span class="mono" style="font-size: 13px; font-weight: 600; color: {t["ident"]}; flex-shrink: 0;">{idf}</span>'
+             if idf else f'<span class="mono" style="font-size: 13px; color: {t["ghost"]}; flex-shrink: 0;">—</span>')
     return f'''<div style="display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 12px; border-bottom: 1px solid {t['hair']};">
-  <div style="width: 40px; height: 40px; border-radius: 6px; background: {t['thumb']}; flex-shrink: 0;"></div>
+  {thumb(t, source)}
   <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex-grow: 1;">
     <div style="display: flex; align-items: baseline; gap: 8px; min-width: 0;">
-      <span class="mono" style="font-size: 13px; font-weight: 600; color: {t['ident']}; flex-shrink: 0;">{idf}</span>
+      {label}
       <span style="font-size: 13px; color: {t['text2']}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{name}</span>
     </div>
     {sub}
@@ -178,21 +206,30 @@ def skurow(t, idf, name, price, stock, retry=False):
   {st}
 </div>'''
 
-def queue(t, n_rows, margin='0 12px'):
-    rows = skurow(t, 'B10','Off White Wireless Mouse','$999','1 of 1', retry=True) + ''.join(skurow(t, *r) for r in ROWS[:n_rows])
+def queue(t, n_rows, margin='0 12px', stale=False):
+    """The SKU list. `stale` shows what a check that timed out looks like."""
+    rows = skurow(t, 'B10','Off White Wireless Mouse','$999','1 of 1','Retrying','mine') + ''.join(
+        skurow(t, *r) for r in ROWS[:n_rows])
+    label = 'ON LISTING' if stale else 'ON THIS LISTING'
+    if stale:
+        head = (f'<span style="font-size: 12px; color: {t["warn"]}; white-space: nowrap;">no reply · showing 12:41</span>')
+        button = (f'<div style="display: flex; align-items: center; justify-content: center; gap: 4px; height: 36px; padding: 0 10px; '
+                  f'border-radius: 8px; border: 1px solid {t["warn"]};">{icon("refresh", 16, t["warn"])}'
+                  f'<span style="font-size: 12px; font-weight: 600; color: {t["warn"]};">Retry</span></div>')
+    else:
+        head = f'<span style="font-size: 12px; color: {t["faint"]}; white-space: nowrap;">3 phones · checked 12:56</span>'
+        button = f'<div style="display: flex; align-items: center; justify-content: center; width: 44px; height: 40px; border-radius: 8px;">{icon("refresh", 20, t["text2"])}</div>'
     return f'''
 <div style="display: flex; flex-direction: column; margin: {margin}; border-radius: 12px; background: {t['raised']}; border: 1px solid {t['line2']}; overflow: hidden; flex-grow: 1; min-height: 0;">
   <div style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 4px 0 12px; border-bottom: 1px solid {t['line2']}; flex-shrink: 0;">
-    <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: {t['muted']};">SKUS</span>
-    <span style="font-size: 12px; color: {t['faint']};">9 of 10 sent · checked 12:56</span>
+    <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: {t['muted']}; white-space: nowrap;">{label}</span>
+    <span style="font-size: 12px; color: {t['faint']};">12</span>
     <div style="flex-grow: 1;"></div>
-    <div style="display: flex; align-items: center; justify-content: center; width: 44px; height: 40px; border-radius: 8px;">{icon('refresh', 20, t['text2'])}</div>
+    {head}
+    {button}
   </div>
   <div style="display: flex; flex-direction: column; overflow: hidden; flex-grow: 1; min-height: 0;">
     {rows}
-    <div style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px;">
-      <span style="font-size: 12px; color: {t['faint']};">+1 variation added outside this app</span>{icon('chevr', 14, t['ghost'])}
-    </div>
   </div>
 </div>'''
 
@@ -209,8 +246,8 @@ def phone(t, *parts):
 
 SP8 = '<div style="height: 8px; flex-shrink: 0;"></div>'
 
-def listing_phone(t):
-    return phone(t, topstrip(t), listingbar(t), skuform(t), SP8, queue(t, 5), SP8, savebar(t), tabbar(t, 'listing'))
+def listing_phone(t, stale=False):
+    return phone(t, topstrip(t), listingbar(t), skuform(t), SP8, queue(t, 5, stale=stale), SP8, savebar(t), tabbar(t, 'listing'))
 
 LISTINGS = [
   ('HOUZE x Table Matters - I12 Clearance Sale','43 orders','50 units','$2,114.75'),
@@ -311,7 +348,7 @@ def more_phone(t, mode='dark'):
         return f'''<div style="display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 12px; border-bottom: 1px solid {t['hair']};">
   {icon(ic, 20, t['muted'])}
   <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex-grow: 1;">
-    <span style="font-size: 14px; color: {t['text']};">{label}</span><span style="font-size: 12px; color: {t['faint']};">{sub}</span>
+    <span style="font-size: 14px; color: {t['text']};">{label}</span><span style="font-size: 12px; color: {t['faint']}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{sub}</span>
   </div>{trailing or icon('chevr', 16, t['ghost'])}</div>'''
     body = f'''
 <div style="display: flex; flex-direction: column; width: 390px; height: 844px; background: {t['ink']}; overflow: hidden;">
@@ -331,7 +368,7 @@ def more_phone(t, mode='dark'):
       {row('info','About and error codes','v2026.09.07 · TS-codes explained')}
     </div>
     <div style="display: flex; flex-direction: column; border-radius: 12px; background: {t['raised']}; border: 1px solid {t['line2']}; overflow: hidden;">
-      {row('out','Sign out','brienchua@sheldonglobal.com · admin', '<span></span>')}
+      {row('out','Sign out','admin · signed in until 11:38 PM', '<span></span>')}
     </div>
   </div>
   <div style="flex-grow: 1;"></div>
@@ -397,6 +434,7 @@ out = {
   'OrdersPhone.dc.html': orders_phone(DARK),
   'OrdersRange.dc.html': orders_sheet(DARK),
   'More.dc.html': more_phone(DARK, 'dark'),
+  'Timeout.dc.html': listing_phone(DARK, stale=True),
   'MainDay.dc.html': listing_phone(LIGHT),
   'OrdersDay.dc.html': orders_phone(LIGHT),
   'MoreDay.dc.html': more_phone(LIGHT, 'light'),

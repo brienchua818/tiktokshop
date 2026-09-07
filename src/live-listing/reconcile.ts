@@ -80,3 +80,49 @@ export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | n
   }
   return rows.sort((a, b) => a.sortKey.localeCompare(b.sortKey))
 }
+
+/**
+ * Whether a row is a variation that has been taken off TikTok.
+ *
+ * A draft row carries the answer on its live record, not on itself: the draft
+ * still says "pushed", because it was, and what changed happened on TikTok.
+ * So both kinds are asked the same question of the same field.
+ */
+export function isRemoved(row: QueueRow): boolean {
+  return row.kind === 'draft' ? Boolean(row.live?.removed) : Boolean(row.live.removed)
+}
+
+/**
+ * The listing, split into what is on it and what has been taken off.
+ *
+ * Removed variations used to sit in the main list. On a 25-variation listing
+ * that meant scrolling past five dead rows to reach the live ones, during a
+ * broadcast, which is the worst possible time to be reading carefully. They
+ * are not deleted from view though: a removal is a decision someone made, and
+ * the record of it is worth keeping where it can be found.
+ *
+ * Order is preserved within each side, so the active list reads exactly as it
+ * did before, minus the noise.
+ */
+export function splitRows(rows: readonly QueueRow[]): { active: QueueRow[]; removed: QueueRow[] } {
+  const active: QueueRow[] = []
+  const removed: QueueRow[] = []
+  for (const row of rows) (isRemoved(row) ? removed : active).push(row)
+  return { active, removed }
+}
+
+/**
+ * Every unit of this variation is gone.
+ *
+ * Only meaningful once TikTok has confirmed the variation and told us a
+ * quantity: a variation still under review reports no stock at all, and
+ * reading that absence as "sold out" would put a red label on something that
+ * has never been on sale. `stock_set` guards the other end — a variation
+ * listed with no stock in the first place was never sold out, it was never
+ * stocked.
+ */
+export function soldOut(v: LiveVariant): boolean {
+  if (!v.on_tiktok || v.removed) return false
+  if (v.stock_available === null || v.stock_available > 0) return false
+  return v.external ? true : (v.stock_set ?? 0) > 0
+}

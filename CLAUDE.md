@@ -116,6 +116,17 @@ fails rather than a habit that slips.
   `useDismiss` does both. Without it a sheet's scrim swallows every control on
   the page with no way out, which the audit reports as a control that cannot be
   clicked.
+- **No text is painted outside its own box.** A row that runs out of width does
+  not get to spill: flex will shrink a `whitespace-nowrap` button below its
+  content width, leaving the rectangles tidy while the words draw over each
+  other. Two tabs, a timestamp and a refresh button in one 375px strip did
+  exactly that. Give anything that can run out of room `min-w-0` and a
+  `truncate`, then shorten the label until it fits — truncation is the honest
+  failure, not the fix. The audit compares `scrollWidth` to `clientWidth` on
+  every control and text node and fails when nothing is clipping the excess.
+  It also fails on two controls in the same layer whose rectangles overlap;
+  layers differ deliberately, so a fixed bar over scrolled content is not a
+  finding.
 
 Run it with `npm run audit:ui` (add `:shots` for screenshots in
 `dist/ui-audit`). The build **must** carry `VITE_APPS_SCRIPT_URL` and

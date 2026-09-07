@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ListingState, LiveVariant } from '../lib/api'
 import type { QueuedDraft } from '../offline/queue'
-import { driftedDrafts, landed, mergeRows } from './reconcile'
+import { driftedDrafts, isRemoved, landed, mergeRows, soldOut, splitRows } from './reconcile'
 
 function variant(over: Partial<LiveVariant>): LiveVariant {
   return {
@@ -120,5 +120,81 @@ describe('mergeRows — every phone shows the same listing', () => {
   })
   it('works with no live state yet: local drafts only', () => {
     expect(mergeRows([mine], null)).toHaveLength(1)
+  })
+})
+
+describe('splitRows', () => {
+  it('sends a removed remote variation to the removed side', () => {
+    const rows = mergeRows([], state([
+      variant({ identifier: 'B1', on_tiktok: false, under_review: false, removed: true, created_at: '2026-09-07T01:00:00.000Z' }),
+      variant({ identifier: 'L1', on_tiktok: true, under_review: false, stock_available: 2, created_at: '2026-09-07T02:00:00.000Z' }),
+    ]))
+    const { active, removed } = splitRows(rows)
+    expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B1'])
+    expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['L1'])
+  })
+
+  it('sends a pushed draft whose variation was removed to the removed side', () => {
+    // The draft still reads "pushed", because it was. What changed happened on
+    // TikTok, so the answer is on the live record and nowhere else.
+    const d = draft({ identifier: 'B1', status: 'pushed' })
+    const rows = mergeRows([d], state([variant({ identifier: 'B1', removed: true, on_tiktok: false, under_review: false })]))
+    const { active, removed } = splitRows(rows)
+    expect(active).toHaveLength(0)
+    expect(removed).toHaveLength(1)
+    expect(removed[0]!.kind).toBe('draft')
+  })
+
+  it('keeps a draft with no live record on the active side', () => {
+    // Nothing has been removed; it simply has not been checked yet.
+    const rows = mergeRows([draft({ identifier: 'B13', status: 'queued' })], null)
+    expect(splitRows(rows).removed).toHaveLength(0)
+    expect(splitRows(rows).active).toHaveLength(1)
+  })
+
+  it('preserves order within each side', () => {
+    const rows = mergeRows([], state([
+      variant({ identifier: 'A', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T03:00:00.000Z' }),
+      variant({ identifier: 'B', on_tiktok: true, under_review: false, stock_available: 1, created_at: '2026-09-07T01:00:00.000Z' }),
+      variant({ identifier: 'C', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T02:00:00.000Z' }),
+    ]))
+    const { active, removed } = splitRows(rows)
+    expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['C', 'A'])
+    expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B'])
+  })
+
+  it('isRemoved answers for both kinds of row', () => {
+    const remote = mergeRows([], state([variant({ removed: true, on_tiktok: false, under_review: false })]))[0]!
+    expect(isRemoved(remote)).toBe(true)
+  })
+})
+
+describe('soldOut', () => {
+  it('is true when a confirmed variation has nothing left', () => {
+    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 2, stock_available: 0 }))).toBe(true)
+  })
+
+  it('is false while stock remains', () => {
+    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 2, stock_available: 1 }))).toBe(false)
+  })
+
+  it('is false for a variation under review, which reports no stock at all', () => {
+    // Absence of a quantity is not a quantity of zero. Reading it as sold out
+    // would put a red label on something that has never been on sale.
+    expect(soldOut(variant({ on_tiktok: false, under_review: true, stock_available: null }))).toBe(false)
+  })
+
+  it('is false for a removed variation', () => {
+    // It has its own tab and its own label; "sold out" would be a second,
+    // contradictory explanation of the same row.
+    expect(soldOut(variant({ removed: true, on_tiktok: false, under_review: false, stock_available: 0 }))).toBe(false)
+  })
+
+  it('is false for a variation that was never stocked', () => {
+    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 0, stock_available: 0 }))).toBe(false)
+  })
+
+  it('is true for an external variation at zero, which has no stock_set to check', () => {
+    expect(soldOut(variant({ external: true, on_tiktok: true, under_review: false, stock_set: null, stock_available: 0 }))).toBe(true)
   })
 })

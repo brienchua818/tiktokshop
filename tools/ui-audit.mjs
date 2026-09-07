@@ -11,6 +11,9 @@
  *   unnamed     a control with no accessible name — unreachable by voice or
  *               screen reader, and unlabelled in a screenshot
  *   small       under 44x44 on a touch screen (Apple's floor; Material's is 48)
+ *   overlap     two controls drawn on top of each other, so both are unreadable
+ *   spill       text wider than its own box with nothing clipping it, so it
+ *               paints over its neighbour
  *   overflow    the page scrolls sideways, or something escapes the right edge
  *   crash       clicking a control throws, or logs an error
  *
@@ -89,6 +92,10 @@ const REPLIES = {
       variant(),
       variant({ identifier: 'L11', variant: 'L11 Chrome Trolley', tiktok_sku_id: '9002', created_by: 'Judy', created_at: '2026-09-07T05:50:00Z' }),
       variant({ identifier: '', variant: 'Diatomite Absorbent Mat', external: true, tiktok_sku_id: '9003', created_at: '', created_by: '', stock_set: null, sold: null }),
+      // Sold out, so the red label renders and gets audited.
+      variant({ identifier: 'L12', variant: 'L12 Rattan Basket Large', tiktok_sku_id: '9004', created_by: 'Liz Liu', created_at: '2026-09-07T05:55:00Z', stock_set: 2, stock_available: 0, sold: 2 }),
+      // Removed, so the second tab exists and its button is clicked.
+      variant({ identifier: 'B1', variant: 'B1 Oval Storage Ottoman', tiktok_sku_id: '9005', created_by: 'Liz Liu', created_at: '2026-09-07T00:30:00Z', on_tiktok: false, removed: true, stock_available: 0, sold: null }),
     ],
   },
   orderSummary: {
@@ -164,6 +171,7 @@ const INSPECT = () => {
     (el.getAttribute('aria-label') || el.getAttribute('title') || el.textContent || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim()
 
   const controls = []
+  const controlEls = []
   const dead = []
   const unnamed = []
   const small = []
@@ -175,6 +183,7 @@ const INSPECT = () => {
     const tag = el.tagName.toLowerCase()
     const entry = { tag, name, w: Math.round(r.width), h: Math.round(r.height) }
     controls.push(entry)
+    controlEls.push({ el, r, name })
 
     if (tag === 'a') {
       const href = el.getAttribute('href')
@@ -187,6 +196,83 @@ const INSPECT = () => {
     if (r.height < 43.5 || r.width < 43.5) small.push(entry)
   }
 
+  /**
+   * Two controls drawn on top of each other.
+   *
+   * The check that was missing. Adding a second tab to the listing header made
+   * the row exceed 375px, and flex collapsed the text boxes below their
+   * content width rather than overflowing, so "ON LISTING" and "REMOVED" were
+   * painted over one another. Nothing escaped the right edge and nothing
+   * scrolled sideways, so every existing check passed and only a screenshot
+   * showed it.
+   *
+   * Two things are legitimately allowed to overlap and are excluded:
+   *
+   *   Nesting — a button inside a label, an icon inside a button.
+   *   Different layers — a fixed bottom bar is SUPPOSED to sit over the page
+   *     content scrolling beneath it. Comparing across layers reported the
+   *     List button over every row behind it, which is the design working.
+   *
+   * So a fault is two controls in the SAME layer, neither containing the
+   * other, still sharing pixels. The 4px floor allows for a shared border.
+   */
+  const layerOf = (el) => {
+    for (let n = el; n && n !== document.body; n = n.parentElement) {
+      const pos = getComputedStyle(n).position
+      if (pos === 'fixed' || pos === 'sticky') return n
+    }
+    return null
+  }
+  const overlapping = []
+  for (let i = 0; i < controlEls.length; i++) {
+    for (let j = i + 1; j < controlEls.length; j++) {
+      const a = controlEls[i], b = controlEls[j]
+      if (a.el.contains(b.el) || b.el.contains(a.el)) continue
+      if (layerOf(a.el) !== layerOf(b.el)) continue
+      const w = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left)
+      const h = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top)
+      if (w > 4 && h > 4) {
+        overlapping.push({
+          a: a.name || `<${a.el.tagName.toLowerCase()}>`,
+          b: b.name || `<${b.el.tagName.toLowerCase()}>`,
+          by: `${Math.round(w)}x${Math.round(h)}px`,
+        })
+      }
+    }
+  }
+
+  /**
+   * Text painted outside the box it belongs to.
+   *
+   * This is what actually went wrong, and why the overlap check above did not
+   * see it: flex shrank the two tab buttons below their content width, so the
+   * BUTTON rectangles stayed neatly side by side while the WORDS inside them
+   * spilled out and drew over each other. "ON LISTING" and "REMOVED" were
+   * illegible; every rectangle-based check passed.
+   *
+   * An element whose content is wider than its box is only a fault when
+   * nothing clips it. With `overflow: hidden` or a truncate rule the text is
+   * cut off, which is ugly but honest and readable. With `overflow: visible`
+   * it is painted over whatever is next to it.
+   */
+  const spilling = []
+  for (const el of document.querySelectorAll('button, a, select, [role="button"], span, p, h1, h2, h3, label')) {
+    if (!visible(el)) continue
+    const over = el.scrollWidth - el.clientWidth
+    if (over <= 1) continue
+    const cs = getComputedStyle(el)
+    if (cs.overflowX !== 'visible') continue
+    // A one-line box with no wrapping is the shape that spills sideways.
+    // Something set to wrap is taller than its content, not wider.
+    if (cs.whiteSpace !== 'nowrap' && cs.whiteSpace !== 'pre') continue
+    spilling.push({
+      tag: el.tagName.toLowerCase(),
+      text: (el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 32),
+      by: Math.round(over),
+      box: Math.round(el.clientWidth),
+    })
+  }
+
   const doc = document.documentElement
   const escaped = []
   for (const el of document.querySelectorAll('*')) {
@@ -195,7 +281,7 @@ const INSPECT = () => {
       escaped.push({ tag: el.tagName.toLowerCase(), cls: String(el.className).slice(0, 50), right: Math.round(r.right) })
     }
   }
-  return { controls, dead, unnamed, small, escaped: escaped.slice(0, 4), overflow: doc.scrollWidth - window.innerWidth }
+  return { controls, dead, unnamed, small, overlapping: overlapping.slice(0, 4), spilling: spilling.slice(0, 4), escaped: escaped.slice(0, 4), overflow: doc.scrollWidth - window.innerWidth }
 }
 
 /**
@@ -327,6 +413,8 @@ for (const theme of ['dark', 'day']) {
       report.escaped.forEach((e) => issues.push(`escapes right edge: <${e.tag}> ${e.cls} → ${e.right}px`))
       report.dead.forEach((d) => issues.push(`dead link: "${d.name}" href=${JSON.stringify(d.href)}`))
       report.unnamed.forEach((u) => issues.push(`unnamed ${u.tag} ${u.w}x${u.h}`))
+      report.overlapping.forEach((o) => issues.push(`controls drawn over each other: "${o.a}" and "${o.b}" share ${o.by}`))
+      report.spilling.forEach((t) => issues.push(`text painted outside its box, nothing clipping it: <${t.tag}> "${t.text}" needs ${t.by}px more than its ${t.box}px`))
       if (device.touch) report.small.forEach((s) => issues.push(`small target: <${s.tag}> "${s.name}" ${s.w}x${s.h}`))
 
       // Scroll to the bottom and check nothing readable is stranded under a
@@ -382,7 +470,7 @@ server.close()
 console.log(`\n${checked} control renders inspected, ${clicked} clicked, ${seenControls.size} distinct controls`)
 console.log(
   failures === 0
-    ? 'No dead links, unnamed or undersized controls, nothing hidden behind a bottom bar, and nothing broke on click.'
+    ? 'No dead links, unnamed or undersized controls, no overlap or spilled text, nothing hidden behind a bottom bar, and nothing broke on click.'
     : `${failures} problems`,
 )
 process.exit(failures === 0 ? 0 : 1)

@@ -15,7 +15,7 @@ import {
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
-import { driftedDrafts, landed, mergeRows } from './reconcile'
+import { driftedDrafts, landed, mergeRows, soldOut, splitRows } from './reconcile'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
@@ -174,6 +174,25 @@ export default function DraftQueue({
    */
   const rows = useMemo(() => mergeRows(drafts, live), [drafts, live])
 
+  /**
+   * On the listing, versus taken off it.
+   *
+   * Removed variations were sitting in the main list, so a listing with five
+   * deletions made you scroll past five dead rows to reach the live ones. They
+   * keep their own tab rather than disappearing: a removal is a decision
+   * somebody made, and the record of it is worth being able to find.
+   */
+  const { active, removed } = useMemo(() => splitRows(rows), [rows])
+  const [tab, setTab] = useState<'active' | 'removed'>('active')
+
+  // The tab only exists while there is something in it, and the moment it
+  // empties the view goes back rather than showing an empty pane.
+  useEffect(() => {
+    if (removed.length === 0 && tab === 'removed') setTab('active')
+  }, [removed.length, tab])
+
+  const shown = tab === 'removed' ? removed : active
+
   /** When TikTok was last asked, in Singapore time. Empty until it has been. */
   const checkedAt = live
     ? new Date(live.checked_at).toLocaleTimeString('en-SG', {
@@ -248,7 +267,7 @@ export default function DraftQueue({
       key={draft.draft_id}
       className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0"
     >
-      <Thumbnail draft={draft} />
+      <Thumbnail draft={draft} fallback={liveFor(live, draft.identifier)?.image_url ?? ''} />
 
       <div className="min-w-0 flex-1">
         <p className="text-xs font-mono text-identifier">{draft.identifier}</p>
@@ -334,11 +353,38 @@ export default function DraftQueue({
         it is looking now.
       */}
       <div className="flex items-center gap-2 h-11 pl-3 pr-1 border-b border-line2">
-        <span className="text-xs font-semibold tracking-wide text-muted uppercase whitespace-nowrap">
-          On this listing
-        </span>
-        <span className="text-xs text-faint">{rows.length}</span>
-        <span className="flex-1" />
+        {removed.length === 0 ? (
+          <>
+            <span className="text-xs font-semibold tracking-wide text-muted uppercase whitespace-nowrap">
+              On this listing
+            </span>
+            <span className="text-xs text-faint">{active.length}</span>
+          </>
+        ) : (
+          /* Two tabs, and only once there is a second one to show. During a
+             clean stream the header reads exactly as before.
+
+             `min-w-0` on the group and `shrink` on the buttons is not
+             decoration: without it the two tabs, the freshness note and the
+             refresh button together exceed 375px, and flex lets the text boxes
+             collapse below their content so the words draw on top of each
+             other. Truncating is the honest failure. */
+          <div className="flex items-center gap-0.5 min-w-0">
+            <QueueTab
+              label="On listing"
+              count={active.length}
+              on={tab === 'active'}
+              onClick={() => setTab('active')}
+            />
+            <QueueTab
+              label="Removed"
+              count={removed.length}
+              on={tab === 'removed'}
+              onClick={() => setTab('removed')}
+            />
+          </div>
+        )}
+        <span className="flex-1 min-w-1" />
         {working ? (
           <span className="text-xs text-info whitespace-nowrap">Uploading…</span>
         ) : !online ? (
@@ -350,7 +396,14 @@ export default function DraftQueue({
             no reply · showing {checkedAt}
           </span>
         ) : (
-          checkedAt && <span className="text-xs text-faint whitespace-nowrap">checked {checkedAt}</span>
+          checkedAt && (
+            <span
+              className="text-xs text-faint whitespace-nowrap shrink-0"
+              title={`TikTok last checked at ${checkedAt}`}
+            >
+              {removed.length === 0 ? `checked ${checkedAt}` : checkedAt}
+            </span>
+          )
         )}
         {listingId && (
           <button
@@ -418,7 +471,7 @@ export default function DraftQueue({
       )}
 
       <ul className="space-y-1 max-h-80 overflow-y-auto">
-        {rows.map((row) =>
+        {shown.map((row) =>
           row.kind === 'draft' ? (
             renderDraft(row.draft)
           ) : (
@@ -431,6 +484,11 @@ export default function DraftQueue({
           ),
         )}
       </ul>
+      {tab === 'active' && active.length === 0 && removed.length > 0 && (
+        <p className="text-xs text-faint py-4 text-center">
+          Every variation on this listing has been removed.
+        </p>
+      )}
       </div>
 
       {removing && (
@@ -526,7 +584,39 @@ function RemoveDialog({
  * keep one across sessions. `image_preview` is still honoured when it happens
  * to be from this session, which saves a read on the row just added.
  */
-function Thumbnail({ draft }: { draft: QueuedDraft }) {
+/**
+ * One of the queue's two tabs.
+ *
+ * Sized as a real touch target rather than a text link: it sits in the header
+ * strip a right thumb reaches for, next to the refresh button, and a 20px word
+ * there gets missed at speed.
+ */
+function QueueTab({
+  label,
+  count,
+  on,
+  onClick,
+}: {
+  label: string
+  count: number
+  on: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={on}
+      className={`min-h-11 px-1.5 inline-flex items-center gap-1 rounded-lg text-[13px] font-semibold min-w-0 ${
+        on ? 'text-fg' : 'text-faint'
+      }`}
+    >
+      <span className="truncate">{label}</span>
+      <span className={`font-normal shrink-0 ${on ? 'text-fg2' : 'text-ghost'}`}>{count}</span>
+    </button>
+  )
+}
+
+function Thumbnail({ draft, fallback }: { draft: QueuedDraft; fallback: string }) {
   const [url, setUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -548,8 +638,13 @@ function Thumbnail({ draft }: { draft: QueuedDraft }) {
     }
   }, [draft.draft_id])
 
-  if (!url) return <div className="w-9 h-9 rounded bg-chip shrink-0" />
-  return <img src={url} alt="" className="w-9 h-9 rounded object-cover shrink-0" />
+  // The local blob is the fast path and the one that works with no signal.
+  // The fallback matters after a reinstall or a cache eviction, when the draft
+  // row survives in the queue but its photo does not: without it a SKU this
+  // phone listed itself would show an empty square.
+  const src = url || fallback
+  if (!src) return <div className="w-14 h-14 rounded-lg bg-chip shrink-0" />
+  return <img src={src} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
 }
 
 /** The live record for one identifier, if a refresh has been done. */
@@ -587,10 +682,10 @@ function RemoteRow({
   return (
     <li className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0">
       {v.image_url ? (
-        <img src={v.image_url} alt="" className="w-9 h-9 rounded object-cover shrink-0" />
+        <img src={v.image_url} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
       ) : (
-        <div className="w-9 h-9 rounded bg-chip shrink-0 flex items-center justify-center text-ghost text-xs">
-          {v.external ? 'SC' : '·'}
+        <div className="w-14 h-14 rounded-lg bg-chip shrink-0 flex items-center justify-center text-ghost text-[10px]">
+          {v.external ? 'SC' : '—'}
         </div>
       )}
       <div className="min-w-0 flex-1">
@@ -599,7 +694,13 @@ function RemoteRow({
         <p className="text-xs text-ghost">{who}</p>
         {!v.external && <StockLine v={v} />}
         {v.external && (
-          <p className="text-xs text-faint mt-0.5">{v.stock_available ?? 0} in stock</p>
+          soldOut(v) ? (
+            <p className="text-xs mt-0.5">
+              <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
+            </p>
+          ) : (
+            <p className="text-xs text-faint mt-0.5">{v.stock_available ?? 0} in stock</p>
+          )
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
@@ -643,6 +744,19 @@ function StockLine({ v }: { v: LiveVariant }) {
     return (
       <p className="text-xs text-warn/90 mt-0.5">
         Not shown by TikTok yet. If it has not appeared in 30 minutes it was not added.
+      </p>
+    )
+  }
+  // Nothing left. Said in red and in words, because "0 left of 2" is the same
+  // shape as every other stock line and gets read as a number rather than as
+  // the one state that needs acting on mid-broadcast.
+  if (soldOut(v)) {
+    return (
+      <p className="text-xs mt-0.5">
+        <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
+        {v.sold !== null && v.sold > 0 && (
+          <span className="text-faint"> · all {v.sold} sold</span>
+        )}
       </p>
     )
   }

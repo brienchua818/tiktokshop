@@ -1,5 +1,5 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
-import { call, getIdToken, ScriptError } from './script-api'
+import { call, getIdToken, ScriptError, setSessionToken } from './script-api'
 
 /**
  * The app's backend, from the browser's point of view.
@@ -106,6 +106,12 @@ export interface LiveVariant {
   external: boolean
   /** TikTok's own id, needed to remove it. Empty only for a never-seen pending row. */
   tiktok_sku_id: string
+  /** TikTok's public picture of it — the thumbnail for a row this phone has no photo for. */
+  image_url: string
+  /** When this app recorded it (ISO), empty for a variation listed outside the app. */
+  created_at: string
+  /** Who pushed it, from the backend's row; empty for external. */
+  created_by: string
   /** False means TikTok is not returning it — see `under_review` before alarming. */
   on_tiktok: boolean
   /**
@@ -231,11 +237,24 @@ export interface ExportResult {
 }
 
 /** Identity plus what the allowlist says this person may do. */
-export type Me = SignedInUser & { role: string; approved: boolean; admin: boolean }
+export type Me = SignedInUser & {
+  role: string
+  approved: boolean
+  admin: boolean
+  /** A session this backend issued, good for a working day. Stored by `me()`. */
+  session_token?: string
+  session_expires_at?: string
+}
 
 export const api = {
   /** Who the backend thinks you are, and whether you may act yet. */
-  me: () => call<Me>('whoami'),
+  me: async () => {
+    const me = await call<Me>('whoami')
+    // The Google token bought this; the session is what every later call
+    // uses, so a phone is not sent back to sign in every hour.
+    if (me.session_token) setSessionToken(me.session_token)
+    return me
+  },
 
   shops: () => call<Shop[]>('shops'),
 
@@ -282,7 +301,7 @@ export const api = {
    * without opening Seller Center.
    */
   listingState: (listingId: string) =>
-    call<ListingState>('listingState', { body: { listing_id: listingId } }),
+    call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs: 40_000 }),
 
   /** Pull a window of orders down from TikTok into the Sheet. */
   syncOrders: (body: {
@@ -291,7 +310,7 @@ export const api = {
     from_time: string
     to_date: string
     to_time: string
-  }) => call<SyncResult>('syncOrders', { body }),
+  }) => call<SyncResult>('syncOrders', { body, timeoutMs: 180_000 }),
 
   /** Per-listing totals inside a date and time window. */
   orderSummary: (shopId: string, w: DateWindow) =>
@@ -314,7 +333,7 @@ export const api = {
     // assignable to Record<string, unknown>, because TypeScript cannot rule out
     // a subtype adding an incompatible field. Spreading produces the plain
     // object the call actually sends.
-    call<ExportResult>('exportOrders', { body: { ...body } }),
+    call<ExportResult>('exportOrders', { body: { ...body }, timeoutMs: 240_000 }),
 
   /**
    * Remove one variation from TikTok. Confirmed by the person first — this is
@@ -323,7 +342,7 @@ export const api = {
   removeVariation: (listingId: string, tiktokSkuId: string) =>
     call<{ removed: string; listing_id: string; variations_now: number; audit: 'pending' }>(
       'removeVariation',
-      { body: { listing_id: listingId, tiktok_sku_id: tiktokSkuId } },
+      { body: { listing_id: listingId, tiktok_sku_id: tiktokSkuId }, timeoutMs: 90_000 },
     ),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
@@ -358,7 +377,7 @@ export const api = {
     thumb_base64?: string
     tiktok_image_uri?: string
     idempotency_key: string
-  }) => call<PushResult>('pushSku', { body }),
+  }) => call<PushResult>('pushSku', { body, timeoutMs: 120_000 }),
 
   /**
    * Photo to variant name — the name of one variation within a listing.

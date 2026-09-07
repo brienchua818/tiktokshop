@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { api } from './lib/api'
-import { getIdToken, setIdToken } from './lib/script-api'
+import { hasCredential, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { allDrafts, pendingCount } from './offline/queue'
@@ -24,7 +24,10 @@ export default function App() {
   // still approved, and an unapproved one must land on the sign-in screen with
   // its explanation, not inside the app with everything failing.
   useEffect(() => {
-    if (!getIdToken()) {
+    // A backend session from earlier today, or a Google token from this tab —
+    // either is enough to ask. The session is the one that makes reopening the
+    // app during a stream silent rather than a sign-in screen.
+    if (!hasCredential()) {
       setCheckingSession(false)
       return
     }
@@ -32,9 +35,10 @@ export default function App() {
       .me()
       .then((me) => setUser(me.approved ? me : null))
       .catch(() => {
-        // Expired or revoked. Drop it, rather than retrying with a token that
-        // will fail every call from here on.
+        // Expired or revoked. Drop both, rather than retrying with credentials
+        // that will fail every call from here on.
         setIdToken(null)
+        setSessionToken(null)
         setUser(null)
       })
       .finally(() => setCheckingSession(false))
@@ -77,10 +81,11 @@ export default function App() {
   }
 
   async function signOut() {
-    // Nothing to revoke server-side: the backend holds no session, only a
-    // token we chose to send it. Dropping the token IS signing out, and
-    // forgetting the account stops Google silently signing us straight back in.
+    // The backend's session is a signed statement, not a server-side record,
+    // so dropping it here IS signing out; forgetting the account stops Google
+    // silently signing us straight back in.
     setIdToken(null)
+    setSessionToken(null)
     await forgetAccount()
     setUser(null)
   }

@@ -37,13 +37,23 @@ const sandbox = `
   var PropertiesService = { getScriptProperties: function () {
     return {
       getProperty: function (k) { return AUTH_STATE.props[k] },
+      setProperty: function (k, v) { AUTH_STATE.props[k] = v },
       setProperties: function () {}
     }
   } };
   var Utilities = {
     getUuid: function () { return 'uuid' },
-    newBlob: function () { return {} },
+    newBlob: function (bytes) {
+      var buf = Buffer.from(Array.isArray(bytes) ? bytes.map(function (b) { return b & 0xff }) : String(bytes))
+      return { getBytes: function () { return Array.from(buf) }, getDataAsString: function () { return buf.toString('utf8') } }
+    },
     base64Decode: function () { return [] },
+    // Web-safe base64 as Apps Script does it: the string overload encodes UTF-8,
+    // decode returns signed bytes.
+    base64EncodeWebSafe: function (text) { return Buffer.from(String(text), 'utf8').toString('base64url') },
+    base64DecodeWebSafe: function (text) {
+      return Array.from(Buffer.from(String(text), 'base64url')).map(function (b) { return b > 127 ? b - 256 : b })
+    },
     // Only the SGT pattern this code uses, and computed rather than faked, so
     // an off-by-one hour in the real formatter would not slip past.
     formatDate: function (date, tz, pattern) {
@@ -100,6 +110,7 @@ ${src}
     sgtEpoch_, summariseItems_, listingOrders_, buildAppendPayload_, buildRemovePayload_,
     googleClientId_, DEFAULT_GOOGLE_CLIENT_ID,
     relayoutRows_, exportFilename_, fileSafe_, driveFileId_, PHOTO_PX, listingUrl_, listingLinkFormula_,
+    signSession_, readSession_, issueSession_, verifySession_, SESSION_TTL_MS,
     imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
     photoCandidates_, PHOTO_FETCH_PX, identifierFromVariation_, describeResolution_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
@@ -1270,6 +1281,44 @@ check('the resolution note names each source and the unresolved count', () => {
   eq(gs.describeResolution_({ sibling: 2, sheet: 0, tiktok: 3, name: 12, unresolved: 1 }),
      '2 from sibling lines, 3 from TikTok, 12 from names, 1 unresolved')
   eq(gs.describeResolution_({ sibling: 0, sheet: 0, tiktok: 0, name: 0, unresolved: 0 }), '')
+})
+
+// --- Backend sessions ----------------------------------------------------------------
+//
+// A Google token lives an hour; the backend's own session lasts a working day.
+// The token must be unforgeable, unexpired and name exactly one account.
+
+check('a session round-trips and names the account', () => {
+  const tok = gs.signSession_({ e: 'judy@sheldonglobal.com', n: 'Judy', x: 1_800_000_000_000 }, 'secret-A')
+  const r = gs.readSession_(tok, 'secret-A', 1_700_000_000_000)
+  eq(r.ok, true); eq(r.email, 'judy@sheldonglobal.com'); eq(r.name, 'Judy'); eq(r.expires_at, 1_800_000_000_000)
+})
+
+check('a session past its expiry is refused with its own code', () => {
+  const tok = gs.signSession_({ e: 'a@b.c', n: '', x: 1000 }, 'k')
+  eq(gs.readSession_(tok, 'k', 1001).code, 'SESSION_EXPIRED')
+  eq(gs.readSession_(tok, 'k', 1000).code, 'SESSION_EXPIRED')
+  eq(gs.readSession_(tok, 'k', 999).ok, true)
+})
+
+check('a session signed with another secret, or edited, is invalid', () => {
+  const tok = gs.signSession_({ e: 'a@b.c', n: '', x: 9e12 }, 'k1')
+  eq(gs.readSession_(tok, 'k2', 0).code, 'SESSION_INVALID')
+  const [body, sig] = tok.split('.')
+  const forged = Buffer.from(JSON.stringify({ e: 'admin@b.c', n: '', x: 9e12 })).toString('base64url') + '.' + sig
+  eq(gs.readSession_(forged, 'k1', 0).code, 'SESSION_INVALID')
+  eq(gs.readSession_(body, 'k1', 0).code, 'SESSION_INVALID')
+  eq(gs.readSession_('', 'k1', 0).code, 'SESSION_INVALID')
+  eq(gs.readSession_('a.b.c', 'k1', 0).code, 'SESSION_INVALID')
+})
+
+check('issueSession_ lasts fourteen hours and verifySession_ accepts it', () => {
+  eq(gs.SESSION_TTL_MS, 14 * 3600 * 1000)
+  const issued = gs.issueSession_({ email: 'brienchua@sheldonglobal.com', name: 'Brien Chua' })
+  const r = gs.verifySession_(issued.session_token)
+  eq(r.ok, true); eq(r.email, 'brienchua@sheldonglobal.com')
+  const left = new Date(issued.session_expires_at).getTime() - Date.now()
+  if (left < 13.9 * 3600 * 1000 || left > 14.1 * 3600 * 1000) throw new Error('ttl off: ' + left)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -58,6 +58,12 @@ the hard way, it goes here the same day, with the code that hit it.
 | Daily listing cap | 100 uploads/day on probation, 1,000 after | Products overview | Allowance shown in the app. |
 | Product page URL | `https://shop.tiktok.com/view/product/<id>?region=SG` | Shareable link format | `listingUrl_`. |
 
+## Browser fetch
+
+| Limit | Value | Source | Where handled |
+| --- | --- | --- | --- |
+| Default request deadline | **None.** A stalled `fetch` waits for ever | WHATWG Fetch | Every backend call carries an `AbortController` deadline: reads 25 s, `listingState` 40 s, push 120 s, sync 180 s, export 240 s (`src/lib/script-api.ts`). A timeout is status 0 + code `TIMEOUT`: outcome unknown, retryable. "Checking…" sat for two minutes on 7 Sep before this. |
+
 ## Netlify
 
 | Limit | Value | Source | Where handled |
@@ -72,7 +78,7 @@ the hard way, it goes here the same day, with the code that hit it.
 | Limit | Value | Source | Where handled |
 | --- | --- | --- | --- |
 | Authorised JavaScript origins | Exact origin match, no paths; `gsi/button` returns 403 when wrong | GIS docs | Runbook step; sign-in errors carry distinct codes. |
-| ID token lifetime | 1 hour | OIDC | Client refreshes silently; 401 codes are distinct from "not approved" 403. |
+| ID token lifetime | **1 hour** | OIDC | The backend verifies it once at `whoami` and issues its own 14 h session (`issueSession_`, HMAC-signed, secret in Script Properties). Silent renewal did not fire reliably on two phones on 7 Sep; the session is what stops an hourly sign-in mid-stream. |
 
 ## Anthropic API
 

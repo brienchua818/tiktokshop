@@ -279,10 +279,10 @@ export default function BulkAdd({
         className="w-full text-sm px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-white rounded-lg transition-colors"
       >
         {busy
-          ? 'Saving…'
+          ? 'Listing…'
           : photos.length > 0
-            ? `Save ${photos.length} SKUs — ${formatIdentifier(prefix, firstSeq)} to ${formatIdentifier(prefix, firstSeq + photos.length - 1)}`
-            : 'Save'}
+            ? `List ${photos.length} SKUs — ${formatIdentifier(prefix, firstSeq)} to ${formatIdentifier(prefix, firstSeq + photos.length - 1)}`
+            : 'List'}
       </button>
     </div>
   )

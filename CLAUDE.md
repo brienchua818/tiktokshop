@@ -59,6 +59,17 @@ not style preferences.
   the wrong answer for exactly that window.
 - A draft still inside its automatic attempts reads **Retrying**, not Failed.
 
+## Every network call has a deadline, and every phone shows the server's list
+
+- **No fetch without a timeout.** `call()` takes `timeoutMs`; a stalled
+  request is a `TIMEOUT` (status 0, outcome unknown), never a frozen screen.
+  The backend logs any action over 15 s (`TS-API-04`).
+- **The queue is the union**, not this phone's drafts: `mergeRows(drafts,
+  live)` adds every variant the backend or TikTok has that this phone did not
+  make. Two phones on one stream must see one list.
+- **Sessions outlive Google's hour.** `whoami` returns a backend session;
+  the client sends it first. Do not reintroduce a per-call Google check.
+
 ## Data in the Sheet
 
 - Reads and writes map columns **by position in `HEADERS`**. Adding, removing

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ListingState, LiveVariant } from '../lib/api'
 import type { QueuedDraft } from '../offline/queue'
-import { driftedDrafts, landed } from './reconcile'
+import { driftedDrafts, landed, mergeRows } from './reconcile'
 
 function variant(over: Partial<LiveVariant>): LiveVariant {
   return {
@@ -11,6 +11,9 @@ function variant(over: Partial<LiveVariant>): LiveVariant {
     status: 'pushed',
     external: false,
     tiktok_sku_id: '1737387226619348974',
+    image_url: '',
+    created_at: '',
+    created_by: '',
     on_tiktok: false,
     under_review: true,
     unaccounted: false,
@@ -89,5 +92,33 @@ describe('driftedDrafts — local "failed", backend "pushed"', () => {
   })
   it('does nothing without live state', () => {
     expect(driftedDrafts([draft({})], null)).toHaveLength(0)
+  })
+})
+
+describe('mergeRows — every phone shows the same listing', () => {
+  const mine = draft({ draft_id: 'd-b9', identifier: 'B9', status: 'pushed', created_at: '2026-09-07T04:14:00Z' })
+  const fromOtherPhone = variant({ identifier: 'L11', variant: 'L11 Trolley', created_at: '2026-09-07T13:50:00Z', on_tiktok: true, created_by: 'Judy' })
+  const mineLive = variant({ identifier: 'B9', on_tiktok: true, created_at: '2026-09-07T04:14:00Z' })
+  const sellerCenter = variant({ identifier: '', variant: 'Diatomite Absorbent Mat', external: true, on_tiktok: true, created_at: '' })
+
+  it('shows a variation pushed from another phone, which the old list dropped', () => {
+    const rows = mergeRows([mine], state([mineLive, fromOtherPhone]))
+    expect(rows.map((r) => (r.kind === 'draft' ? r.draft.identifier : r.live.identifier))).toEqual(['B9', 'L11'])
+    expect(rows[1]!.kind).toBe('remote')
+  })
+  it('does not duplicate a variation this phone already has as a draft', () => {
+    const rows = mergeRows([mine], state([mineLive]))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.kind).toBe('draft')
+    expect((rows[0] as { live: LiveVariant | null }).live?.on_tiktok).toBe(true)
+  })
+  it('orders by creation time across phones, Seller Center last', () => {
+    const later = draft({ draft_id: 'd-b12', identifier: 'B12', status: 'queued', created_at: '2026-09-07T14:00:00Z' })
+    const rows = mergeRows([later, mine], state([mineLive, fromOtherPhone, sellerCenter]))
+    expect(rows.map((r) => (r.kind === 'draft' ? r.draft.identifier : r.live.identifier || r.live.variant)))
+      .toEqual(['B9', 'L11', 'B12', 'Diatomite Absorbent Mat'])
+  })
+  it('works with no live state yet: local drafts only', () => {
+    expect(mergeRows([mine], null)).toHaveLength(1)
   })
 })

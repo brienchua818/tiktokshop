@@ -150,11 +150,81 @@ export function tokenNeedsRenewal(marginSeconds = 300): boolean {
   return tokenSecondsLeft() < marginSeconds
 }
 
+/**
+ * The backend's own session, issued at whoami and good for a working day.
+ *
+ * The Google token above lives an hour; this is what stops a phone being sent
+ * back to the sign-in screen mid-stream when Google's silent renewal does not
+ * fire (two phones, 7 Sep). localStorage rather than sessionStorage on
+ * purpose: the phone is installed to the home screen and reopened many times
+ * in a day, and each reopen is a new tab as far as sessionStorage is
+ * concerned. The token names one account and expires; it cannot mint another.
+ */
+const SESSION_KEY = 'tikshop.session'
+let sessionToken: string | null = null
+
+export function setSessionToken(token: string | null): void {
+  sessionToken = token
+  try {
+    if (token) localStorage.setItem(SESSION_KEY, token)
+    else localStorage.removeItem(SESSION_KEY)
+  } catch {
+    // Storage unavailable: the in-memory copy still covers this visit.
+  }
+}
+
+export function getSessionToken(): string | null {
+  if (sessionToken) return sessionToken
+  try {
+    sessionToken = localStorage.getItem(SESSION_KEY)
+  } catch {
+    sessionToken = null
+  }
+  return sessionToken
+}
+
+/** Milliseconds until a backend session expires, 0 if absent, unreadable or past. */
+export function sessionMsLeft(token = getSessionToken(), now = Date.now()): number {
+  if (!token) return 0
+  try {
+    const body = token.split('.')[0]!
+    const payload = JSON.parse(atob(body.replace(/-/g, '+').replace(/_/g, '/')))
+    const exp = Number(payload.x)
+    if (!Number.isFinite(exp)) return 0
+    return Math.max(0, exp - now)
+  } catch {
+    return 0
+  }
+}
+
+/** True while the backend session is good for at least `marginMs` more. */
+export function hasLiveSession(marginMs = 60_000): boolean {
+  return sessionMsLeft() > marginMs
+}
+
+/** True when there is any credential that could still work: a live session or a Google token. */
+export function hasCredential(): boolean {
+  return hasLiveSession() || Boolean(getIdToken())
+}
+
+/**
+ * How long a call may take before the phone gives up on it.
+ *
+ * Without this a stalled request held "Checking…" for two minutes and the
+ * screen with it (7 Sep). Reads get 25 s; writes are given per action by the
+ * caller, because a push uploads a photo and an export builds a workbook with
+ * one. On a write, timing out is "outcome unknown", not failure: the request
+ * may well have completed, and the queue asks before assuming.
+ */
+export const READ_TIMEOUT_MS = 25_000
+
 export interface CallOptions {
   /** Sent in the body alongside the token. */
   body?: Record<string, unknown>
   /** Skip the token — only `ping`, which is the health check. */
   anonymous?: boolean
+  /** Give up after this long. Defaults to READ_TIMEOUT_MS. */
+  timeoutMs?: number
 }
 
 /**
@@ -171,8 +241,14 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
     )
   }
 
+  // Credential order: the backend's own session while it is live, then the
+  // Google token (which the backend turns into a new session at whoami).
+  // Sending both when both exist costs nothing and lets the backend fall back
+  // if the session was invalidated (secret rotated) while the Google token is
+  // still good.
+  const session = options.anonymous ? null : hasLiveSession() ? getSessionToken() : null
   const token = options.anonymous ? undefined : getIdToken()
-  if (!options.anonymous && !token) {
+  if (!options.anonymous && !token && !session) {
     throw new ScriptError(401, 'Sign in with Google to continue.')
   }
 
@@ -180,9 +256,14 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   // module-level binding for a different function, and re-checking it in each
   // helper invites the two to disagree.
   const base: string = BASE
-  const payload = { ...options.body, ...(token ? { id_token: token } : {}) }
+  const payload = {
+    ...options.body,
+    ...(session ? { session_token: session } : {}),
+    ...(token ? { id_token: token } : {}),
+  }
+  const timeoutMs = options.timeoutMs ?? READ_TIMEOUT_MS
 
-  const posted = await send(base, action, payload, 'POST')
+  const posted = await send(base, action, payload, 'POST', timeoutMs)
   if (posted.json) return unwrap<T>(posted.json)
 
   // The POST came back as an HTML page rather than data.
@@ -199,7 +280,7 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   // workaround for a bug in this code — it is the request the redirect was
   // going to turn into anyway.
   if (fitsInAUrl(base, action, payload)) {
-    const got = await send(base, action, payload, 'GET')
+    const got = await send(base, action, payload, 'GET', timeoutMs)
     if (got.json) return unwrap<T>(got.json)
     throw pageInsteadOfData(got)
   }
@@ -220,7 +301,10 @@ async function send(
   action: string,
   payload: Record<string, unknown>,
   method: 'GET' | 'POST',
+  timeoutMs: number,
 ): Promise<Attempt> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   const url =
     method === 'GET'
       ? `${base}?${new URLSearchParams({ action, ...stringify(payload) }).toString()}`
@@ -242,14 +326,36 @@ async function send(
       // Explicit rather than relied upon: the 302 to script.googleusercontent.com
       // is how every Apps Script response is delivered.
       redirect: 'follow',
+      signal: controller.signal,
     })
   } catch (cause) {
+    clearTimeout(timer)
+    // A request we gave up on is not a request that failed: it may have run to
+    // completion on the backend. Status 0 keeps it "outcome unknown" and
+    // retryable; the code lets the screen say what actually happened.
+    if (controller.signal.aborted) {
+      throw new ScriptError(
+        0,
+        `No reply after ${Math.round(timeoutMs / 1000)}s — the request may still have gone through`,
+        'TIMEOUT',
+      )
+    }
     // "No signal" and "the server said no" are different problems: the first
     // is what the offline queue exists to absorb and must not read as an error.
     throw new ScriptError(0, `No connection: ${(cause as Error).message}`)
   }
 
-  const text = await response.text()
+  let text: string
+  try {
+    text = await response.text()
+  } catch (cause) {
+    clearTimeout(timer)
+    if (controller.signal.aborted) {
+      throw new ScriptError(0, `No reply after ${Math.round(timeoutMs / 1000)}s — the request may still have gone through`, 'TIMEOUT')
+    }
+    throw new ScriptError(0, `No connection: ${(cause as Error).message}`)
+  }
+  clearTimeout(timer)
   let json: Record<string, unknown> | null = null
   try {
     json = text ? (JSON.parse(text) as Record<string, unknown>) : {}

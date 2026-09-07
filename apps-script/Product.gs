@@ -161,6 +161,10 @@ function ttGetProduct_(prefix, productId) {
       valueId: attribute.value_id || '',
       valueName: attribute.value_name || '',
       skuImgUri: (attribute.sku_img && attribute.sku_img.uri) || '',
+      // TikTok's public CDN copy — the one URL a phone can show without any
+      // credential, so it is what the queue uses for a variation it has no
+      // local photo for (listed from another phone, or in Seller Center).
+      skuImgUrl: (attribute.sku_img && attribute.sku_img.url_list && attribute.sku_img.url_list[0]) || '',
       priceAmount: String((raw.price && (raw.price.sale_price || raw.price.amount)) || ''),
       quantity: Number(inventory.quantity || 0),
       warehouseId: inventory.warehouse_id || ''
@@ -299,6 +303,9 @@ function listingState_(listingId) {
       status: String(r.status || ''),
       external: false,
       tiktok_sku_id: String((match && match.id) || r.tiktok_sku_id || ''),
+      image_url: String((match && match.skuImgUrl) || ''),
+      created_at: String(r.created_at || ''),
+      created_by: String(r.created_by || ''),
       on_tiktok: Boolean(match),
       /**
        * TikTok acknowledged this variation, but is not returning it.
@@ -351,6 +358,9 @@ function listingState_(listingId) {
       status: 'external',
       external: true,
       tiktok_sku_id: String(s.id || ''),
+      image_url: String(s.skuImgUrl || ''),
+      created_at: '',
+      created_by: '',
       on_tiktok: true,
       under_review: false, unaccounted: false, removed: false,
       stock_set: null,

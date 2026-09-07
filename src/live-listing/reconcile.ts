@@ -40,3 +40,43 @@ export function driftedDrafts(drafts: readonly QueuedDraft[], live: ListingState
       landed(live, d.identifier) !== null,
   )
 }
+
+/**
+ * One row of the queue as the screen shows it: either a draft on this phone,
+ * or a variation the backend or TikTok knows about that this phone has no
+ * draft for — pushed from another phone, or added in Seller Center.
+ *
+ * Before this the list was `drafts.map(...)`: only what THIS phone had made.
+ * Two phones listing the same stream saw two different lists (7 Sep), and a
+ * variation added in Seller Center appeared only in a footnote. The list is
+ * now the union, ordered by when each was created, so every phone shows the
+ * same listing.
+ */
+export type QueueRow =
+  | { kind: 'draft'; key: string; draft: QueuedDraft; live: LiveVariant | null; sortKey: string }
+  | { kind: 'remote'; key: string; live: LiveVariant; sortKey: string }
+
+export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | null): QueueRow[] {
+  const rows: QueueRow[] = drafts.map((d) => ({
+    kind: 'draft',
+    key: d.draft_id,
+    draft: d,
+    live: live?.variants.find((v) => !v.external && v.identifier === d.identifier) ?? null,
+    sortKey: d.created_at,
+  }))
+  if (live) {
+    const local = new Set(drafts.map((d) => d.identifier))
+    for (const v of live.variants) {
+      if (!v.external && local.has(v.identifier)) continue
+      rows.push({
+        kind: 'remote',
+        key: `remote:${v.tiktok_sku_id || v.identifier || v.variant}`,
+        live: v,
+        // A variation listed outside this app has no creation time we know;
+        // it sorts after everything dated, in TikTok's order.
+        sortKey: v.created_at || '9999',
+      })
+    }
+  }
+  return rows.sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+}

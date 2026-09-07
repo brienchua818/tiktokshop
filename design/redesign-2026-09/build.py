@@ -196,7 +196,7 @@ def queue(t, n_rows, margin='0 12px'):
   </div>
 </div>'''
 
-def savebar(t, label='Save B10 to queue'):
+def savebar(t, label='List B10'):
     return f'''
 <div style="display: flex; align-items: center; height: 56px; padding: 6px 12px; background: {t['surface']}; border-top: 1px solid {t['line2']}; flex-shrink: 0;">
   <div style="display: flex; align-items: center; justify-content: center; height: 44px; border-radius: 10px; background: {t['accent']}; flex-grow: 1;">
@@ -380,7 +380,7 @@ def tablet(t):
           </div>
         </div>
         <div style="display: flex; justify-content: flex-end;">
-          <div style="display: flex; align-items: center; justify-content: center; height: 48px; padding: 0 28px; border-radius: 10px; background: {t['accent']};"><span style="font-size: 15px; font-weight: 600; color: #fff;">Save B10 to queue</span></div>
+          <div style="display: flex; align-items: center; justify-content: center; height: 48px; padding: 0 28px; border-radius: 10px; background: {t['accent']};"><span style="font-size: 15px; font-weight: 600; color: #fff;">List B10</span></div>
         </div>
       </div>
     </div>

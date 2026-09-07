@@ -502,7 +502,7 @@ function SkuForm({
         disabled={busy !== '' || problems.length > 0}
         className="w-full text-sm px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-white rounded-lg transition-colors"
       >
-        {busy === 'saving' ? 'Saving…' : `Save ${identifier}`}
+        {busy === 'saving' ? 'Listing…' : `List ${identifier}`}
       </button>
     </div>
   )

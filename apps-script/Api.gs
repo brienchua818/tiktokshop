@@ -12,6 +12,22 @@
 
 
 /**
+ * Anything over this is worth a line in the log. The phone gives up at 25 s
+ * on a read and 90–240 s on a write, so a backend action that takes longer
+ * than 15 s is already most of the way to looking like a hang from a factory
+ * floor — and the log is the only place the duration is visible.
+ */
+var SLOW_ACTION_MS = 15000;
+
+function timed_(action, fn) {
+  var started = Date.now();
+  var result = fn();
+  var ms = Date.now() - started;
+  if (ms > SLOW_ACTION_MS) warn_('TS-API-04', action + ' took ' + Math.round(ms / 1000) + 's');
+  return result;
+}
+
+/**
  * Who is acting, for the log's error path. Set once identity is verified, so a
  * failure after that point is attributed to a person rather than "unknown" —
  * which is what every export failure read as in the log.
@@ -74,9 +90,15 @@ function handle_(e, method) {
   try {
     if (action === 'ping') return json_({ ok: true, time: new Date().toISOString() });
 
-    // Identity comes from a Google ID token the frontend forwards, verified
-    // against Google — never from a claim the caller simply asserts.
-    var identity = verifyIdToken_(body.id_token || params.id_token);
+    // Identity: a session this backend issued, or failing that a Google ID
+    // token verified against Google — never a claim the caller simply asserts.
+    // The session is checked first because it is free (an HMAC, no network)
+    // and lasts a working day; the Google token is the way to get one.
+    var sessionToken = body.session_token || params.session_token;
+    var googleToken = body.id_token || params.id_token;
+    var identity = sessionToken ? verifySession_(sessionToken) : { ok: false, code: 'NO_TOKEN' };
+    if (!identity.ok && googleToken) identity = verifyIdToken_(googleToken);
+    if (!identity.ok && !googleToken && !sessionToken) identity = verifyIdToken_('');
     if (!identity.ok) {
       // The reason travels with the refusal. Every one of these used to read
       // "Sign in with Google to continue.", so a backend that was merely
@@ -89,9 +111,13 @@ function handle_(e, method) {
     actorName_ = user.name || user.email || '';
 
     if (action === 'whoami') {
+      // Every whoami hands back a fresh session, so a phone that checks in at
+      // the start of a stream is good until well after it ends.
+      var session = issueSession_(user);
       return json_({
         email: user.email, name: user.name, role: user.role,
-        approved: canList_(user), admin: isAdmin_(user)
+        approved: canList_(user), admin: isAdmin_(user),
+        session_token: session.session_token, session_expires_at: session.session_expires_at
       });
     }
 
@@ -109,11 +135,13 @@ function handle_(e, method) {
     // One lock for the whole write, taken here and nowhere deeper. Everything
     // below assumes it is held; see Lock.gs for why nesting it is a trap.
     if (WRITE_ACTIONS[action]) {
-      return withScriptLock_(30000, function () {
-        return route_(action, params, body, user);
+      return timed_(action, function () {
+        return withScriptLock_(30000, function () {
+          return route_(action, params, body, user);
+        });
       });
     }
-    return route_(action, params, body, user);
+    return timed_(action, function () { return route_(action, params, body, user); });
   } catch (err) {
     var message = String(err && err.message ? err.message : err);
 

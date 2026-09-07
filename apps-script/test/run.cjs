@@ -114,7 +114,8 @@ ${src}
     imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
     photoCandidates_, PHOTO_FETCH_PX, identifierFromVariation_, describeResolution_,
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME,
-    normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED
+    normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
+    skuImageUrl_
   };
 `
 
@@ -1353,6 +1354,46 @@ check('and a role that is not admin still is not', () => {
   eq(gs.canList_({ role: 'pending' }), false)
   eq(gs.canList_({ role: 'blocked' }), false)
   eq(gs.canList_(null), false)
+})
+
+check("skuImageUrl_ reads TikTok's 202309 shape, not the 202306 one", () => {
+  // The real 202309 sku_img. `thumb_urls` is a 300px resize of a few KB and a
+  // listing puts twenty-five of them on a phone, so it wins over `urls`.
+  eq(gs.skuImageUrl_({ sku_img: {
+    height: 600, width: 600, uri: 'tos-x/abc',
+    thumb_urls: ['https://cdn/thumb.jpeg'], urls: ['https://cdn/full.jpeg'],
+  } }), 'https://cdn/thumb.jpeg')
+  eq(gs.skuImageUrl_({ sku_img: { uri: 'tos-x/abc', urls: ['https://cdn/full.jpeg'] } }), 'https://cdn/full.jpeg')
+})
+
+check('skuImageUrl_ returns nothing rather than throwing on every empty shape', () => {
+  eq(gs.skuImageUrl_({}), '')
+  eq(gs.skuImageUrl_({ sku_img: null }), '')
+  eq(gs.skuImageUrl_({ sku_img: {} }), '')
+  eq(gs.skuImageUrl_({ sku_img: { uri: 'tos-x/abc' } }), '')
+  eq(gs.skuImageUrl_({ sku_img: { thumb_urls: [], urls: [] } }), '')
+  eq(gs.skuImageUrl_({ sku_img: { thumb_urls: [''], urls: ['https://cdn/full.jpeg'] } }), 'https://cdn/full.jpeg')
+  eq(gs.skuImageUrl_(null), '')
+  eq(gs.skuImageUrl_(undefined), '')
+})
+
+check('the deprecated 202306 url_list spelling is not read anywhere', () => {
+  // The class, not the instance. `url_list` silently yields undefined against
+  // a 202309 response, so nothing errors and every image is simply blank —
+  // which is how one wrong field name survived a fortnight and a full audit.
+  const fs = require('fs')
+  const dir = __dirname + '/..'
+  const offenders = []
+  for (const name of fs.readdirSync(dir)) {
+    if (!name.endsWith('.gs') || name === 'TikShopBackend.gs') continue
+    const text = fs.readFileSync(dir + '/' + name, 'utf8')
+    text.split('\n').forEach((line, i) => {
+      // Prose about the bug is allowed; reading the field is not.
+      if (/^\s*(\*|\/\/)/.test(line)) return
+      if (/url_list/.test(line)) offenders.push(name + ':' + (i + 1))
+    })
+  }
+  eq(offenders.join(', '), '')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -1816,6 +1816,39 @@ function continuationTitle_(parentTitle) {
  * write endpoint takes `price.amount`. Reading one and writing the other
  * blanks the price of every existing variation, so it happens once, here.
  */
+/**
+ * The displayable URL for a variation's photo, from a Get Product response.
+ *
+ * TikTok's public CDN copy is the one URL a phone can show without any
+ * credential, so it is what the queue uses for a variation it has no local
+ * photo for: listed from another phone, or added in Seller Center.
+ *
+ * This read `sku_img.url_list[0]` for a fortnight, which is the **202306**
+ * spelling. The 202309 response has no `url_list` at all — `sku_img` is
+ * `{height, thumb_urls, uri, urls, width}` — so the value was ALWAYS an empty
+ * string and every variation a device had not photographed itself rendered a
+ * grey square. That is L1 to L12 on Brien's screen on 7 Sep.
+ *
+ * `thumb_urls` first, because it is a 300px resize of a few kilobytes and a
+ * listing carries twenty-five of them onto a phone on mobile data. `urls` is
+ * the full-size fallback.
+ *
+ * Note what is deliberately NOT a fallback: the Sheet's `photo_thumb_url`.
+ * It is `DriveApp.getUrl()`, a Drive *viewer page* rather than an image, so
+ * putting it in an `<img>` renders nothing at all. Serving our own copy needs
+ * the bytes served, which is separate work — see the note in the vault.
+ *
+ * A function rather than three lines inline so it can be tested, which is the
+ * only reason the old spelling survived so long: nothing could assert it.
+ */
+function skuImageUrl_(attribute) {
+  var img = attribute && attribute.sku_img;
+  if (!img) return '';
+  if (img.thumb_urls && img.thumb_urls.length && img.thumb_urls[0]) return String(img.thumb_urls[0]);
+  if (img.urls && img.urls.length && img.urls[0]) return String(img.urls[0]);
+  return '';
+}
+
 function ttGetProduct_(prefix, productId) {
   var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
     { category_version: CATEGORY_VERSION }, null);
@@ -1833,10 +1866,7 @@ function ttGetProduct_(prefix, productId) {
       valueId: attribute.value_id || '',
       valueName: attribute.value_name || '',
       skuImgUri: (attribute.sku_img && attribute.sku_img.uri) || '',
-      // TikTok's public CDN copy — the one URL a phone can show without any
-      // credential, so it is what the queue uses for a variation it has no
-      // local photo for (listed from another phone, or in Seller Center).
-      skuImgUrl: (attribute.sku_img && attribute.sku_img.url_list && attribute.sku_img.url_list[0]) || '',
+      skuImgUrl: skuImageUrl_(attribute),
       priceAmount: String((raw.price && (raw.price.sale_price || raw.price.amount)) || ''),
       quantity: Number(inventory.quantity || 0),
       warehouseId: inventory.warehouse_id || ''

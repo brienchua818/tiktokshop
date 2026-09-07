@@ -44,6 +44,21 @@ not style preferences.
 - **TikTok's own code stays in the message**: `ttReason_(r)` renders
   "message (TikTok 12052262)". Their documentation is indexed by that number.
 
+## Who knows whether a write happened
+
+- **The backend does; the phone does not.** A push is send → write → reply,
+  and the reply can fail alone (B9, 7 Sep: recorded 12:14:17, shown on the
+  phone as "Failed · No connection"). A network error on a write is
+  "outcome unknown", never "failed". The client then asks the backend what it
+  recorded (`listingState`, non-external variants) and, on every later fetch
+  of live state, corrects local drafts against that answer
+  (`src/live-listing/reconcile.ts`).
+- **"Recorded by the backend" is the question, not "shown by TikTok".** A
+  variation just added is under review and absent from TikTok's product read
+  for minutes. Checking TikTok's read to decide whether a push worked gives
+  the wrong answer for exactly that window.
+- A draft still inside its automatic attempts reads **Retrying**, not Failed.
+
 ## Data in the Sheet
 
 - Reads and writes map columns **by position in `HEADERS`**. Adding, removing

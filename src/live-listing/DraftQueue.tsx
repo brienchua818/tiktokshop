@@ -15,6 +15,7 @@ import {
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
+import { driftedDrafts, landed } from './reconcile'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 
 /**
@@ -99,12 +100,37 @@ export default function DraftQueue({
     setChecking(true)
     setCheckError('')
     try {
-      setLive(await api.listingState(listingId))
+      const state = await api.listingState(listingId)
+      setLive(state)
+      await reconcile(state)
     } catch (e: unknown) {
       setCheckError(e instanceof ApiError ? e.display : String(e))
     } finally {
       setChecking(false)
     }
+  }
+
+  /**
+   * Correct this device's drafts against what the backend recorded.
+   *
+   * A push whose reply was lost sits here as "failed" while the backend has
+   * the row as pushed and TikTok has the variation (B9, 7 Sep). Every fetch
+   * of live state is a chance to notice, so every fetch does. The backend is
+   * the only party that knows whether a write happened; the phone's opinion
+   * of its own failed request is not evidence.
+   */
+  async function reconcile(state: ListingState) {
+    const drifted = driftedDrafts(drafts, state)
+    if (!drifted.length) return
+    for (const d of drifted) {
+      await updateDraft(d.draft_id, {
+        status: 'pushed',
+        error: null,
+        settled: true,
+        listing_id: d.listing_id ?? state.listing_id,
+      })
+    }
+    await onChanged()
   }
 
   // Checked once when there is something to check, and after that on request.
@@ -649,6 +675,16 @@ function StatusBadge({
   }
   if (draft.status === 'uploading') return <span className="text-xs text-blue-400">…</span>
   if (draft.status === 'failed') {
+    // Still inside its automatic attempts: the queue will push it again by
+    // itself (or find it already landed). "Failed" here sent someone to
+    // Seller Center for a SKU that was minutes from sorting itself out.
+    if (draft.attempts < MAX_AUTO_ATTEMPTS) {
+      return (
+        <span className="text-xs text-amber-400" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
+          Retrying
+        </span>
+      )
+    }
     return (
       <span className="text-xs text-red-400" title={`${draft.attempts} attempts`}>
         Failed
@@ -779,8 +815,11 @@ async function pushOne(draft: QueuedDraft): Promise<void> {
     if (api_error?.isOutcomeUnknown && draft.listing_id) {
       try {
         const live = await api.listingState(draft.listing_id)
-        const landed = live.variants.find((v) => v.identifier === draft.identifier)
-        if (landed?.on_tiktok) {
+        // "Recorded by the backend", not "shown by TikTok": a variation just
+        // added is under review and absent from TikTok's read for minutes.
+        // Asking the second question is exactly how B9 read as failed while
+        // the backend had it as pushed since 12:14:17.
+        if (landed(live, draft.identifier)) {
           await updateDraft(draft.draft_id, {
             status: 'pushed',
             error: null,

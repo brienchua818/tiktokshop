@@ -70,7 +70,15 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
           setPendingApproval(me.email)
         })
         .catch((e: unknown) => {
-          setIdToken(null)
+          /**
+           * Keep the credential unless it is the credential that is wrong.
+           *
+           * This discarded it on every failure, so a timeout or an unreachable
+           * backend during sign-in threw away a token Google had just issued
+           * and the person had to start again for no reason. Same mistake as
+           * the app's startup check, in a second place.
+           */
+          if (!(e instanceof ApiError) || e.isCredentialDead) setIdToken(null)
           if (e instanceof ApiError) {
             setError(e.message)
             setFatal(CONFIG_FAULTS.has(String(e.code)))

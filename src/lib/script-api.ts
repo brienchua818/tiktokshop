@@ -240,6 +240,25 @@ export function hasCredential(): boolean {
  */
 export const READ_TIMEOUT_MS = 25_000
 
+/**
+ * Actions that change something, so a timeout on one leaves the outcome
+ * unknown rather than merely unanswered.
+ *
+ * Mirrors WRITE_ACTIONS in apps-script/Api.gs. Kept as a set here rather than
+ * inferred from the timeout, because a long deadline means "this is slow", not
+ * "this writes": the orders summary takes 60 seconds and changes nothing.
+ */
+const WRITE_ACTIONS = new Set([
+  'addListing',
+  'saveSku',
+  'pushSku',
+  'setRole',
+  'removeVariation',
+  'syncOrders',
+  'exportOrders',
+  'exportListing',
+])
+
 export interface CallOptions {
   /** Sent in the body alongside the token. */
   body?: Record<string, unknown>
@@ -313,17 +332,27 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
      * that only happens after a request has already failed this way.
      */
     if (sentCredential && credentialMissing(posted.json)) {
+      let retries = 0
       if (fitsInAUrl(base, action, payload)) {
+        retries = 1
         const retried = await send(base, action, payload, 'GET', timeoutMs)
         if (retried.json && !credentialMissing(retried.json)) return unwrap<T>(retried.json)
         if (!retried.json) throw pageInsteadOfData(retried)
       }
-      // Both legs lost it. Say what happened rather than telling somebody who
-      // is signed in to sign in: that is the message Brien photographed, and
-      // acting on it would have thrown away a session that was working.
+      /**
+       * Say what happened, rather than telling somebody who is signed in to
+       * sign in. That was the message Brien photographed, and acting on it
+       * would have discarded a session that was working.
+       *
+       * The count is counted, not assumed. This said "twice" unconditionally,
+       * which was false whenever the payload was too big for a URL and the
+       * retry never ran — a wrong message added while fixing wrong messages.
+       */
       throw new ScriptError(
         401,
-        `The "${action}" request reached the backend without its sign-in, twice. Your session is still good, so try again.`,
+        retries === 0
+          ? `The "${action}" request reached the backend without its sign-in, and is too large to retry another way. Your session is still good.`
+          : `The "${action}" request reached the backend without its sign-in, on both attempts. Your session is still good, so try again.`,
         'CREDENTIAL_LOST_IN_TRANSIT',
         posted.json,
       )
@@ -359,6 +388,31 @@ interface Attempt {
   url: string
   text: string
   json: Record<string, unknown> | null
+}
+
+/**
+ * The one place a deadline turns into words.
+ *
+ * Two sentences, because a read and a write leave different questions open.
+ * "It may still have gone through, so check before repeating it" is sound
+ * advice about a push and meaningless about fetching a summary: a read changes
+ * nothing, so there is nothing to check and repeating it is free. Telling
+ * somebody to go and check after a slow read sends them looking for something
+ * that was never at stake.
+ *
+ * A function rather than two literals because there were already two throw
+ * sites with the same wording, and the first attempt at this fixed one of
+ * them. Two copies of a sentence is one copy too many.
+ */
+function timedOut(action: string, timeoutMs: number): ScriptError {
+  const seconds = Math.round(timeoutMs / 1000)
+  return new ScriptError(
+    0,
+    WRITE_ACTIONS.has(action)
+      ? `"${action}" gave no reply after ${seconds}s. It may still have gone through, so check before repeating it.`
+      : `"${action}" gave no reply after ${seconds}s. Nothing was changed, so it is safe to try again.`,
+    'TIMEOUT',
+  )
 }
 
 async function send(
@@ -399,11 +453,7 @@ async function send(
     // completion on the backend. Status 0 keeps it "outcome unknown" and
     // retryable; the code lets the screen say what actually happened.
     if (controller.signal.aborted) {
-      throw new ScriptError(
-        0,
-        `No reply after ${Math.round(timeoutMs / 1000)}s — the request may still have gone through`,
-        'TIMEOUT',
-      )
+      throw timedOut(action, timeoutMs)
     }
     // "No signal" and "the server said no" are different problems: the first
     // is what the offline queue exists to absorb and must not read as an error.
@@ -419,11 +469,7 @@ async function send(
       // Names the action, because a photographed banner is the only diagnosis
       // anybody gets mid-broadcast, and "no reply after 25s" on its own does
       // not say which of a dozen calls gave up.
-      throw new ScriptError(
-        0,
-        `"${action}" gave no reply after ${Math.round(timeoutMs / 1000)}s. It may still have gone through, so check before repeating it.`,
-        'TIMEOUT',
-      )
+      throw timedOut(action, timeoutMs)
     }
     throw new ScriptError(0, `No connection: ${(cause as Error).message}`)
   }

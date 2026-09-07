@@ -180,3 +180,71 @@ describe('a 401 that means the request lost its credential', () => {
     expect(misconfigured.isCredentialDead).toBe(false)
   })
 })
+
+/**
+ * A message that overstates what happened is still a wrong message.
+ *
+ * Both of these were introduced while fixing wrong messages, which is exactly
+ * how they get in: the fix is written for the case in front of you and asserts
+ * something about a case you did not have.
+ */
+describe('the wording matches what actually happened', () => {
+  const live = () => 'header.' + btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })) + '.sig'
+
+  beforeEach(() => {
+    vi.stubEnv('VITE_APPS_SCRIPT_URL', 'https://script.google.com/macros/s/test/exec')
+    vi.resetModules()
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  it('does not claim two attempts when the payload was too big to retry', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 }),
+      ),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken(live())
+    // A photo is far past the 6000-character URL ceiling, so the GET leg
+    // cannot run and the message must not say it did.
+    const huge = { photo_base64: 'A'.repeat(8_000) }
+    const err = await mod.call('pushSku', { body: huge }).then(() => null, (e: unknown) => e) as InstanceType<typeof mod.ScriptError>
+    expect(err.code).toBe('CREDENTIAL_LOST_IN_TRANSIT')
+    expect(err.message).not.toMatch(/both attempts/)
+    expect(err.message).toMatch(/too large to retry/)
+  })
+
+  it('tells a read it is safe to try again, and a write that it may have landed', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_u: string, init: RequestInit) =>
+        new Promise<Response>((_r, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        }),
+      ),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken(live())
+
+    const read = mod.call('orderSummary', { body: {}, timeoutMs: 1_000 }).then(() => null, (e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(1_100)
+    const readErr = (await read) as InstanceType<typeof mod.ScriptError>
+    expect(readErr.code).toBe('TIMEOUT')
+    // A read changes nothing, so there is nothing to go and check.
+    expect(readErr.message).toMatch(/Nothing was changed/)
+    expect(readErr.message).not.toMatch(/may still have gone through/)
+    expect(readErr.message).toMatch(/orderSummary/)
+
+    const write = mod.call('pushSku', { body: {}, timeoutMs: 1_000 }).then(() => null, (e: unknown) => e)
+    await vi.advanceTimersByTimeAsync(1_100)
+    const writeErr = (await write) as InstanceType<typeof mod.ScriptError>
+    expect(writeErr.message).toMatch(/may still have gone through/)
+    expect(writeErr.isOutcomeUnknown).toBe(true)
+    vi.useRealTimers()
+  })
+})

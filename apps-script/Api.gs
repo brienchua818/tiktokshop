@@ -140,11 +140,17 @@ function handle_(e, method) {
     if (!canList_(user)) {
       // Deliberately explicit: a person waiting for approval should know that
       // is what is happening, not see a generic refusal.
+      var role = normaliseRole_(user.role);
+      // Coded, because "blocked" and "awaiting approval" need different
+      // actions from different people and were previously indistinguishable
+      // to anything reading the reply — including the app, which could only
+      // show the sentence and hope somebody read it carefully.
       return json_({
-        error: normaliseRole_(user.role) === ROLE_BLOCKED
+        error: role === ROLE_BLOCKED
           ? 'This account has been blocked.'
           : 'Your account is awaiting approval. Ask Brien to approve ' + user.email + '.',
-        role: normaliseRole_(user.role)
+        code: role === ROLE_BLOCKED ? 'ACCOUNT_BLOCKED' : 'AWAITING_APPROVAL',
+        role: role
       }, 403);
     }
 

@@ -1,5 +1,6 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
-import { call, getIdToken, ScriptError, setSessionToken } from './script-api'
+import { call, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
+import { onToken, promptSilently } from '../auth/google'
 
 /**
  * The app's backend, from the browser's point of view.
@@ -31,9 +32,61 @@ const FN = '/api'
  * Apps Script client — there are only two of these functions, and two
  * different conventions would be two things to remember.
  */
+/**
+ * A Google ID token good enough to send, renewing it first if it is not.
+ *
+ * These two functions verify the Google token directly; they have no session
+ * of their own. A Google ID token lives ONE HOUR, and nothing renewed it once
+ * past the sign-in screen: `onToken` and `promptSilently` were wired only into
+ * SignIn.tsx. So an hour into every stream, AI name and Voice began refusing
+ * with "Sign in with Google to continue." while the app showed the person
+ * signed in for another thirteen hours — because the backend session, which is
+ * what the rest of the app uses, was indeed still good.
+ *
+ * Two features silently stopping an hour in, on the two things somebody stands
+ * in a factory using. So the token is checked before it is sent, and renewed
+ * through Google's own silent prompt if it is short. That prompt is best
+ * effort by design: it can decline. If it does, the message says which
+ * features need the sign-in refreshed rather than claiming the person is
+ * signed out.
+ */
+async function freshIdToken(): Promise<string> {
+  if (!tokenNeedsRenewal()) {
+    const current = getIdToken()
+    if (current) return current
+  }
+
+  // Ask Google, then wait briefly for the credential to come back through
+  // onToken. Short, because this sits in front of a control someone just
+  // pressed: a slow renewal must not read as a slow AI.
+  await promptSilently().catch(() => {})
+  const renewed = await new Promise<string | null>((resolve) => {
+    const stop = onToken((t) => {
+      stop()
+      clearTimeout(timer)
+      resolve(t)
+    })
+    const timer = setTimeout(() => {
+      stop()
+      resolve(null)
+    }, 4_000)
+  })
+  if (renewed) {
+    setIdToken(renewed)
+    return renewed
+  }
+
+  const existing = getIdToken()
+  if (existing) return existing
+  throw new ScriptError(
+    401,
+    'Google needs to check your sign-in again before AI name and Voice will work. Everything else is fine. Open More and sign out, then back in.',
+    'GOOGLE_TOKEN_STALE',
+  )
+}
+
 async function fn<T>(name: string, body: Record<string, unknown>): Promise<T> {
-  const token = getIdToken()
-  if (!token) throw new ScriptError(401, 'Sign in with Google to continue.')
+  const token = await freshIdToken()
 
   let response: Response
   try {

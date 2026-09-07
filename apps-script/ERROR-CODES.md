@@ -31,17 +31,29 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | --- | --- | --- |
 | `LISTING_FULL` | Product.gs | The listing holds 100 variations, TikTok's cap for Singapore. Not a fault: the app offers a continuation listing. |
 | `LISTING_BUSY` | Lock.gs | Another write holds the script lock. Not a fault: the client retries. If it persists for minutes, a write is stuck — read the execution log. |
+| `NO_TOKEN` | Auth.gs | The request reached the backend carrying no sign-in at all. Almost never means signed out: the client refuses to send a request without one. It means the POST body was dropped by the redirect Apps Script answers with. The app retries as a GET and reports CREDENTIAL_LOST_IN_TRANSIT if that also fails. |
+| `CREDENTIAL_LOST_IN_TRANSIT` | script-api.ts | Both attempts reached the backend without the sign-in. The session is still good; the request is not. Try again. |
+| `SESSION_EXPIRED` | Auth.gs | The 14-hour backend session has run out. Signing in again is the fix, and this is the only common code for which that is true. |
+| `SESSION_INVALID` | Auth.gs | The session token did not verify. Either it was edited, or SESSION_SECRET changed in Script Properties, which invalidates every session at once. |
+| `TOKEN_REJECTED` | Auth.gs | Google refused the ID token, normally because it is over an hour old. Sign in again. |
+| `GOOGLE_TOKEN_STALE` | api.ts | The Google ID token is stale and silent renewal declined. Only AI name and Voice need it; everything else keeps working. Sign out and back in. |
+| `GOOGLE_UNREACHABLE` | Auth.gs | The backend could not reach Google to check the sign-in. Nobody is signed out; wait and retry. |
+| `BACKEND_NOT_CONFIGURED` | Auth.gs | The backend has no Google client id, so it cannot verify anyone. A deployment fault. Run checkSetup. |
+| `CLIENT_ID_MISMATCH` | Auth.gs | The app and the backend are configured for different Google clients. Run checkSetup for both values. |
+| `ACCOUNT_BLOCKED` | Api.gs | This account is blocked in the Users tab. An admin can change it under More then Users. |
+| `AWAITING_APPROVAL` | Api.gs | The account signed in but has never been approved. An admin approves it under More then Users. |
+| `TIMEOUT` | script-api.ts | The phone gave up waiting. On a read nothing changed and retrying is safe; on a write the outcome is unknown and the queue asks before assuming. |
 
 ## Codes
 
 | Code | Where | Message (as raised) |
 | --- | --- | --- |
 | `TS-UNC-00` | Api.gs | An error without a code reached the API handler. The message is prefixed with the runtime error type (TypeError, Exception). This is a gap in the code: find the line from the execution log stack and give it a code. |
-| `TS-API-01` | Api.gs:369 | Unknown role: . Expected one of , . |
-| `TS-API-02` | Api.gs:376 | The owner account cannot be demoted. |
-| `TS-API-03` | Api.gs:389 | No such user: |
+| `TS-API-01` | Api.gs:375 | Unknown role: . Expected one of , . |
+| `TS-API-02` | Api.gs:382 | The owner account cannot be demoted. |
+| `TS-API-03` | Api.gs:395 | No such user: |
 | `TS-API-04` | Api.gs:26 | took s |
-| `TS-API-05` | Api.gs:372 | No email given, so there is nobody to change. |
+| `TS-API-05` | Api.gs:378 | No email given, so there is nobody to change. |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
 | `TS-EXP-02` | Export.gs:535 | Unknown shop: |
 | `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |

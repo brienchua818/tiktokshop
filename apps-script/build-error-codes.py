@@ -38,6 +38,38 @@ FIXED = [
                                    'the app offers a continuation listing.'),
     ('LISTING_BUSY', 'Lock.gs', 'Another write holds the script lock. Not a fault: the client retries. '
                                 'If it persists for minutes, a write is stuck — read the execution log.'),
+
+    # The sign-in layer refuses through refuse_(), not fail_(), so none of
+    # these is a TS- code and the scanner below cannot see them. They were
+    # therefore absent from this registry, which is the one place the app tells
+    # people to look — and they are the codes most likely to be photographed,
+    # because every one of them stops the whole app rather than one action.
+    ('NO_TOKEN', 'Auth.gs', 'The request reached the backend carrying no sign-in at all. Almost never means '
+                            'signed out: the client refuses to send a request without one. It means the POST '
+                            'body was dropped by the redirect Apps Script answers with. The app retries as a '
+                            'GET and reports CREDENTIAL_LOST_IN_TRANSIT if that also fails.'),
+    ('CREDENTIAL_LOST_IN_TRANSIT', 'script-api.ts', 'Both attempts reached the backend without the sign-in. '
+                                                    'The session is still good; the request is not. Try again.'),
+    ('SESSION_EXPIRED', 'Auth.gs', 'The 14-hour backend session has run out. Signing in again is the fix, and '
+                                   'this is the only common code for which that is true.'),
+    ('SESSION_INVALID', 'Auth.gs', 'The session token did not verify. Either it was edited, or SESSION_SECRET '
+                                   'changed in Script Properties, which invalidates every session at once.'),
+    ('TOKEN_REJECTED', 'Auth.gs', 'Google refused the ID token, normally because it is over an hour old. '
+                                  'Sign in again.'),
+    ('GOOGLE_TOKEN_STALE', 'api.ts', 'The Google ID token is stale and silent renewal declined. Only AI name '
+                                     'and Voice need it; everything else keeps working. Sign out and back in.'),
+    ('GOOGLE_UNREACHABLE', 'Auth.gs', 'The backend could not reach Google to check the sign-in. Nobody is '
+                                      'signed out; wait and retry.'),
+    ('BACKEND_NOT_CONFIGURED', 'Auth.gs', 'The backend has no Google client id, so it cannot verify anyone. '
+                                          'A deployment fault. Run checkSetup.'),
+    ('CLIENT_ID_MISMATCH', 'Auth.gs', 'The app and the backend are configured for different Google clients. '
+                                      'Run checkSetup for both values.'),
+    ('ACCOUNT_BLOCKED', 'Api.gs', 'This account is blocked in the Users tab. An admin can change it under '
+                                  'More then Users.'),
+    ('AWAITING_APPROVAL', 'Api.gs', 'The account signed in but has never been approved. An admin approves it '
+                                    'under More then Users.'),
+    ('TIMEOUT', 'script-api.ts', 'The phone gave up waiting. On a read nothing changed and retrying is safe; '
+                                 'on a write the outcome is unknown and the queue asks before assuming.'),
 ]
 
 pat = re.compile(r"(?:fail_|warn_)\(\s*'(TS-[A-Z]+-\d+)'\s*,\s*(.*)", re.S)

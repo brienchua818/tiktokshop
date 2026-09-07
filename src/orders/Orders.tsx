@@ -139,6 +139,10 @@ export default function Orders({ shop }: { shop: Shop }) {
     }
     setOpenListing(listingId)
     setDetail(null)
+    // The other three handlers clear this before starting and this one did
+    // not, so a refusal from a previous action stayed on screen while a
+    // perfectly successful drill-down rendered underneath it.
+    setError('')
     try {
       setDetail(await api.listingOrders(listingId, win))
     } catch (e: unknown) {

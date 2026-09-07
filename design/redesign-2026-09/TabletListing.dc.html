@@ -8,28 +8,25 @@
 <x-dc>
 <helmet>
   <style>
-/* Tokens lifted from src/index.css and the Tailwind classes in use. */
-body { margin: 0; background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
-a { color: #ec4899; } a:hover { color: #f472b6; }
+body { margin: 0; background: #0f0f0f; color: #ffffff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
+a { color: #ec4899; } a:hover { color: #ec4899; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-
-
   </style>
 </helmet>
 
 <div style="display: flex; flex-direction: column; width: 1194px; height: 834px; background: #0f0f0f; overflow: hidden;">
   <div style="display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 16px; background: #161616; border-bottom: 1px solid rgba(255,255,255,0.10); flex-shrink: 0;">
-    <span style="font-size: 15px; font-weight: 700; color: #ec4899; letter-spacing: -0.01em;">TikShop</span>
-    <div style="display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px 0 12px; border-radius: 8px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.10);"><span style="font-size: 14px; font-weight: 600;">HOUZE</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M6 9l6 6 6-6"/></svg></div>
+    <span style="font-size: 15px; font-weight: 700; color: #ec4899;">TikShop</span>
+    <div style="display: flex; align-items: center; gap: 6px; height: 34px; padding: 0 10px 0 12px; border-radius: 8px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.10);"><span style="font-size: 14px; font-weight: 600; color: #ffffff;">HOUZE</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #9ca3af;"><path d="M6 9l6 6 6-6"/></svg></div>
     <div style="display: flex; align-items: center; gap: 4px; margin-left: 12px;"><div style="display: flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 8px; background: #ec4899;"><span style="font-size: 14px; font-weight: 600; color: #fff;">Listing</span></div><div style="display: flex; align-items: center; height: 36px; padding: 0 14px; border-radius: 8px; background: transparent;"><span style="font-size: 14px; font-weight: 600; color: #9ca3af;">Orders</span></div></div>
     <div style="flex-grow: 1;"></div>
     <div style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: rgba(59,130,246,0.15);"><span style="width: 6px; height: 6px; border-radius: 3px; background: #60a5fa; display: block;"></span><span style="font-size: 12px; color: #93c5fd;">1 waiting</span></div>
-    <span style="font-size: 12px; color: #6b7280;">Brien · Sign out</span>
+    <div style="display: flex; align-items: center; gap: 6px;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #6b7280;"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg><span style="font-size: 12px; color: #6b7280;">Brien · Sign out</span></div>
   </div>
   <div style="display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 12px; padding: 12px 16px 16px; flex-grow: 1; min-height: 0;">
     <div style="display: flex; flex-direction: column; gap: 10px; min-width: 0;">
       <div style="display: flex; align-items: center; gap: 10px; height: 40px;">
-        <span style="font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;">HOUZE x Table Matters - I12 Clearance Sale</span>
+        <span style="font-size: 15px; font-weight: 600; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;">HOUZE x Table Matters - I12 Clearance Sale</span>
         <span style="font-size: 12px; color: #9ca3af; white-space: nowrap;">10/100 variations</span>
         <span style="display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; background: rgba(16,185,129,0.12); color: #34d399; font-size: 12px; font-weight: 600;">Live</span>
         <div style="flex-grow: 1;"></div>
@@ -43,35 +40,27 @@ a { color: #ec4899; } a:hover { color: #f472b6; }
           <span style="font-size: 13px; color: #9ca3af; text-decoration: underline; text-underline-offset: 3px;">Bulk add</span>
         </div>
         <div style="display: flex; gap: 14px;">
-          <div style="display: flex; align-items: center; justify-content: center; width: 200px; height: 200px; border-radius: 12px; background: #111111; border: 1px dashed rgba(255,255,255,0.14); flex-shrink: 0;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20 16l-5-5-7 8"/></svg></div>
+          <div style="display: flex; align-items: center; justify-content: center; width: 200px; height: 200px; border-radius: 12px; background: #111111; border: 1px dashed rgba(255,255,255,0.14); flex-shrink: 0;"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #4b5563;"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20 16l-5-5-7 8"/></svg></div>
           <div style="display: flex; flex-direction: column; gap: 10px; flex-grow: 1; min-width: 0;">
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;">
-              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #ec4899; border: 1px solid #ec4899;">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg><span style="font-size: 14px; font-weight: 600; color: #fff;">Camera</span></div>
-              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: rgba(147,51,234,0.8); border: 1px solid rgba(147,51,234,0.8);">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg><span style="font-size: 14px; font-weight: 600; color: #fff;">Voice</span></div>
-              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #111111; border: 1px solid rgba(255,255,255,0.10);">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20 16l-5-5-7 8"/></svg><span style="font-size: 14px; font-weight: 600; color: #d1d5db;">Photos</span></div>
-              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #111111; border: 1px solid rgba(255,255,255,0.10);">
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg><span style="font-size: 14px; font-weight: 600; color: #d1d5db;">AI name</span></div>
+              <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #ec4899; border: 1px solid #ec4899;"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #ffffff;"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg><span style="font-size: 14px; font-weight: 600; color: #ffffff;">Camera</span></div><div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: rgba(147,51,234,0.8); border: 1px solid rgba(147,51,234,0.8);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #ffffff;"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M9 21h6"/></svg><span style="font-size: 14px; font-weight: 600; color: #ffffff;">Voice</span></div><div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #111111; border: 1px solid rgba(255,255,255,0.10);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #d1d5db;"><rect x="3.5" y="5" width="17" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="M20 16l-5-5-7 8"/></svg><span style="font-size: 14px; font-weight: 600; color: #d1d5db;">Photos</span></div><div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 52px; border-radius: 10px; background: #111111; border: 1px solid rgba(255,255,255,0.10);"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #d1d5db;"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8z"/></svg><span style="font-size: 14px; font-weight: 600; color: #d1d5db;">AI name</span></div>
             </div>
             <div style="display: flex; flex-direction: column; gap: 4px;"><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #4b5563;">Variant name — say it, or type it</span></div><span class="mono" style="font-size: 12px; color: #6b7280; padding-left: 2px;">B10 · name it above</span></div>
             <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;"><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #6b7280;">$</span><span style="font-size: 16px; color: #4b5563;">Price</span></div><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #4b5563;">Stock</span></div></div>
           </div>
         </div>
         <div style="display: flex; justify-content: flex-end;">
-          <div style="display: flex; align-items: center; justify-content: center; height: 48px; padding: 0 28px; border-radius: 10px; background: #ec4899;"><span style="font-size: 15px; font-weight: 600;">Save B10 to queue</span></div>
+          <div style="display: flex; align-items: center; justify-content: center; height: 48px; padding: 0 28px; border-radius: 10px; background: #ec4899;"><span style="font-size: 15px; font-weight: 600; color: #fff;">Save B10 to queue</span></div>
         </div>
       </div>
     </div>
     <div style="display: flex; flex-direction: column; min-height: 0;">
-      
 <div style="display: flex; flex-direction: column; margin: 0; border-radius: 12px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.08); overflow: hidden; flex-grow: 1; min-height: 0;">
   <div style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 4px 0 12px; border-bottom: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;">
     <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: #9ca3af;">SKUS</span>
     <span style="font-size: 12px; color: #6b7280;">9 of 10 sent · checked 12:56</span>
     <div style="flex-grow: 1;"></div>
-    <div style="display: flex; align-items: center; justify-content: center; width: 44px; height: 40px; border-radius: 8px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg></div>
+    <div style="display: flex; align-items: center; justify-content: center; width: 44px; height: 40px; border-radius: 8px;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d1d5db" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #d1d5db;"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4v5h-5"/></svg></div>
   </div>
   <div style="display: flex; flex-direction: column; overflow: hidden; flex-grow: 1; min-height: 0;">
     <div style="display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
@@ -166,11 +155,10 @@ a { color: #ec4899; } a:hover { color: #f472b6; }
   <span style="font-size: 12px; font-weight: 600; color: #34d399;">Live</span>
 </div>
     <div style="display: flex; align-items: center; gap: 8px; height: 40px; padding: 0 12px;">
-      <span style="font-size: 12px; color: #6b7280;">+1 variation added outside this app</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M9 6l6 6-6 6"/></svg>
+      <span style="font-size: 12px; color: #6b7280;">+1 variation added outside this app</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0; color: #4b5563;"><path d="M9 6l6 6-6 6"/></svg>
     </div>
   </div>
-</div>
-    </div>
+</div></div>
   </div>
 </div>
 </x-dc>

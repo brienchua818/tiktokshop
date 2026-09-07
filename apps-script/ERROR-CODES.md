@@ -37,9 +37,9 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | Code | Where | Message (as raised) |
 | --- | --- | --- |
 | `TS-UNC-00` | Api.gs | An error without a code reached the API handler. The message is prefixed with the runtime error type (TypeError, Exception). This is a gap in the code: find the line from the execution log stack and give it a code. |
-| `TS-API-01` | Api.gs:318 | Unknown role: |
-| `TS-API-02` | Api.gs:321 | The owner account cannot be demoted. |
-| `TS-API-03` | Api.gs:334 | No such user: |
+| `TS-API-01` | Api.gs:334 | Unknown role: |
+| `TS-API-02` | Api.gs:337 | The owner account cannot be demoted. |
+| `TS-API-03` | Api.gs:350 | No such user: |
 | `TS-API-04` | Api.gs:26 | took s |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
 | `TS-EXP-02` | Export.gs:535 | Unknown shop: |
@@ -64,7 +64,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-ORD-04` | Orders.gs:111 | Unknown shop: |
 | `TS-ORD-05` | Orders.gs:115 | The end of the range is before its start. |
 | `TS-ORD-06` | Orders.gs:131 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
-| `TS-ORD-07` | Orders.gs:442 | seller_sku lookup: could not read listing : [ ] |
+| `TS-ORD-07` | Orders.gs:448 | seller_sku lookup: could not read listing : [ ] |
 | `TS-ORD-08` | Orders.gs:198 | order line(s) have no identifier from any source ( ) |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:151 | Could not read the listing: |

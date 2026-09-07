@@ -101,19 +101,19 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-ink px-4">
-      <div className="w-full max-w-sm bg-surface border border-white/10 rounded-2xl p-8 space-y-6">
+      <div className="w-full max-w-sm bg-surface border border-line rounded-2xl p-8 space-y-6">
         <div className="text-center space-y-1">
           <p className="text-accent font-bold text-2xl tracking-tight">TikShop</p>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs text-faint">
             Live listing for HOUZE, Table Matters and Painting Matters
           </p>
         </div>
 
         {error && (
-          <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2.5 space-y-1">
+          <div className="text-xs text-bad bg-bad-tint border border-bad-line rounded-lg px-3 py-2.5 space-y-1">
             <p>{error}</p>
             {fatal && (
-              <p className="text-red-400/70">
+              <p className="text-bad/70">
                 Signing in again will not help — this is a setup problem on the server. Send
                 Brien this message.
               </p>
@@ -124,12 +124,12 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
         {/* Not an error, and styled so it does not read as one: the account is
             fine, it simply has not been let in yet. */}
         {pendingApproval && (
-          <div className="text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2.5 space-y-1">
-            <p className="text-amber-200">
+          <div className="text-xs bg-warn-tint border border-warn-line rounded-lg px-3 py-2.5 space-y-1">
+            <p className="text-warn">
               Signed in as <span className="font-medium">{pendingApproval}</span>, waiting for
               approval.
             </p>
-            <p className="text-amber-200/70">
+            <p className="text-warn/70">
               Ask Brien to set this account to <span className="font-mono">lister</span> in the
               Users tab. Nothing else is needed.
             </p>
@@ -140,9 +140,9 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
             flow, so drawing our own would misrepresent what is happening. */}
         <div ref={buttonRef} className="flex justify-center min-h-11" aria-busy={busy} />
 
-        {busy && <p className="text-xs text-gray-500 text-center">Checking your access…</p>}
+        {busy && <p className="text-xs text-faint text-center">Checking your access…</p>}
 
-        <p className="text-xs text-gray-600 text-center">
+        <p className="text-xs text-ghost text-center">
           Any Google account can sign in. Being approved to list is separate, and is how access is
           granted and revoked.
         </p>

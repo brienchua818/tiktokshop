@@ -12,7 +12,10 @@
     "test": "vitest run && node apps-script/test/run.cjs",
     "test:web": "vitest run",
     "test:apps-script": "node apps-script/test/run.cjs",
-    "check:devices": "npm run build && node tools/device-check.mjs"
+    "check:devices": "npm run build && node tools/device-check.mjs",
+    "build:audit": "VITE_APPS_SCRIPT_URL=https://script.google.com/macros/s/AUDIT/exec VITE_GOOGLE_CLIENT_ID=audit.apps.googleusercontent.com vite build",
+    "audit:ui": "npm run build:audit && node tools/ui-audit.mjs",
+    "audit:ui:shots": "npm run build:audit && node tools/ui-audit.mjs --shots"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",
@@ -31,6 +34,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^6.1.0",
+    "happy-dom": "^20.14.0",
     "playwright": "^1.62.1",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",

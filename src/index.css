@@ -1,20 +1,171 @@
 @import 'tailwindcss';
 
-/* Theme carried over from the app the team already knows, so the rebuild
-   doesn't feel like a new tool: near-black surfaces, pink for primary
-   actions, emerald for export, amber for SKU identifiers. */
-@theme {
-  --color-ink: #0f0f0f;
-  --color-surface: #161616;
-  --color-raised: #1a1a1a;
-  --color-sunken: #111111;
-  --color-accent: #ec4899;
-  --color-accent-hover: #f472b6;
-  --color-identifier: #fbbf24;
+/**
+ * Two palettes, one set of roles.
+ *
+ * `@theme inline` means Tailwind inlines these as `var(--c-…)` references
+ * rather than baking the value into each utility — which is what makes a
+ * runtime theme switch possible at all. Every role is defined for both modes
+ * below; a colour with only one definition is a colour that breaks in the
+ * other mode, so there are no bare hex values left in the components.
+ *
+ * Dark is the default and unchanged from what the team already uses. Day is
+ * the same roles on a warm off-white, each hue darkened just enough to hold
+ * 4.5:1 against its background — amber at #fbbf24 is unreadable on white, so
+ * an identifier in day mode is #b45309.
+ */
+@theme inline {
+  /* surfaces */
+  --color-ink: var(--c-ink);
+  --color-surface: var(--c-surface);
+  --color-raised: var(--c-raised);
+  --color-sunken: var(--c-sunken);
+  --color-chip: var(--c-chip);
+  --color-chip2: var(--c-chip2);
+  --color-scrim: var(--c-scrim);
+
+  /* lines */
+  --color-hair: var(--c-hair);
+  --color-line2: var(--c-line2);
+  --color-line: var(--c-line);
+  --color-line3: var(--c-line3);
+
+  /* text */
+  --color-fg: var(--c-fg);
+  --color-fg2: var(--c-fg2);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-ghost: var(--c-ghost);
+
+  /* brand and identity */
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-identifier: var(--c-identifier);
+  --color-ref: var(--c-ref);
+  --color-voice: var(--c-voice);
+  --color-voice-hover: var(--c-voice-hover);
+
+  /* status: text, tint fill, tint border, solid fill, ink on solid */
+  --color-ok: var(--c-ok);
+  --color-ok-tint: var(--c-ok-tint);
+  --color-ok-line: var(--c-ok-line);
+  --color-ok-solid: var(--c-ok-solid);
+  --color-on-ok: var(--c-on-ok);
+  --color-warn: var(--c-warn);
+  --color-warn-tint: var(--c-warn-tint);
+  --color-warn-line: var(--c-warn-line);
+  --color-warn-solid: var(--c-warn-solid);
+  --color-on-warn: var(--c-on-warn);
+  --color-bad: var(--c-bad);
+  --color-bad-tint: var(--c-bad-tint);
+  --color-bad-line: var(--c-bad-line);
+  --color-bad-solid: var(--c-bad-solid);
+  --color-bad-solid-hover: var(--c-bad-solid-hover);
+  --color-info: var(--c-info);
+  --color-info-tint: var(--c-info-tint);
+}
+
+/* Dark — the default, and what the team already knows. */
+:root {
+  --c-ink: #0f0f0f;
+  --c-surface: #161616;
+  --c-raised: #1a1a1a;
+  --c-sunken: #111111;
+  --c-chip: rgba(255, 255, 255, 0.05);
+  --c-chip2: rgba(255, 255, 255, 0.1);
+  --c-scrim: rgba(0, 0, 0, 0.7);
+
+  --c-hair: rgba(255, 255, 255, 0.05);
+  --c-line2: rgba(255, 255, 255, 0.08);
+  --c-line: rgba(255, 255, 255, 0.1);
+  --c-line3: rgba(255, 255, 255, 0.18);
+
+  --c-fg: #ffffff;
+  --c-fg2: #d1d5db;
+  --c-muted: #9ca3af;
+  --c-faint: #6b7280;
+  --c-ghost: #4b5563;
+
+  --c-accent: #ec4899;
+  --c-accent-hover: #f472b6;
+  --c-identifier: #fbbf24;
+  --c-voice: #9333ea;
+  --c-voice-hover: #a855f7;
+
+  --c-ok: #34d399;
+  --c-ok-tint: rgba(16, 185, 129, 0.1);
+  --c-ok-line: rgba(16, 185, 129, 0.3);
+  --c-ok-solid: #10b981;
+  --c-on-ok: #052e16;
+  --c-warn: #fbbf24;
+  --c-warn-tint: rgba(245, 158, 11, 0.1);
+  --c-warn-line: rgba(245, 158, 11, 0.3);
+  --c-warn-solid: #fbbf24;
+  --c-on-warn: #1c1917;
+  --c-bad: #f87171;
+  --c-bad-tint: rgba(239, 68, 68, 0.1);
+  --c-bad-line: rgba(239, 68, 68, 0.3);
+  --c-bad-solid: #dc2626;
+  --c-bad-solid-hover: #ef4444;
+  --c-info: #60a5fa;
+  --c-info-tint: rgba(59, 130, 246, 0.15);
+
+  /* A machine reference — a TikTok listing ID. Cyan so the eye skips it
+     when reading names, and finds it instantly when matching an ID. */
+  --c-ref: #22d3ee;
+}
+
+/* Day — for a bright factory floor. */
+:root[data-theme='day'] {
+  --c-ink: #f4f4f2;
+  --c-surface: #ffffff;
+  --c-raised: #ffffff;
+  --c-sunken: #f0f0ee;
+  --c-chip: rgba(0, 0, 0, 0.04);
+  --c-chip2: rgba(0, 0, 0, 0.08);
+  --c-scrim: rgba(17, 17, 17, 0.45);
+
+  --c-hair: rgba(0, 0, 0, 0.06);
+  --c-line2: rgba(0, 0, 0, 0.08);
+  --c-line: rgba(0, 0, 0, 0.12);
+  --c-line3: rgba(0, 0, 0, 0.2);
+
+  --c-fg: #111111;
+  --c-fg2: #1f2937;
+  --c-muted: #4b5563;
+  --c-faint: #6b7280;
+  --c-ghost: #9ca3af;
+
+  --c-accent: #db2777;
+  --c-accent-hover: #be185d;
+  --c-identifier: #b45309;
+  --c-voice: #7e22ce;
+  --c-voice-hover: #6b21a8;
+
+  --c-ok: #047857;
+  --c-ok-tint: rgba(5, 150, 105, 0.1);
+  --c-ok-line: rgba(5, 150, 105, 0.35);
+  --c-ok-solid: #059669;
+  --c-on-ok: #ffffff;
+  --c-warn: #b45309;
+  --c-warn-tint: rgba(180, 83, 9, 0.1);
+  --c-warn-line: rgba(180, 83, 9, 0.35);
+  --c-warn-solid: #b45309;
+  --c-on-warn: #ffffff;
+  --c-bad: #b91c1c;
+  --c-bad-tint: rgba(185, 28, 28, 0.08);
+  --c-bad-line: rgba(185, 28, 28, 0.3);
+  --c-bad-solid: #b91c1c;
+  --c-bad-solid-hover: #991b1b;
+  --c-info: #1d4ed8;
+  --c-info-tint: rgba(29, 78, 216, 0.1);
+
+  --c-ref: #0e7490;
 }
 
 html {
   color-scheme: dark;
+  background: var(--c-ink);
   /* The app is used one-handed on a phone; stop iOS zooming on input focus
      and stop rubber-banding over a fixed header. */
   -webkit-text-size-adjust: 100%;
@@ -23,8 +174,8 @@ html {
 
 body {
   margin: 0;
-  background: var(--color-ink);
-  color: #fff;
+  background: var(--c-ink);
+  color: var(--c-fg);
   font-family:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   /* Respect the notch when installed to the home screen. */
@@ -49,6 +200,13 @@ button {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* The UA paints scrollbars, form widgets and the overscroll gutter from
+   this, and it is an inherited property — so it has to move with the theme
+   or a day-mode page keeps dark scrollbars. */
+:root[data-theme='day'] {
+  color-scheme: light;
 }
 
 /* ---------------------------------------------------------------------------

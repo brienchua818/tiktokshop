@@ -17,6 +17,8 @@ import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
 import { driftedDrafts, landed, mergeRows } from './reconcile'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
+import Icon from '../ui/Icon'
+import { useDismiss } from '../ui/useDismiss'
 
 /**
  * Marks a draft parked because its listing is full, as opposed to one parked
@@ -45,12 +47,21 @@ export default function DraftQueue({
   drafts,
   listingId,
   onChanged,
+  onLive,
   onDelete,
 }: {
   drafts: QueuedDraft[]
   /** The listing these SKUs belong to, so its live state can be read back. */
   listingId: string | null
   onChanged: () => Promise<void>
+  /**
+   * Hand the listing's state upward.
+   *
+   * The review state and the real variation count belong in the listing bar
+   * at the top of the screen, not in a banner inside this list — it is the
+   * same fact, and stated here it was 400 px below the number it explains.
+   */
+  onLive?: (state: ListingState | null) => void
   onDelete: (draftId: string) => void | Promise<void>
 }) {
   const online = useOnlineStatus()
@@ -73,6 +84,15 @@ export default function DraftQueue({
   const [removeBusy, setRemoveBusy] = useState(false)
   /** Stays until dismissed: a confirmation that fades is one nobody sees. */
   const [removedNote, setRemovedNote] = useState('')
+
+  /**
+   * Did the last check give up rather than answer?
+   *
+   * A timeout is not the same as a failure — the figures on screen are simply
+   * older than they look. Saying so, with the time they are from, is what
+   * replaced two minutes of a frozen "Checking…".
+   */
+  const stale = checkError !== '' && live !== null
 
   async function confirmRemove() {
     if (!removing || !listingId) return
@@ -102,6 +122,7 @@ export default function DraftQueue({
     try {
       const state = await api.listingState(listingId)
       setLive(state)
+      onLive?.(state)
       await reconcile(state)
     } catch (e: unknown) {
       setCheckError(e instanceof ApiError ? e.display : String(e))
@@ -153,6 +174,15 @@ export default function DraftQueue({
    */
   const rows = useMemo(() => mergeRows(drafts, live), [drafts, live])
 
+  /** When TikTok was last asked, in Singapore time. Empty until it has been. */
+  const checkedAt = live
+    ? new Date(live.checked_at).toLocaleTimeString('en-SG', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Singapore',
+      })
+    : ''
+
   // Drain the queue whenever the connection returns or new work appears.
   // A single in-flight guard keeps a reconnect from starting a second pass
   // over the same items.
@@ -182,7 +212,6 @@ export default function DraftQueue({
   // Parked because the listing filled up, rather than because the SKU is bad.
   const full = allStuck.filter((d) => d.error?.includes(LISTING_FULL_MARKER))
   const stuck = allStuck.filter((d) => !d.error?.includes(LISTING_FULL_MARKER))
-  const pushed = drafts.filter((d) => d.status === 'pushed')
 
   /**
    * Move every SKU waiting on the full listing into one new continuation
@@ -205,9 +234,9 @@ export default function DraftQueue({
     // Floating grey words in an empty half-screen read as something failing to
     // load; a panel reads as a place where SKUs will appear.
     return (
-      <div className="bg-raised border border-white/8 border-dashed rounded-xl px-4 py-8 text-center">
-        <p className="text-sm text-gray-500">No SKUs yet</p>
-        <p className="text-xs text-gray-600 mt-1">
+      <div className="bg-raised border border-line2 border-dashed rounded-xl px-4 py-8 text-center">
+        <p className="text-sm text-faint">No SKUs yet</p>
+        <p className="text-xs text-ghost mt-1">
           They appear here as you add them, and upload themselves.
         </p>
       </div>
@@ -217,13 +246,13 @@ export default function DraftQueue({
   const renderDraft = (draft: QueuedDraft) => (
     <li
       key={draft.draft_id}
-      className="flex items-start gap-2 py-1.5 border-b border-white/5 last:border-0"
+      className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0"
     >
       <Thumbnail draft={draft} />
 
       <div className="min-w-0 flex-1">
         <p className="text-xs font-mono text-identifier">{draft.identifier}</p>
-        <p className="text-xs text-gray-400 truncate">{draft.title}</p>
+        <p className="text-xs text-muted truncate">{draft.title}</p>
 
         {/* Stock as TikTok has it, once a refresh has been done. Sold is
             derived — set minus what remains — because the product API
@@ -234,7 +263,7 @@ export default function DraftQueue({
         {/* TikTok's own rejection text, verbatim. A generic "failed" is
             what makes the current app hard to recover from. */}
         {draft.error && (
-          <p className="text-xs text-red-400 mt-0.5">
+          <p className="text-xs text-bad mt-0.5">
             {/* The marker is for the code, not the operator. */}
             {draft.error.replace(LISTING_FULL_MARKER, '').trim()}
           </p>
@@ -246,15 +275,16 @@ export default function DraftQueue({
         {draft.status === 'failed' && draft.attempts >= MAX_AUTO_ATTEMPTS && (
           <button
             onClick={() => void retryDraft(draft.draft_id).then(onChanged)}
-            className="mt-1 text-xs px-2.5 min-h-8 rounded-lg bg-accent/90 hover:bg-accent text-white"
+            className="mt-1 text-xs px-2.5 min-h-8 inline-flex items-center gap-1 rounded-lg bg-accent/90 hover:bg-accent text-white"
           >
-            ↻ Retry {draft.identifier}
+            <Icon name="refresh" size={14} />
+            Retry {draft.identifier}
           </button>
         )}
       </div>
 
       <div className="flex items-center gap-2 shrink-0">
-        <span className="text-xs text-gray-500">${draft.price}</span>
+        <span className="text-xs text-faint">${draft.price}</span>
         <StatusBadge
           draft={draft}
           live={liveFor(live, draft.identifier)}
@@ -265,10 +295,10 @@ export default function DraftQueue({
           // no confirmation stands between the tap and the result.
           <button
             onClick={() => void onDelete(draft.draft_id)}
-            className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
+            className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
             aria-label={`Delete ${draft.identifier}`}
           >
-            ✕
+            <Icon name="trash" size={16} />
           </button>
         ) : (
           // On TikTok: this takes something away from buyers, so it asks
@@ -279,10 +309,10 @@ export default function DraftQueue({
             return v?.on_tiktok && v.tiktok_sku_id && !v.removed ? (
               <button
                 onClick={() => setRemoving(v)}
-                className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
+                className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
                 aria-label={`Remove ${draft.identifier} from TikTok`}
               >
-                ✕
+                <Icon name="trash" size={16} />
               </button>
             ) : null
           })()
@@ -292,49 +322,68 @@ export default function DraftQueue({
   )
 
   return (
-    <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-3">
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* "Sent", not "live". A push landing means TikTok accepted the SKU;
-            whether buyers can see it is a separate question that only a
-            refresh can answer. */}
-        <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
-          SKUs ({pushed.length}/{drafts.length} sent{live ? ` · ${live.variations_on_tiktok} on TikTok` : ''})
-        </p>
-        {working && <span className="text-xs text-blue-400">Uploading…</span>}
-        {!online && <span className="text-xs text-amber-400">Waiting for a connection</span>}
+    <div className="bg-raised border border-line2 rounded-xl overflow-hidden">
+      {/*
+        A 44 px header, not a card lid.
+
+        "ON THIS LISTING" rather than "SKUs (9/10 sent)": the list is now
+        everything on the listing — this phone's, other phones', Seller
+        Center's — so a count of what THIS device sent is the wrong number to
+        lead with. The refresh is an icon on the right, in the corner a right
+        thumb reaches, and it says when it last looked rather than only whether
+        it is looking now.
+      */}
+      <div className="flex items-center gap-2 h-11 pl-3 pr-1 border-b border-line2">
+        <span className="text-xs font-semibold tracking-wide text-muted uppercase whitespace-nowrap">
+          On this listing
+        </span>
+        <span className="text-xs text-faint">{rows.length}</span>
         <span className="flex-1" />
-        {listingId && pushed.length > 0 && (
+        {working ? (
+          <span className="text-xs text-info whitespace-nowrap">Uploading…</span>
+        ) : !online ? (
+          <span className="text-xs text-warn whitespace-nowrap">Waiting for signal</span>
+        ) : stale ? (
+          // A check that gave up. The last good time stays on screen, because
+          // stale figures with a timestamp beat no figures at all.
+          <span className="text-xs text-warn whitespace-nowrap">
+            no reply · showing {checkedAt}
+          </span>
+        ) : (
+          checkedAt && <span className="text-xs text-faint whitespace-nowrap">checked {checkedAt}</span>
+        )}
+        {listingId && (
           <button
             onClick={() => void refresh()}
             disabled={checking}
-            className="text-xs px-2.5 min-h-8 rounded-lg border border-white/10 text-gray-300 hover:border-accent/50 disabled:opacity-50"
+            className={`min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg disabled:opacity-50 ${
+              stale ? 'text-warn' : 'text-fg2'
+            }`}
+            aria-label="Check TikTok for this listing"
+            title="Check TikTok for this listing"
           >
-            {checking ? 'Checking…' : '↻ Check TikTok'}
+            <Icon name="refresh" size={20} className={checking ? 'animate-spin' : ''} />
           </button>
         )}
       </div>
 
-      {/* The listing's own review state. TikTok resends the whole product for
-          review on every edit, so this is normal after each variation rather
-          than a sign of trouble — and saying so is the difference between
-          waiting calmly and opening Seller Center to check. */}
-      {live && <ReviewBanner live={live} />}
+      <div className="p-3 space-y-2.5">
 
       {removedNote && (
-        <div className="flex items-start gap-2 text-xs text-emerald-200 bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-3 py-2.5">
+        <div className="flex items-start gap-2 text-xs text-ok bg-ok-tint border border-ok-line rounded-lg px-3 py-2.5">
           <p className="flex-1">{removedNote}</p>
           <button
             onClick={() => setRemovedNote('')}
-            className="text-emerald-300/70 hover:text-white min-h-6 px-1"
+            className="text-ok/70 hover:text-fg min-h-6 px-1"
             aria-label="Dismiss"
           >
-            ✕
+            <Icon name="close" size={16} />
           </button>
         </div>
       )}
 
       {checkError && (
-        <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+        <p className="text-xs text-bad bg-bad-tint border border-bad-line rounded-lg px-3 py-2">
           {checkError}
         </p>
       )}
@@ -344,25 +393,25 @@ export default function DraftQueue({
           banner and its own action, well away from the failure banner, so
           nobody reads "could not be listed" and assumes something broke. */}
       {full.length > 0 && (
-        <div className="text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2.5 space-y-2">
-          <p className="text-amber-200">
+        <div className="text-xs bg-warn-tint border border-warn-line rounded-lg px-3 py-2.5 space-y-2">
+          <p className="text-warn">
             This listing is full at {MAX_SKUS_PER_PRODUCT} variations — TikTok's limit for
             Singapore. {full.length} SKU{full.length === 1 ? '' : 's'} waiting.
           </p>
           <button
             onClick={() => void continueInNewListing()}
-            className="min-h-11 w-full rounded-lg bg-amber-400 px-3 font-medium text-black active:scale-[0.99] transition-transform"
+            className="min-h-11 w-full rounded-lg bg-warn-solid px-3 font-medium text-on-warn active:scale-[0.99] transition-transform"
           >
             Start continuation listing
           </button>
-          <p className="text-amber-200/60">
+          <p className="text-warn/60">
             Creates a second listing for the same factory run. Your SKU numbering carries on.
           </p>
         </div>
       )}
 
       {stuck.length > 0 && (
-        <p className="text-xs text-red-300 bg-red-500/10 border border-red-500/30 rounded-lg px-3 py-2">
+        <p className="text-xs text-bad bg-bad-tint border border-bad-line rounded-lg px-3 py-2">
           {stuck.length} SKU{stuck.length === 1 ? '' : 's'} could not be listed and stopped
           retrying. Fix the problem shown, then retry.
         </p>
@@ -382,6 +431,7 @@ export default function DraftQueue({
           ),
         )}
       </ul>
+      </div>
 
       {removing && (
         <RemoveDialog
@@ -415,41 +465,44 @@ function RemoveDialog({
   onConfirm: () => void
 }) {
   const label = variant.identifier || variant.variant
+  // Escape backs out of a destructive confirmation, which is the one place a
+  // way out matters most.
+  useDismiss(busy ? () => {} : onCancel)
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 px-4 pb-6 sm:pb-0"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-scrim px-4 pb-6 sm:pb-0"
       onClick={busy ? undefined : onCancel}
     >
       <div
-        className="w-full max-w-sm bg-surface border border-red-500/30 rounded-2xl p-5 space-y-3"
+        className="w-full max-w-sm bg-surface border border-bad-line rounded-2xl p-5 space-y-3"
         role="alertdialog"
         aria-modal="true"
         onClick={(e) => e.stopPropagation()}
       >
-        <p className="text-sm font-semibold text-white">
+        <p className="text-sm font-semibold text-fg">
           Remove <span className="font-mono text-identifier">{label}</span> from TikTok?
         </p>
         {variant.variant && variant.variant !== label && (
-          <p className="text-xs text-gray-400 -mt-1">{variant.variant}</p>
+          <p className="text-xs text-muted -mt-1">{variant.variant}</p>
         )}
-        <ul className="text-xs text-gray-300 space-y-1.5 list-disc pl-4">
+        <ul className="text-xs text-fg2 space-y-1.5 list-disc pl-4">
           <li>Buyers will no longer see or purchase this variation.</li>
-          <li>Orders already placed for it are <span className="text-white">not</span> affected.</li>
+          <li>Orders already placed for it are <span className="text-fg">not</span> affected.</li>
           <li>The listing goes through TikTok review again. The other variations stay buyable meanwhile.</li>
-          <li className="text-amber-300">This cannot be undone from the app.</li>
+          <li className="text-warn">This cannot be undone from the app.</li>
         </ul>
         <div className="flex gap-2 pt-1">
           <button
             onClick={onCancel}
             disabled={busy}
-            className="flex-1 min-h-11 rounded-lg border border-white/15 text-sm text-white"
+            className="flex-1 min-h-11 rounded-lg border border-line3 text-sm text-fg"
           >
             Keep it
           </button>
           <button
             onClick={onConfirm}
             disabled={busy}
-            className="flex-1 min-h-11 rounded-lg bg-red-600 hover:bg-red-500 disabled:opacity-50 text-sm text-white font-medium"
+            className="flex-1 min-h-11 rounded-lg bg-bad-solid hover:bg-bad-solid-hover disabled:opacity-50 text-sm text-fg font-medium"
           >
             {busy ? 'Removing…' : `Remove ${label}`}
           </button>
@@ -495,7 +548,7 @@ function Thumbnail({ draft }: { draft: QueuedDraft }) {
     }
   }, [draft.draft_id])
 
-  if (!url) return <div className="w-9 h-9 rounded bg-white/5 shrink-0" />
+  if (!url) return <div className="w-9 h-9 rounded bg-chip shrink-0" />
   return <img src={url} alt="" className="w-9 h-9 rounded object-cover shrink-0" />
 }
 
@@ -504,80 +557,7 @@ function liveFor(live: ListingState | null, identifier: string): LiveVariant | n
   return live?.variants.find((v) => v.identifier === identifier) ?? null
 }
 
-/**
- * TikTok's product statuses, in the words of someone standing in a factory.
- *
- * Only the ones that can be seen from here are named. An unrecognised status
- * is shown verbatim rather than mapped to "unknown", because a status this
- * code has not met before is exactly the one worth reading.
- */
-const PRODUCT_STATUS: Record<string, { label: string; tone: string; note: string }> = {
-  ACTIVATE: {
-    label: 'Live',
-    tone: 'emerald',
-    note: 'Approved and buyable.',
-  },
-  PENDING: {
-    label: 'Under review',
-    tone: 'amber',
-    note: 'TikTok reviews the whole product after every change, so this is normal each time a variation is added. Variations already approved stay buyable throughout.',
-  },
-  FAILED: {
-    label: 'Rejected',
-    tone: 'red',
-    note: 'TikTok refused this listing. The reasons are below.',
-  },
-  DRAFT: { label: 'Draft', tone: 'gray', note: 'Not submitted yet.' },
-  SELLER_DEACTIVATED: {
-    label: 'Deactivated by you',
-    tone: 'gray',
-    note: 'Turned off in Seller Center, not by this app.',
-  },
-  PLATFORM_DEACTIVATED: {
-    label: 'Deactivated by TikTok',
-    tone: 'red',
-    note: 'TikTok took this listing down.',
-  },
-  FREEZE: { label: 'Frozen', tone: 'red', note: 'TikTok has frozen this listing.' },
-  DELETED: { label: 'Deleted', tone: 'red', note: 'This listing no longer exists on TikTok.' },
-}
 
-const TONES: Record<string, string> = {
-  emerald: 'text-emerald-300 bg-emerald-500/10 border-emerald-500/30',
-  amber: 'text-amber-200 bg-amber-500/10 border-amber-500/30',
-  red: 'text-red-300 bg-red-500/10 border-red-500/30',
-  gray: 'text-gray-300 bg-white/5 border-white/10',
-}
-
-function ReviewBanner({ live }: { live: ListingState }) {
-  const known = PRODUCT_STATUS[live.product_status]
-  const tone = TONES[known?.tone ?? 'gray']
-  const checked = new Date(live.checked_at).toLocaleTimeString('en-SG', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'Asia/Singapore',
-  })
-
-  return (
-    <div className={`text-xs border rounded-lg px-3 py-2.5 space-y-1 ${tone}`}>
-      <p className="font-medium">
-        {known?.label ?? (live.product_status || "Status unavailable")}
-        <span className="font-normal opacity-60">
-          {' '}
-          · {live.variations_on_tiktok} of {live.max_skus} variations · checked {checked}
-        </span>
-      </p>
-      {known?.note && <p className="opacity-70">{known.note}</p>}
-      {live.audit_reasons.length > 0 && (
-        <ul className="list-disc pl-4 space-y-0.5 opacity-90">
-          {live.audit_reasons.map((r, i) => (
-            <li key={i}>{r}</li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
 
 /**
  * A variation this phone has no draft for: pushed from another phone, or added
@@ -595,43 +575,43 @@ function RemoteRow({
   onRemove: (v: LiveVariant) => void
 }) {
   const badge = v.external
-    ? { text: 'Live', cls: 'text-emerald-400' }
+    ? { text: 'Live', cls: 'text-ok' }
     : v.removed
-      ? { text: 'Removed', cls: 'text-gray-500' }
+      ? { text: 'Removed', cls: 'text-faint' }
       : !v.on_tiktok
-        ? { text: 'Reviewing', cls: 'text-amber-400' }
+        ? { text: 'Reviewing', cls: 'text-warn' }
         : productStatus === 'ACTIVATE'
-          ? { text: 'Live', cls: 'text-emerald-400' }
-          : { text: 'Sent', cls: 'text-gray-400' }
+          ? { text: 'Live', cls: 'text-ok' }
+          : { text: 'Sent', cls: 'text-muted' }
   const who = v.external ? 'added outside this app' : v.created_by ? `listed by ${v.created_by}` : 'listed from another phone'
   return (
-    <li className="flex items-start gap-2 py-1.5 border-b border-white/5 last:border-0">
+    <li className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0">
       {v.image_url ? (
         <img src={v.image_url} alt="" className="w-9 h-9 rounded object-cover shrink-0" />
       ) : (
-        <div className="w-9 h-9 rounded bg-white/5 shrink-0 flex items-center justify-center text-gray-600 text-xs">
+        <div className="w-9 h-9 rounded bg-chip shrink-0 flex items-center justify-center text-ghost text-xs">
           {v.external ? 'SC' : '·'}
         </div>
       )}
       <div className="min-w-0 flex-1">
         <p className="text-xs font-mono text-identifier">{v.identifier || '—'}</p>
-        <p className="text-xs text-gray-400 truncate">{v.variant}</p>
-        <p className="text-xs text-gray-600">{who}</p>
+        <p className="text-xs text-muted truncate">{v.variant}</p>
+        <p className="text-xs text-ghost">{who}</p>
         {!v.external && <StockLine v={v} />}
         {v.external && (
-          <p className="text-xs text-gray-500 mt-0.5">{v.stock_available ?? 0} in stock</p>
+          <p className="text-xs text-faint mt-0.5">{v.stock_available ?? 0} in stock</p>
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
-        {v.price && <span className="text-xs text-gray-500">${v.price}</span>}
+        {v.price && <span className="text-xs text-faint">${v.price}</span>}
         <span className={`text-xs ${badge.cls}`}>{badge.text}</span>
         {v.on_tiktok && v.tiktok_sku_id && !v.removed && (
           <button
             onClick={() => onRemove(v)}
-            className="text-gray-600 hover:text-red-400 text-xs min-h-8 px-1"
+            className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
             aria-label={`Remove ${v.identifier || v.variant} from TikTok`}
           >
-            ✕
+            <Icon name="trash" size={16} />
           </button>
         )}
       </div>
@@ -645,7 +625,7 @@ function StockLine({ v }: { v: LiveVariant }) {
     // this decision, and the app agreeing with reality beats it insisting the
     // SKU should still be there.
     if (v.removed) {
-      return <p className="text-xs text-gray-500 mt-0.5">Removed from TikTok.</p>
+      return <p className="text-xs text-faint mt-0.5">Removed from TikTok.</p>
     }
     // Absence is not loss. TikTok omits a variation still under review, so a
     // SKU it has issued an id for is waiting, not gone — B5 read as missing
@@ -653,7 +633,7 @@ function StockLine({ v }: { v: LiveVariant }) {
     // second copy of something already on its way.
     if (v.under_review) {
       return (
-        <p className="text-xs text-amber-400/90 mt-0.5">
+        <p className="text-xs text-warn/90 mt-0.5">
           Under review — not shown by TikTok yet. Nothing to do.
         </p>
       )
@@ -661,16 +641,16 @@ function StockLine({ v }: { v: LiveVariant }) {
     // Ambiguous, and said so. Telling someone to retry a variation that is
     // merely pending adds a second copy, so this stops short of advising it.
     return (
-      <p className="text-xs text-amber-400/90 mt-0.5">
+      <p className="text-xs text-warn/90 mt-0.5">
         Not shown by TikTok yet. If it has not appeared in 30 minutes it was not added.
       </p>
     )
   }
   return (
-    <p className="text-xs text-gray-500 mt-0.5">
-      <span className="text-gray-300">{v.stock_available}</span> left of {v.stock_set}
+    <p className="text-xs text-faint mt-0.5">
+      <span className="text-fg2">{v.stock_available}</span> left of {v.stock_set}
       {v.sold !== null && v.sold > 0 && (
-        <span className="text-emerald-400/80"> · {v.sold} sold</span>
+        <span className="text-ok/80"> · {v.sold} sold</span>
       )}
     </p>
   )
@@ -696,40 +676,40 @@ function StatusBadge({
 }) {
   if (draft.status === 'pushed') {
     if (live && !live.on_tiktok) {
-      if (live.removed) return <span className="text-xs text-gray-500">Removed</span>
-      return <span className="text-xs text-amber-400">Reviewing</span>
+      if (live.removed) return <span className="text-xs text-faint">Removed</span>
+      return <span className="text-xs text-warn">Reviewing</span>
     }
     // Buyable requires two things: TikTok has the variation, and the product
     // it belongs to has cleared review. A variation can exist while the
     // product is still PENDING, and it is not purchasable then.
     if (live?.on_tiktok && productStatus === 'ACTIVATE') {
-      return <span className="text-xs text-emerald-400">Live</span>
+      return <span className="text-xs text-ok">Live</span>
     }
     return (
-      <span className="text-xs text-gray-400" title="Accepted by TikTok; see the listing status above">
+      <span className="text-xs text-muted" title="Accepted by TikTok; see the listing status above">
         Sent
       </span>
     )
   }
-  if (draft.status === 'uploading') return <span className="text-xs text-blue-400">…</span>
+  if (draft.status === 'uploading') return <span className="text-xs text-info">…</span>
   if (draft.status === 'failed') {
     // Still inside its automatic attempts: the queue will push it again by
     // itself (or find it already landed). "Failed" here sent someone to
     // Seller Center for a SKU that was minutes from sorting itself out.
     if (draft.attempts < MAX_AUTO_ATTEMPTS) {
       return (
-        <span className="text-xs text-amber-400" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
+        <span className="text-xs text-warn" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
           Retrying
         </span>
       )
     }
     return (
-      <span className="text-xs text-red-400" title={`${draft.attempts} attempts`}>
+      <span className="text-xs text-bad" title={`${draft.attempts} attempts`}>
         Failed
       </span>
     )
   }
-  return <span className="text-xs text-gray-500">Queued</span>
+  return <span className="text-xs text-faint">Queued</span>
 }
 
 /**

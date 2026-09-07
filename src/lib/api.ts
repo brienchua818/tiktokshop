@@ -191,6 +191,8 @@ export interface OrderSummary {
   from: string
   to: string
   listings: ListingTotals[]
+  /** Distinct orders in the window — not the sum of the per-listing counts. */
+  total_orders: number
   total_units: number
   total_revenue: number
 }
@@ -237,10 +239,31 @@ export interface ExportResult {
 }
 
 /** Identity plus what the allowlist says this person may do. */
+/** Where the data lives, served by the backend so no id is hardcoded here. */
+export interface DriveLinks {
+  sheet: string
+  log: string
+  exports: string
+  photos: string
+  root: string
+}
+
+/** One row of the allowlist, as the Users screen shows it. */
+export interface UserRow {
+  email: string
+  name: string
+  role: string
+  first_seen: string
+  last_seen: string
+  approved_by: string
+  note: string
+}
+
 export type Me = SignedInUser & {
   role: string
   approved: boolean
   admin: boolean
+  links?: DriveLinks
   /** A session this backend issued, good for a working day. Stored by `me()`. */
   session_token?: string
   session_expires_at?: string
@@ -344,6 +367,21 @@ export const api = {
       'removeVariation',
       { body: { listing_id: listingId, tiktok_sku_id: tiktokSkuId }, timeoutMs: 90_000 },
     ),
+
+  /** The allowlist. Admins only; the backend refuses everyone else with 403. */
+  users: () => call<UserRow[]>('users'),
+
+  /**
+   * Approve, demote or block someone.
+   *
+   * POST-only on the backend on purpose, so there is exactly one way to change
+   * a role and it cannot happen by following a link.
+   */
+  setRole: (email: string, role: string) =>
+    call<{ email: string; role: string }>('setRole', {
+      body: { email, role },
+      timeoutMs: 45_000,
+    }),
 
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>

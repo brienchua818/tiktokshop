@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '../lib/api'
+import { api, type ListingState } from '../lib/api'
 import { activePrefixFrom, formatIdentifier, nextIdentifier } from '../lib/identifiers'
 import {
   validateVariantName,
@@ -12,15 +12,19 @@ import {
   DEFAULT_DIMENSIONS,
   VALUE_NAME_MAX,
   PREFIX_MAX,
+  MAX_SKUS_PER_PRODUCT,
 } from '../lib/tiktok-rules'
 import { toBase64 } from '../lib/bytes'
 import { allDrafts, enqueue, removeDraft } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import type { Draft, Listing, Shop } from '../types'
-import CameraCapture from './CameraCapture'
+import PhotoBlock, { ActionButton } from './PhotoBlock'
 import VoiceCapture from './VoiceCapture'
 import DraftQueue from './DraftQueue'
+import BarSpacer from '../ui/BarSpacer'
 import BulkAdd from './BulkAdd'
+import Icon from '../ui/Icon'
+import { useDismiss } from '../ui/useDismiss'
 
 /**
  * Build SKUs against one factory stream.
@@ -48,6 +52,16 @@ export default function ListingDetail({
   const [prefixSeeded, setPrefixSeeded] = useState(false)
   const [listedSkus, setListedSkus] = useState<string[]>([])
   const [drafts, setDrafts] = useState<QueuedDraft[]>([])
+  const [editingPrefix, setEditingPrefix] = useState(false)
+  const [bulkOpen, setBulkOpen] = useState(false)
+  /**
+   * What the queue learned from its last look at TikTok.
+   *
+   * Lifted here so the listing bar can show the review state and the real
+   * variation count — the two facts that used to be a banner inside the queue
+   * and a number nobody could see until they scrolled to it.
+   */
+  const [live, setLive] = useState<ListingState | null>(null)
   const [allowance, setAllowance] = useState<{
     used: number | null
     cap: number
@@ -100,31 +114,47 @@ export default function ListingDetail({
     [listedSkus, draftIdentifiers, prefix],
   )
 
+  const productStatus = live?.product_status ?? null
+  const onTikTok = live?.variations_on_tiktok ?? null
+
   return (
-    <div className="space-y-4">
-      <div className="flex items-center gap-2">
-        <button onClick={onBack} className="text-gray-500 hover:text-white px-1" aria-label="Back">
-          ‹
+    <div className="space-y-2.5">
+      {/*
+        The listing, in one 44 px row: back, title, count, review state.
+
+        It replaces a 56 px header (id above name) plus the queue's separate
+        review banner, which said the same thing 400 px further down. The
+        pill IS the review state — "Live" only when TikTok has approved the
+        product, "Reviewing" while it has not.
+      */}
+      <div className="flex items-center gap-2 h-11">
+        <button
+          onClick={onBack}
+          className="min-h-11 min-w-11 -ml-2 inline-flex items-center justify-center text-muted"
+          aria-label="Back to listings"
+        >
+          <Icon name="chevron-right" size={20} className="rotate-180" />
         </button>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-mono text-cyan-400 truncate">{listing.listing_id}</p>
-          <p className="text-sm text-white font-medium truncate">
-            {listing.product_name ?? shop.brand}
-          </p>
-        </div>
+        <span className="text-sm font-semibold text-fg truncate min-w-0 flex-1">
+          {listing.product_name ?? shop.brand}
+        </span>
+        <span className="text-xs text-muted shrink-0 whitespace-nowrap">
+          {onTikTok === null ? `${drafts.length}` : `${onTikTok}`}/{MAX_SKUS_PER_PRODUCT}
+        </span>
+        <ListingPill status={productStatus} />
       </div>
 
       {/* The daily cap is surfaced before it bites. New shops are limited to
-          100 uploads a day, which a 200-SKU stream would hit at item 101. */}
-      {/* Only warn on a number we actually know. Without server-side push
+          100 uploads a day, which a 200-SKU stream would hit at item 101.
+          Only warned on a number we actually know: without server-side push
           tracking the figure is null, and inventing a confident one would be
           worse than showing none — it would be trusted. */}
       {allowance && allowance.remaining !== null && allowance.remaining <= 25 && (
         <p
-          className={`text-sm rounded-lg px-4 py-2 border ${
+          className={`text-xs rounded-lg px-3 py-2 border ${
             allowance.remaining === 0
-              ? 'bg-red-500/10 border-red-500/30 text-red-300'
-              : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+              ? 'bg-bad-tint border-bad-line text-bad'
+              : 'bg-warn-tint border-warn-line text-warn'
           }`}
         >
           {allowance.remaining === 0
@@ -132,8 +162,6 @@ export default function ListingDetail({
             : `${allowance.remaining} of ${shop.brand}'s ${allowance.cap} daily product uploads left.`}
         </p>
       )}
-
-      <IdentifierSettings prefix={prefix} onPrefix={setPrefix} nextIdentifier={formatIdentifier(next.prefix, next.seq)} />
 
       {/* One column on a phone, two on an iPad. See `.listing-columns` in
           index.css — the breakpoint is on width AND height, because a
@@ -146,18 +174,14 @@ export default function ListingDetail({
           adding the next one. During a stream that is the difference between
           noticing a rejection immediately and finding six at the end. */}
       <div className="listing-columns">
-        <div className="space-y-4 min-w-0">
+        <div className="min-w-0">
           <SkuForm
             shop={shop}
             listing={listing}
             identifier={formatIdentifier(next.prefix, next.seq)}
-            onSaved={refreshDrafts}
-          />
-
-          <BulkAdd
-            shop={shop}
-            listing={listing}
-            startIdentifier={formatIdentifier(next.prefix, next.seq)}
+            prefix={next.prefix}
+            onEditPrefix={() => setEditingPrefix(true)}
+            onBulkAdd={() => setBulkOpen(true)}
             onSaved={refreshDrafts}
           />
         </div>
@@ -167,6 +191,7 @@ export default function ListingDetail({
             drafts={drafts}
             listingId={listing.listing_id}
             onChanged={refreshDrafts}
+            onLive={setLive}
             onDelete={async (id) => {
               await removeDraft(id)
               await refreshDrafts()
@@ -174,61 +199,168 @@ export default function ListingDetail({
           />
         </div>
       </div>
+
+      {editingPrefix && (
+        <PrefixSheet
+          prefix={prefix}
+          nextIdentifier={formatIdentifier(next.prefix, next.seq)}
+          onPrefix={setPrefix}
+          onClose={() => setEditingPrefix(false)}
+        />
+      )}
+
+      {bulkOpen && (
+        <Sheet title="Bulk add" onClose={() => setBulkOpen(false)}>
+          <BulkAdd
+            shop={shop}
+            listing={listing}
+            startIdentifier={formatIdentifier(next.prefix, next.seq)}
+            onSaved={async () => {
+              await refreshDrafts()
+              setBulkOpen(false)
+            }}
+          />
+        </Sheet>
+      )}
+
+      {/* Clears the fixed List bar this screen adds. */}
+      <BarSpacer />
     </div>
   )
 }
 
-function IdentifierSettings({
+/**
+ * TikTok's review state for the whole product, as three words.
+ *
+ * This was a three-line banner inside the queue. It says one thing — is this
+ * buyable — so it is one pill, in the listing bar, where the count it belongs
+ * with already is.
+ */
+function ListingPill({ status }: { status: string | null }) {
+  if (status === null) {
+    return <span className="text-xs text-ghost shrink-0">—</span>
+  }
+  const known: Record<string, { label: string; cls: string }> = {
+    ACTIVATE: { label: 'Live', cls: 'bg-ok-tint text-ok' },
+    PENDING: { label: 'Reviewing', cls: 'bg-warn-tint text-warn' },
+    FAILED: { label: 'Rejected', cls: 'bg-bad-tint text-bad' },
+    FREEZE: { label: 'Frozen', cls: 'bg-bad-tint text-bad' },
+    DEACTIVATED: { label: 'Off', cls: 'bg-chip text-muted' },
+    DRAFT: { label: 'Draft', cls: 'bg-chip text-muted' },
+  }
+  // An unrecognised status is shown verbatim rather than mapped to "unknown":
+  // TikTok adding a state must not make the app lie about it.
+  const shown = known[status] ?? { label: status, cls: 'bg-chip text-muted' }
+  return (
+    <span
+      className={`shrink-0 inline-flex items-center h-6 px-2 rounded-md text-xs font-semibold ${shown.cls}`}
+    >
+      {shown.label}
+    </span>
+  )
+}
+
+/**
+ * The prefix editor, on demand.
+ *
+ * A 130 px card carried this permanently, for a value that is set once at the
+ * start of a factory run and then never touched. Now the identifier in the
+ * card header opens it.
+ */
+function PrefixSheet({
   prefix,
-  onPrefix,
   nextIdentifier: next,
+  onPrefix,
+  onClose,
 }: {
   prefix: string
-  onPrefix: (value: string) => void
   nextIdentifier: string
+  onPrefix: (value: string) => void
+  onClose: () => void
 }) {
   return (
-    <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-3">
-      <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">Identifier</p>
-      {/* A two-row grid rather than two stacked blocks side by side.
-
-          Bottom-aligning the blocks looked wrong for a reason: the left one is
-          a label plus a 44px input and the right is a label plus a line of
-          text, so aligning their BOTTOMS pushed "Next SKU" forty pixels below
-          "Prefix". The grid puts the two labels in one row and the two values
-          in another, so both line up whatever their heights. */}
-      <div className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-1">
-        <label htmlFor="prefix" className="text-xs text-gray-400">
-          Prefix
-        </label>
-        <p className="text-xs text-gray-500">Next SKU</p>
-
-        <input
-          id="prefix"
-          value={prefix}
-          onChange={(e) => onPrefix(cleanPrefix(e.target.value))}
-          // maxLength as well as the slice in cleanPrefix: the attribute stops
-          // the keystroke, which means no cursor jump, and the slice catches a
-          // paste or an autofill that bypasses it.
-          maxLength={PREFIX_MAX}
-          // The value is upper-cased on every keystroke, so the on-screen
-          // keyboard should offer capitals to match — otherwise iOS shows a
-          // lowercase keyboard while capitals appear in the field.
-          autoCapitalize="characters"
-          autoCorrect="off"
-          autoComplete="off"
-          spellCheck={false}
-          aria-describedby="prefix-help"
-          className="w-24 bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white font-mono uppercase tracking-widest outline-none focus:border-accent"
-        />
-        {/* Derived, not typed. The old app let you set the next number by
-            hand, which is one more thing to get wrong mid-stream. */}
-        <p className="text-lg font-mono text-identifier leading-none">{next}</p>
+    <Sheet title="SKU prefix" onClose={onClose}>
+      <div className="space-y-3">
+        <div className="flex items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <label htmlFor="prefix" className="text-xs text-muted">
+              Prefix
+            </label>
+            <input
+              id="prefix"
+              value={prefix}
+              onChange={(e) => onPrefix(cleanPrefix(e.target.value))}
+              // maxLength as well as the slice in cleanPrefix: the attribute
+              // stops the keystroke, which means no cursor jump, and the slice
+              // catches a paste or an autofill that bypasses it.
+              maxLength={PREFIX_MAX}
+              // The value is upper-cased on every keystroke, so the on-screen
+              // keyboard should offer capitals to match.
+              autoCapitalize="characters"
+              autoCorrect="off"
+              autoComplete="off"
+              spellCheck={false}
+              autoFocus
+              className="w-28 bg-sunken border border-line rounded-lg px-3 h-11 text-sm text-fg font-mono uppercase tracking-widest outline-none focus:border-accent"
+            />
+          </div>
+          <div className="flex flex-col gap-1">
+            <span className="text-xs text-muted">Next SKU</span>
+            {/* Derived, not typed. The old app let you set the next number by
+                hand, which is one more thing to get wrong mid-stream. */}
+            <p className="font-mono text-xl text-identifier leading-none h-11 flex items-center">
+              {next}
+            </p>
+          </div>
+        </div>
+        <p className="text-xs text-faint">
+          Up to {PREFIX_MAX} letters, capitals. The number continues from what is already
+          listed and queued, so it cannot repeat.
+        </p>
+        <button
+          onClick={onClose}
+          className="w-full min-h-11 rounded-xl bg-accent hover:bg-accent-hover text-sm font-semibold text-white"
+        >
+          Done
+        </button>
       </div>
-      <p id="prefix-help" className="text-xs text-gray-600">
-        Up to {PREFIX_MAX} letters, capitals. Continues from what is already listed and
-        queued, so it cannot repeat.
-      </p>
+    </Sheet>
+  )
+}
+
+/**
+ * A bottom sheet.
+ *
+ * Bottom rather than centred: it opens next to the thumb that asked for it,
+ * and the scrim gives a second way out — tapping away — for someone holding a
+ * product in the other hand.
+ */
+function Sheet({
+  title,
+  onClose,
+  children,
+}: {
+  title: string
+  onClose: () => void
+  children: React.ReactNode
+}) {
+  useDismiss(onClose)
+  return (
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
+      <button className="absolute inset-0 bg-scrim" onClick={onClose} aria-label="Close" />
+      <div className="relative w-full sm:max-w-md max-h-[85dvh] overflow-y-auto bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        <div className="flex items-center gap-2 mb-2.5">
+          <h2 className="text-sm font-semibold text-fg flex-1">{title}</h2>
+          <button
+            onClick={onClose}
+            className="min-h-11 min-w-11 -mr-1 inline-flex items-center justify-center text-muted"
+            aria-label="Close"
+          >
+            <Icon name="close" size={20} />
+          </button>
+        </div>
+        {children}
+      </div>
     </div>
   )
 }
@@ -237,11 +369,19 @@ function SkuForm({
   shop,
   listing,
   identifier,
+  prefix,
+  onEditPrefix,
+  onBulkAdd,
   onSaved,
 }: {
   shop: Shop
   listing: Listing
   identifier: string
+  prefix: string
+  /** Opens the prefix editor. The identifier in the header is the trigger. */
+  onEditPrefix: () => void
+  /** Opens bulk add. A link in the header, not a card of its own. */
+  onBulkAdd: () => void
   onSaved: () => Promise<void>
 }) {
   const [photo, setPhoto] = useState<Blob | null>(null)
@@ -258,6 +398,8 @@ function SkuForm({
   // framing the next product, not while they are waiting for a queue to drain.
   const [photoBase64, setPhotoBase64] = useState<string | null>(null)
   const [busy, setBusy] = useState<'' | 'uploading' | 'naming' | 'saving'>('')
+  /** Voice's feedback, rendered under the button grid rather than inside it. */
+  const [voiceStatus, setVoiceStatus] = useState({ heard: '', notice: '', error: '' })
   const [error, setError] = useState('')
   const objectUrl = useRef<string | null>(null)
 
@@ -411,109 +553,145 @@ function SkuForm({
   }
 
   return (
-    <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-4">
-      <div className="space-y-0.5">
-        <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
-          New SKU — <span className="text-identifier font-mono">{identifier}</span>
-        </p>
-        {/* The product title, shown so it is obvious where it comes from and
-            that it is not this form's job to set it. */}
-        <p className="text-xs text-gray-600 truncate">
-          Adding to <span className="text-gray-400">{productTitle}</span>
-        </p>
+    <div className="bg-raised border border-line2 rounded-xl p-3 space-y-2.5">
+      {/*
+        The identifier IS the header, at 22px in amber.
+
+        It used to have a card of its own — a 130 px block holding a prefix
+        input, the next number and two lines of help — above a card that
+        repeated the same identifier in 12px grey. One number, stated once,
+        where the eye already is. Tapping it opens the prefix editor.
+      */}
+      <div className="flex items-baseline gap-2">
+        <button
+          onClick={onEditPrefix}
+          className="font-mono text-[22px] font-semibold text-identifier tracking-wide leading-none"
+          aria-label={`Next SKU ${identifier}. Change the prefix.`}
+        >
+          {identifier}
+        </button>
+        <span className="text-xs text-faint min-w-0 truncate">next SKU · prefix {prefix}</span>
+        <span className="flex-1" />
+        <button onClick={onBulkAdd} className="text-xs text-muted underline underline-offset-3 shrink-0">
+          Bulk add
+        </button>
       </div>
 
-      <div className="flex gap-3">
-        <CameraCapture preview={photoUrl} busy={busy === 'uploading'} onCapture={acceptPhoto} />
-        {/* The two actions stretch to match the photo box beside them. Left at
-            their natural height they leave a band of dead space under them,
-            which reads as something missing. */}
-        <div className="flex flex-col gap-2 flex-1 min-w-0 [&>*]:flex-1">
-          <VoiceCapture onFields={applyVoice} />
-          <button
-            onClick={fillFromPhoto}
+      <PhotoBlock
+        preview={photoUrl}
+        busy={busy === 'uploading'}
+        onCapture={acceptPhoto}
+        voice={<VoiceCapture onFields={applyVoice} onStatus={setVoiceStatus} />}
+        aiName={
+          <ActionButton
+            onClick={() => void fillFromPhoto()}
             disabled={!photoBase64 || busy !== ''}
-            className="text-xs px-3 py-2 rounded-lg bg-purple-600/80 hover:bg-purple-500 disabled:opacity-40 text-white transition-colors"
+            tone="plain"
+            icon="sparkle"
           >
-            {busy === 'naming' ? 'Reading image…' : 'AI suggest variant name from image'}
-          </button>
-        </div>
-      </div>
+            {busy === 'naming' ? 'Reading…' : 'AI name'}
+          </ActionButton>
+        }
+      />
+
+      {/* Voice's own feedback, under the grid where a sentence fits. */}
+      {voiceStatus.heard && <p className="text-xs text-faint italic">Heard: {voiceStatus.heard}</p>}
+      {voiceStatus.notice && <p className="text-xs text-info">{voiceStatus.notice}</p>}
+      {voiceStatus.error && <p className="text-xs text-warn">{voiceStatus.error}</p>}
 
       {/* One text field, because one is all a variation has. The product name
-          is the listing's and is shown above, not typed again here. */}
-      <Field label="Variant name">
+          is the listing's, shown in the bar above, not typed again here.
+
+          The buyer-facing preview sits directly under the field instead of in
+          a box of its own: it is what this field produces, so putting 12px of
+          padding and a background between them made it read as a separate
+          fact. */}
+      <div className="space-y-1">
         <input
           value={variant}
           onChange={(e) => setVariant(e.target.value)}
-          placeholder="e.g. Blue Reactive Glaze Mug"
-          className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
+          placeholder="Variant name — say it, or type it"
+          aria-label="Variant name"
+          className="w-full bg-sunken border border-line rounded-lg px-3 h-11 text-sm text-fg outline-none focus:border-accent"
         />
-      </Field>
-
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="Price (SGD)">
-          <input
-            inputMode="decimal"
-            value={price}
-            onChange={(e) => setPrice(e.target.value)}
-            placeholder="18.90"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
-          />
-        </Field>
-        <Field label="Stock">
-          <input
-            inputMode="numeric"
-            value={stock}
-            onChange={(e) => setStock(e.target.value)}
-            placeholder="50"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
-          />
-        </Field>
-      </div>
-
-      <div className="bg-sunken rounded-lg px-3 py-2">
-        <p className="text-xs text-gray-500 mb-0.5">
-          Buyer sees{variant.trim() ? ` — ${valueName.length}/${VALUE_NAME_MAX} max` : ''}
-        </p>
-        {/* Before anything is typed this would read as the bare identifier,
-            which misrepresents the preview the operator is trusting — so it
-            says what is missing instead. */}
         {variant.trim() ? (
-          <p className="text-sm font-mono text-white break-words no-inflate">{valueName}</p>
-        ) : (
-          <p className="text-sm font-mono text-gray-600">
-            {identifier} <span className="not-italic">· name it above</span>
+          <p className="text-xs font-mono text-muted break-words no-inflate pl-0.5">
+            {valueName}
+            <span className="text-ghost"> · {valueName.length}/{VALUE_NAME_MAX}</span>
           </p>
+        ) : (
+          <p className="text-xs font-mono text-ghost pl-0.5">{identifier} · name it above</p>
         )}
         {/* TikTok's own 50-character ceiling, shown as it is approached rather
             than discovered on rejection. */}
         {variantProblems.map((p) => (
-          <p key={p.message} className="text-xs text-amber-400 mt-1">
+          <p key={p.message} className="text-xs text-warn pl-0.5">
             {p.message}
           </p>
         ))}
       </div>
 
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="relative">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-faint pointer-events-none">
+            $
+          </span>
+          <input
+            inputMode="decimal"
+            value={price}
+            onChange={(e) => setPrice(e.target.value)}
+            placeholder="Price"
+            aria-label="Price in Singapore dollars"
+            className="w-full bg-sunken border border-line rounded-lg pl-7 pr-3 h-11 text-sm text-fg outline-none focus:border-accent"
+          />
+        </div>
+        <input
+          inputMode="numeric"
+          value={stock}
+          onChange={(e) => setStock(e.target.value)}
+          placeholder="Stock"
+          aria-label="Stock"
+          className="w-full bg-sunken border border-line rounded-lg px-3 h-11 text-sm text-fg outline-none focus:border-accent"
+        />
+      </div>
 
+      {error && <p className="text-xs text-bad">{error}</p>}
+
+      {/* On a phone this is a duplicate of the fixed bar at the bottom of the
+          screen, and hidden; on an iPad, where there is no bottom bar, it is
+          the only one. Same handler either way. */}
       <button
         onClick={save}
         disabled={busy !== '' || problems.length > 0}
-        className="w-full text-sm px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-white rounded-lg transition-colors"
+        className="hidden md:flex w-full min-h-11 items-center justify-center rounded-lg bg-accent hover:bg-accent-hover disabled:opacity-40 text-sm font-semibold text-white transition-colors"
       >
         {busy === 'saving' ? 'Listing…' : `List ${identifier}`}
       </button>
+
+      {/*
+        The phone's List button: fixed above the tab bar, always in reach.
+
+        Not in the card, because the card scrolls — and the whole point of the
+        redesign is that the queue is on screen while a SKU is being added,
+        which means the card's bottom edge is often off it. `bottom-14` clears
+        the tab bar; the safe-area inset clears the home indicator.
+      */}
+      <div
+        className="md:hidden fixed left-0 right-0 z-10 px-3 py-1.5 bg-surface border-t border-line2"
+        style={{ bottom: 'calc(3.5rem + env(safe-area-inset-bottom))' }}
+      >
+        <div className="max-w-5xl mx-auto">
+          <button
+            onClick={save}
+            disabled={busy !== '' || problems.length > 0}
+            className="w-full min-h-11 flex items-center justify-center rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white transition-colors"
+          >
+            {busy === 'saving' ? 'Listing…' : `List ${identifier}`}
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1">
-      <label className="text-xs text-gray-400">{label}</label>
-      {children}
-    </div>
-  )
-}
 

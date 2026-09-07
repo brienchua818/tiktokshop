@@ -316,8 +316,14 @@ function summariseItems_(items) {
     };
   }).sort(function (a, b) { return b.revenue - a.revenue; });
 
+  var orderIds = {};
+  items.forEach(function (r) { orderIds[String(r.order_id)] = 1; });
+
   return {
     listings: listings,
+    // Distinct orders, not the sum of the per-listing counts: a basket holding
+    // two listings is ONE order, and summing would report it as two.
+    total_orders: Object.keys(orderIds).length,
     // Summed from line items, so a basket holding two listings contributes to
     // both without being counted twice here.
     total_units: listings.reduce(function (n, l) { return n + l.units; }, 0),

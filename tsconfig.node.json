@@ -14,5 +14,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["netlify", "vite.config.ts"]
+  "include": ["netlify", "tools", "vite.config.ts"]
 }

@@ -93,10 +93,43 @@ not style preferences.
 3. **Find the class, not the instance.** One ragged `setValues` row means
    checking every `setValues`. One shifted column means every tab.
 
+## The UI has three rules, and each is enforced by a check
+
+Not style. Each of these shipped as a real bug, so each is now a test that
+fails rather than a habit that slips.
+
+- **A colour is a token, never a palette class.** `text-fg`, `bg-raised`,
+  `border-line` swap with the palette; `text-cyan-400` does not, so it renders
+  identically in both themes and is invisible in the one it was not written
+  for. Enforced by `tools/palette.test.ts`, which scans `src/` and names the
+  file and the class. Only `text-white` and `bg-black` are allowed raw — ink on
+  a filled button, and the camera viewfinder — and they are allowed by name.
+  The same test asserts every `--color-*` token is defined in **both**
+  palettes, so adding one to dark and forgetting day fails too.
+- **A fixed bottom bar reserves its own height.** The shell pads `main` by the
+  tab bar. A screen that adds a second bar above it takes ~56px more that
+  nothing accounts for, so at full scroll the last row can never be read. Any
+  screen with its own bar ends with `<BarSpacer />`. Enforced by the audit,
+  which scrolls each screen to the bottom and reports readable text left under
+  a bar.
+- **Every overlay closes on Escape and locks the page behind it.**
+  `useDismiss` does both. Without it a sheet's scrim swallows every control on
+  the page with no way out, which the audit reports as a control that cannot be
+  clicked.
+
+Run it with `npm run audit:ui` (add `:shots` for screenshots in
+`dist/ui-audit`). The build **must** carry `VITE_APPS_SCRIPT_URL` and
+`VITE_GOOGLE_CLIENT_ID` or the app renders a config error and the audit sees
+nothing — `npm run build:audit` sets them, so never build it by hand. A screen
+reporting zero controls is a failure, not a pass.
+
+When adding a check, prove it fires: break the thing on purpose, watch it fail,
+then fix it back. A check that has never gone red is not known to work.
+
 ## Shipping
 
-- Frontend: `npm test` and `npm run build` (`tsc -b` is stricter than
-  `--noEmit`) before every push. `main` auto-deploys on Netlify; verify the
+- Frontend: `npm test`, `npm run build` (`tsc -b` is stricter than
+  `--noEmit`) and `npm run audit:ui` before every push. `main` auto-deploys on Netlify; verify the
   deploy went `ready` and the bundle contains the change. If deploys are
   `skipped`, it is credits.
 - Backend: `python3 apps-script/build-error-codes.py`,

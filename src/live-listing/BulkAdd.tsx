@@ -12,6 +12,7 @@ import {
 } from '../lib/tiktok-rules'
 import { enqueue } from '../offline/queue'
 import type { Draft, Listing, Shop } from '../types'
+import Icon from '../ui/Icon'
 
 /**
  * Bulk add: one set of details, many photos.
@@ -166,7 +167,7 @@ export default function BulkAdd({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="w-full text-xs px-4 py-2.5 border border-dashed border-white/20 rounded-xl text-gray-400 hover:border-accent/50 hover:text-gray-200 transition-colors"
+        className="w-full text-xs px-4 py-2.5 border border-dashed border-line3 rounded-xl text-muted hover:border-accent/50 hover:text-fg2 transition-colors"
       >
         Bulk add — same details, many photos
       </button>
@@ -174,19 +175,19 @@ export default function BulkAdd({
   }
 
   return (
-    <div className="bg-raised border border-white/8 rounded-xl p-4 space-y-4">
+    <div className="bg-raised border border-line2 rounded-xl p-4 space-y-4">
       <div className="flex items-center gap-2">
-        <p className="text-xs text-gray-400 font-medium uppercase tracking-wide flex-1">
+        <p className="text-xs text-muted font-medium uppercase tracking-wide flex-1">
           Bulk add — {photos.length === 0 ? 'pick photos' : `${photos.length} photos`}
         </p>
-        <button onClick={() => setOpen(false)} className="text-xs text-gray-500 hover:text-white">
+        <button onClick={() => setOpen(false)} className="text-xs text-faint hover:text-fg">
           Close
         </button>
       </div>
 
       <button
         onClick={() => fileRef.current?.click()}
-        className="w-full text-xs px-3 py-2 bg-white/10 hover:bg-white/15 text-white rounded-lg transition-colors"
+        className="w-full text-xs px-3 py-2 bg-chip2 hover:bg-chip2 text-fg rounded-lg transition-colors"
       >
         Choose photos
       </button>
@@ -209,16 +210,16 @@ export default function BulkAdd({
               <img src={photo.url} alt="" className="w-full aspect-square object-cover rounded-lg" />
               {/* The identifier each photo will get, so the mapping is visible
                   before committing a dozen SKUs. */}
-              <span className="absolute bottom-0 left-0 right-0 text-[10px] text-center bg-black/70 text-identifier font-mono rounded-b-lg">
+              <span className="absolute bottom-0 left-0 right-0 text-[10px] text-center bg-scrim text-identifier font-mono rounded-b-lg">
                 {formatIdentifier(prefix, firstSeq + index)}
               </span>
               <button
                 onClick={() => removePhoto(index)}
                 disabled={busy}
-                className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-black/80 text-gray-300 hover:text-red-400 text-xs leading-none"
+                className="absolute -top-1 -right-1 w-5 h-5 rounded-full bg-scrim text-fg2 hover:text-bad text-xs leading-none"
                 aria-label="Remove photo"
               >
-                ✕
+                <Icon name="close" size={14} />
               </button>
             </div>
           ))}
@@ -226,57 +227,57 @@ export default function BulkAdd({
       )}
 
       <div className="flex flex-col gap-1">
-        <label className="text-xs text-gray-400">Variant name — used for every photo</label>
+        <label className="text-xs text-muted">Variant name — used for every photo</label>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="e.g. Reactive Glaze Bowl"
-          className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
+          className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
         />
       </div>
 
       <div className="grid grid-cols-2 gap-2">
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Price (SGD)</label>
+          <label className="text-xs text-muted">Price (SGD)</label>
           <input
             inputMode="decimal"
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             placeholder="18.90"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
+            className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
           />
         </div>
         <div className="flex flex-col gap-1">
-          <label className="text-xs text-gray-400">Stock, each</label>
+          <label className="text-xs text-muted">Stock, each</label>
           <input
             inputMode="numeric"
             value={stock}
             onChange={(e) => setStock(e.target.value)}
             placeholder="50"
-            className="w-full bg-sunken border border-white/10 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-accent"
+            className="w-full bg-sunken border border-line rounded-lg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
           />
         </div>
       </div>
 
       <div className="bg-sunken rounded-lg px-3 py-2">
-        <p className="text-xs text-gray-500 mb-0.5">
+        <p className="text-xs text-faint mb-0.5">
           Buyer sees, first of them — {sampleValueName.length}/{VALUE_NAME_MAX} max
         </p>
-        <p className="text-sm font-mono text-white break-words no-inflate">{sampleValueName}</p>
+        <p className="text-sm font-mono text-fg break-words no-inflate">{sampleValueName}</p>
         {variantProblems.map((p) => (
-          <p key={p.message} className="text-xs text-amber-400 mt-1">
+          <p key={p.message} className="text-xs text-warn mt-1">
             {p.message}
           </p>
         ))}
       </div>
 
-      {progress && <p className="text-xs text-blue-400">{progress}</p>}
-      {error && <p className="text-xs text-red-400">{error}</p>}
+      {progress && <p className="text-xs text-info">{progress}</p>}
+      {error && <p className="text-xs text-bad">{error}</p>}
 
       <button
         onClick={saveAll}
         disabled={busy || problems.length > 0}
-        className="w-full text-sm px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-white rounded-lg transition-colors"
+        className="w-full text-sm px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-40 text-fg rounded-lg transition-colors"
       >
         {busy
           ? 'Listing…'

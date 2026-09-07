@@ -34,6 +34,17 @@ function timed_(action, fn) {
  */
 var actorName_ = '';
 
+/** The Drive things a person may want to open, by real URL. */
+function driveLinks_() {
+  return {
+    sheet: 'https://docs.google.com/spreadsheets/d/' + DATA_SHEET_ID + '/edit',
+    log: 'https://docs.google.com/spreadsheets/d/' + DATA_SHEET_ID + '/edit#gid=0',
+    exports: 'https://drive.google.com/drive/folders/' + EXPORTS_FOLDER_ID,
+    photos: 'https://drive.google.com/drive/folders/' + PHOTOS_FOLDER_ID,
+    root: 'https://drive.google.com/drive/folders/' + DRIVE_ROOT_ID
+  };
+}
+
 /** How a person is named on a file they asked for: name, then email as the id. */
 function requester_(user) {
   var name = String(user.name || '').trim();
@@ -117,7 +128,12 @@ function handle_(e, method) {
       return json_({
         email: user.email, name: user.name, role: user.role,
         approved: canList_(user), admin: isAdmin_(user),
-        session_token: session.session_token, session_expires_at: session.session_expires_at
+        session_token: session.session_token, session_expires_at: session.session_expires_at,
+        // Where the data actually lives. Served rather than hardcoded in the
+        // app, so a folder can be moved without a redeploy — and so the
+        // "Data sheet" row in the app opens the real thing instead of a
+        // guess at its URL.
+        links: driveLinks_()
       });
     }
 

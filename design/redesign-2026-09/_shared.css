@@ -1,0 +1,4 @@
+/* Tokens lifted from src/index.css and the Tailwind classes in use. */
+body { margin: 0; background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
+a { color: #ec4899; } a:hover { color: #f472b6; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }

@@ -1,0 +1,19 @@
+{
+  "artboards": [
+    { "file": "NowListing.dc.html",   "x": 0,    "y": 0,    "w": 390,  "h": 844, "title": "Now — Live Listing (your screenshot)" },
+    { "file": "Main.dc.html",         "x": 520,  "y": 0,    "w": 390,  "h": 844, "title": "Proposed — Live Listing, iPhone" },
+    { "file": "NowOrders.dc.html",    "x": 1100, "y": 0,    "w": 390,  "h": 844, "title": "Now — Orders (your screenshot)" },
+    { "file": "OrdersPhone.dc.html",  "x": 1620, "y": 0,    "w": 390,  "h": 844, "title": "Proposed — Orders, iPhone" },
+    { "file": "OrdersRange.dc.html",  "x": 2100, "y": 0,    "w": 390,  "h": 844, "title": "Proposed — Orders, date sheet open" },
+    { "file": "TabletListing.dc.html","x": 520,  "y": 1020, "w": 1194, "h": 834, "title": "Proposed — Live Listing, iPad landscape" }
+  ],
+  "annotations": [
+    { "id": "audit-now", "x": 0, "y": -400, "w": 400, "text": "WHERE THE HEIGHT GOES TODAY (iPhone 15, 844 px)\nHeader, 2 rows: 96\nListing bar: 56\nIdentifier card: 130\nNew SKU card: ~420\nBulk add card: 70\nSKU header + review banner: 100\n= ~870 px before the first SKU row.\nWhile adding a SKU, the queue is never on screen." },
+    { "id": "audit-after", "x": 520, "y": -400, "w": 400, "text": "PROPOSED\nTop strip: 44 (shop + waiting count)\nListing bar: 44 (title · 10/100 · Live pill — replaces the review banner)\nNew SKU: ~292 (identifier moves into the card header; prefix help → ⓘ; value-name preview sits under the field instead of its own box; Bulk add is a link)\nQueue header: 44\n= first SKU row at ~430 px. 4–5 SKUs visible while adding.\nSave and the tabs sit at the bottom, under the thumb." },
+    { "id": "right-hand", "x": 1100, "y": -400, "w": 400, "text": "RIGHT-HAND RULE\nEverything tapped repeatedly lives in the bottom-right 60% of the screen: Save, tabs, Camera, Voice, Check TikTok (↻), Sync, Export.\nTop-left holds only things you read (shop, listing title, counts).\nDelete = swipe a SKU row left; the × per row goes, saving 44 px of width on every row.\nSign out moves to the More tab." },
+    { "id": "orders-note", "x": 1620, "y": -400, "w": 400, "text": "ORDERS\nFour date/time inputs + presets + two paragraphs (≈ 330 px) become one range chip. Tap it → the sheet on the right, with presets first.\nOne stats line replaces the summary card.\nListings start ~170 px from the top instead of ~700.\nCost divisor + Export are a fixed bottom bar, thumb reach, always visible." },
+    { "id": "kept", "x": 2100, "y": -400, "w": 400, "text": "NOTHING REMOVED, ONLY MOVED\nBulk add → link in the SKU header\nPrefix change → tap the identifier\nCheck TikTok → ↻ on the queue header\nReview state → Live / Reviewing pill in the listing bar\nExternal variants → one expandable line under the queue\nExplanatory text → ⓘ on each header\nNumbers shown are today's real data. Static mockups, nothing changed in the app until you approve." },
+    { "id": "tablet-note", "x": 0, "y": 1020, "w": 400, "text": "iPAD\nNo reach problem, so tabs go back to the top strip and the queue is a permanent right column at full height — you watch SKUs land while adding the next one.\nSame components as the phone, so one codebase." }
+  ],
+  "launch": { "view": "canvas" }
+}

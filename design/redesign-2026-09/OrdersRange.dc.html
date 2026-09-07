@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+/* Tokens lifted from src/index.css and the Tailwind classes in use. */
+body { margin: 0; background: #0f0f0f; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
+a { color: #ec4899; } a:hover { color: #f472b6; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+
+  </style>
+</helmet>
+
+<div style="position: relative; display: flex; flex-direction: column; width: 390px; height: 844px; background: #0f0f0f; overflow: hidden;">
+  
+<div style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; background: #161616; border-bottom: 1px solid rgba(255,255,255,0.10); flex-shrink: 0;">
+  <div style="display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px 0 12px; border-radius: 8px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.10);">
+    <span style="font-size: 14px; font-weight: 600; color: #fff;">HOUZE</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M6 9l6 6 6-6"/></svg>
+  </div>
+  <div style="flex-grow: 1;"></div>
+  <div style="display: flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 8px; background: rgba(59,130,246,0.15);">
+    <span style="width: 6px; height: 6px; border-radius: 3px; background: #60a5fa; display: block;"></span>
+    <span style="font-size: 12px; color: #93c5fd;">1 waiting</span>
+  </div>
+</div>
+  
+<div style="display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 12px; flex-shrink: 0;">
+  <div style="display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border-radius: 8px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.10); min-width: 0; flex-grow: 1;">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg><span style="font-size: 13px; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">4 Sep 00:00 → 7 Sep 23:59</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M6 9l6 6 6-6"/></svg>
+  </div>
+  <div style="display: flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: 8px; background: #ec4899;">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M4 12a8 8 0 0 1 13.7-5.7M20 12a8 8 0 0 1-13.7 5.7"/><path d="M18 3v4h-4M6 21v-4h4"/></svg><span style="font-size: 13px; font-weight: 600; color: #fff;">Sync</span>
+  </div>
+</div>
+  
+<div style="display: flex; align-items: baseline; gap: 10px; height: 36px; padding: 0 12px; flex-shrink: 0;">
+  <span style="font-size: 13px; color: #d1d5db;"><span style="color: #fff; font-weight: 600;">50</span> orders</span>
+  <span style="font-size: 13px; color: #d1d5db;"><span style="color: #fff; font-weight: 600;">59</span> items</span>
+  <span class="mono" style="font-size: 13px; color: #fff; font-weight: 600;">$2,394.05</span>
+  <div style="flex-grow: 1;"></div>
+  <span style="font-size: 12px; color: #6b7280;">synced 01:06</span>
+</div>
+  <div style="display: flex; flex-direction: column; margin: 0 12px; border-radius: 12px; background: #1a1a1a; border: 1px solid rgba(255,255,255,0.08); overflow: hidden; flex-grow: 1; min-height: 0;">
+    <div style="display: flex; align-items: center; height: 40px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;">
+      <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; color: #9ca3af;">LISTINGS</span>
+    </div>
+    <div style="display: flex; flex-direction: column; overflow: hidden;"><div style="display: flex; align-items: center; gap: 10px; height: 60px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+  <div style="display: flex; flex-direction: column; gap: 3px; min-width: 0; flex-grow: 1;">
+    <span style="font-size: 13px; color: #e5e7eb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">HOUZE x Table Matters - I12 Clearance Sale</span>
+    <span style="font-size: 12px; color: #6b7280;">43 orders · 50 units</span>
+  </div>
+  <span class="mono" style="font-size: 13px; color: #d1d5db; flex-shrink: 0;">$2,114.75</span>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M9 6l6 6-6 6"/></svg>
+</div><div style="display: flex; align-items: center; gap: 10px; height: 60px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+  <div style="display: flex; flex-direction: column; gap: 3px; min-width: 0; flex-grow: 1;">
+    <span style="font-size: 13px; color: #e5e7eb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">[ANY 4 FOR $38.88] Table Matters - Assorted 9 inch Ramen Bowl</span>
+    <span style="font-size: 12px; color: #6b7280;">1 order · 2 units</span>
+  </div>
+  <span class="mono" style="font-size: 13px; color: #d1d5db; flex-shrink: 0;">$29.38</span>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M9 6l6 6-6 6"/></svg>
+</div><div style="display: flex; align-items: center; gap: 10px; height: 60px; padding: 0 12px; border-bottom: 1px solid rgba(255,255,255,0.05);">
+  <div style="display: flex; flex-direction: column; gap: 3px; min-width: 0; flex-grow: 1;">
+    <span style="font-size: 13px; color: #e5e7eb; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">[ANY 10 FOR $18] Table Matters - Assorted Flower Shaped & Lotus Leaf Saucer</span>
+    <span style="font-size: 12px; color: #6b7280;">1 order · 2 units</span>
+  </div>
+  <span class="mono" style="font-size: 13px; color: #d1d5db; flex-shrink: 0;">$6.23</span>
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4b5563" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M9 6l6 6-6 6"/></svg>
+</div></div>
+  </div>
+  <div style="position: absolute; left: 0; top: 0; width: 390px; height: 844px; background: rgba(0,0,0,0.6);"></div>
+  <div style="position: absolute; left: 0; bottom: 0; width: 390px; box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; padding: 12px 12px 20px; border-radius: 16px 16px 0 0; background: #161616; border-top: 1px solid rgba(255,255,255,0.10);">
+    <div style="width: 36px; height: 4px; border-radius: 2px; background: #374151; align-self: center;"></div>
+    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+      <div style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10);"><span style="font-size: 13px; color: #d1d5db;">Last night 6pm–12am</span></div><div style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10);"><span style="font-size: 13px; color: #d1d5db;">Today</span></div><div style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10);"><span style="font-size: 13px; color: #d1d5db;">Yesterday</span></div><div style="display: inline-flex; align-items: center; height: 36px; padding: 0 12px; border-radius: 8px; background: #ec4899; border: 1px solid #ec4899;"><span style="font-size: 13px; color: #fff;">Since 4 Sep</span></div>
+    </div>
+    <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;">
+      <div style="display: flex; flex-direction: column; gap: 6px;"><span style="font-size: 12px; color: #9ca3af;">From</span><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #fff;">4 Sep 2026</span></div><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #fff;">12:00 AM</span></div></div>
+      <div style="display: flex; flex-direction: column; gap: 6px;"><span style="font-size: 12px; color: #9ca3af;">To</span><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #fff;">7 Sep 2026</span></div><div style="display: flex; align-items: center; gap: 6px; height: 44px; padding: 0 12px; border-radius: 8px; background: #111111; border: 1px solid rgba(255,255,255,0.10); width: 100%; box-sizing: border-box;"><span style="font-size: 16px; color: #fff;">11:59 PM</span></div></div>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: center; gap: 8px; height: 48px; border-radius: 10px; background: #ec4899;">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: block; flex-shrink: 0;"><path d="M4 12a8 8 0 0 1 13.7-5.7M20 12a8 8 0 0 1-13.7 5.7"/><path d="M18 3v4h-4M6 21v-4h4"/></svg><span style="font-size: 15px; font-weight: 600; color: #fff;">Apply and sync from TikTok</span>
+    </div>
+    <span style="font-size: 12px; color: #6b7280; text-align: center;">Re-syncing the same window updates cancellations, never duplicates.</span>
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

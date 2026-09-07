@@ -104,14 +104,29 @@ export default function App() {
     localStorage.setItem('tikshop.shop', id)
   }
 
-  async function signOut() {
-    // The backend's session is a signed statement, not a server-side record,
-    // so dropping it here IS signing out; forgetting the account stops Google
-    // silently signing us straight back in.
+  function signOut() {
+    /**
+     * Order matters, and it used to be the wrong way round.
+     *
+     * The backend's session is a signed statement, not a server-side record,
+     * so dropping it here IS signing out. Forgetting the account with Google
+     * is the second, lesser half: it stops Google silently signing us straight
+     * back in on the next visit.
+     *
+     * `setUser(null)` used to sit BEHIND `await forgetAccount()`, which loads
+     * Google's script. When that script cannot load — a blocked domain, a
+     * captive portal, a dead connection — the await never settles and Sign out
+     * did nothing at all. On a shared phone that is somebody else's session
+     * left open, so it is not a cosmetic failure.
+     *
+     * Signing out is now local and immediate, and Google is told afterwards on
+     * a best-effort basis. Found by the audit's dead-button check, not by
+     * reading.
+     */
     setIdToken(null)
     setSessionToken(null)
-    await forgetAccount()
     setUser(null)
+    void forgetAccount()
   }
 
   if (checkingSession) {
@@ -212,7 +227,7 @@ export default function App() {
                   user={user}
                   theme={theme}
                   onTheme={chooseTheme}
-                  onSignOut={() => void signOut()}
+                  onSignOut={signOut}
                 />
               }
             />

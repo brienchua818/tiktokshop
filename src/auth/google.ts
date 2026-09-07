@@ -15,6 +15,9 @@
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined
 const GSI_SRC = 'https://accounts.google.com/gsi/client'
 
+/** How long to wait for Google's script before calling it unavailable. */
+const GIS_LOAD_TIMEOUT_MS = 15_000
+
 /** The slice of the GIS API this app uses. */
 interface GoogleIdentity {
   accounts: {
@@ -87,6 +90,27 @@ function loadGis(): Promise<GoogleIdentity> {
 
     script.addEventListener('load', done)
     script.addEventListener('error', failed)
+
+    /**
+     * A deadline, for the same reason every backend call has one.
+     *
+     * A script tag whose request hangs rather than fails fires neither `load`
+     * nor `error`, so this promise never settled and every caller waited
+     * forever. That is the shape of failure this app has already decided is
+     * unacceptable: an unknown outcome is reported, never waited on.
+     *
+     * The promise is also cleared so a later attempt starts fresh instead of
+     * returning this same rejected one for the rest of the session.
+     */
+    setTimeout(() => {
+      if (window.google?.accounts?.id) return
+      scriptPromise = null
+      reject(
+        new SignInUnavailable(
+          'Google sign-in did not load within 15 seconds. Check the connection, and whether a content blocker is blocking accounts.google.com.',
+        ),
+      )
+    }, GIS_LOAD_TIMEOUT_MS)
 
     if (!existing) {
       script.src = GSI_SRC

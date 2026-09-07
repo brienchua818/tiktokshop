@@ -15,6 +15,8 @@
  *   spill       text wider than its own box with nothing clipping it, so it
  *               paints over its neighbour
  *   overflow    the page scrolls sideways, or something escapes the right edge
+ *   dead        clicking a control produces no request, no navigation and no
+ *               visible change, so it looks live and is not
  *   crash       clicking a control throws, or logs an error
  *
  * It clicks everything that is safe to click. Anything that would spend money,
@@ -114,6 +116,14 @@ const REPLIES = {
   users: [
     { email: 'brienchua@sheldonglobal.com', name: 'Brien Chua', role: 'admin', first_seen: '2026-09-05T03:57:15Z', last_seen: '2026-09-07T04:56:09Z', approved_by: 'system', note: 'Seeded owner' },
     { email: 'judy@sheldonglobal.com', name: 'Judy', role: 'pending', first_seen: '2026-09-07T05:00:00Z', last_seen: '2026-09-07T05:00:00Z', approved_by: '', note: 'Awaiting approval' },
+    // A row whose role can actually be changed. Without one the only user in
+    // the list was the owner, whose current role is the disabled segment and
+    // whose other two are refused by the backend anyway, so the audit pressed
+    // nothing that a real admin presses.
+    { email: 'liz@sheldonglobal.com', name: 'Liz Liu', role: 'lister', first_seen: '2026-09-06T01:00:00Z', last_seen: '2026-09-07T04:00:00Z', approved_by: 'brienchua@sheldonglobal.com', note: '' },
+    // Role recorded with a capital letter, as a person typing in the Sheet
+    // writes it. The backend lowercases before comparing; the app did not.
+    { email: 'franze@sheldonglobal.com', name: 'Franze.S', role: 'Lister', first_seen: '2026-09-06T02:00:00Z', last_seen: '2026-09-07T03:00:00Z', approved_by: 'brienchua@sheldonglobal.com', note: '' },
   ],
   setRole: { email: 'judy@sheldonglobal.com', role: 'lister' },
   tiktokProducts: { products: [{ id: '1734903629786286062', title: 'HOUZE x Table Matters - I12 Clearance Sale', status: 'ACTIVATE', sku_count: 3 }], next_page_token: '' },
@@ -129,10 +139,26 @@ const REPLIES = {
  */
 const DESTRUCTIVE = [
   /^list /i, /^remove/i, /^delete/i, /^sign out$/i, /^camera$/i, /^voice$/i, /^take$/i,
-  /^photos$/i, /^ai name$/i, /^approve$/i, /^block$/i, /^admin$/i, /^can list$/i, /^blocked$/i,
+  /^photos$/i, /^ai name$/i,
   /^export purchase order$/i, /^start continuation/i, /^retry/i, /^bulk add$/i,
 ]
 const isDestructive = (name) => DESTRUCTIVE.some((re) => re.test(name.trim()))
+
+/**
+ * Controls for which "nothing happened" is the correct outcome.
+ *
+ * Kept deliberately short. Every entry here is a control the dead-button check
+ * cannot judge, and each one is a place a real dead button could hide, so a
+ * name goes in only with a reason.
+ */
+const INERT = [
+  // Dismisses a banner that may not be showing on this device.
+  /^dismiss$/i,
+  // The tab you are already on. Pressing it is a no-op by design and the app
+  // is right not to redraw. Handled by name rather than by `aria-current`
+  // because the router marks the active link, not the button.
+  /^listing$/i, /^orders$/i, /^more$/i,
+]
 
 const DEVICES = [
   { name: 'iPhone SE',        width: 375,  height: 667,  dpr: 2,   touch: true },
@@ -357,11 +383,16 @@ for (const theme of ['dark', 'day']) {
         isMobile: device.touch,
       })
 
+      // Every backend action the page asked for, in order. Used to tell a
+      // control that DID something from one that merely looked like it might.
+      const asked = []
+
       // The backend, and only the backend. Anything else the page reaches for
       // is a finding in itself, so it is left to fail loudly.
       await context.route('**script.google.com/**', (route) => {
         const url = new URL(route.request().url())
         const action = url.searchParams.get('action') ?? ''
+        asked.push(action)
         const body = REPLIES[action]
         route.fulfill({
           status: 200,
@@ -434,7 +465,52 @@ for (const theme of ['dark', 'day']) {
         // finding — it is gone because the app did what it was asked. Only
         // something still on the page and still unclickable is a problem.
         if (!(await button.isVisible().catch(() => false))) continue
+        // A disabled control is a deliberate state, not a fault. The segment
+        // showing someone's CURRENT role is disabled precisely so it cannot be
+        // set to what it already is; clicking it waits for it to become
+        // enabled and times out, which reported the Users screen as broken
+        // when it was working. Its shape is still checked above.
+        if (await button.isDisabled().catch(() => false)) continue
         try {
+          /**
+           * What the page looks like, cheaply, so a click can be shown to have
+           * changed something.
+           *
+           * The check this enables is the one that was missing when Brien
+           * reported that he could not change anyone's role: every control on
+           * that screen rendered, was named, was big enough and survived a
+           * click, so the audit passed it. A control that produces no request,
+           * no navigation and no change on screen is a dead button, and until
+           * now nothing looked for one.
+           */
+          const signature = async () =>
+            page.evaluate(() => {
+              const root = document.documentElement
+              return [
+                location.pathname,
+                document.body.innerHTML.length,
+                // WHICH controls are pressed, not how many. A segmented
+                // control moving its selection keeps the count at one, so a
+                // count reported the theme buttons as dead when they worked.
+                [...document.querySelectorAll('[aria-pressed]')]
+                  .map((el) => el.getAttribute('aria-pressed'))
+                  .join(''),
+                [...document.querySelectorAll('button')].map((b) => (b.disabled ? '1' : '0')).join(''),
+                document.querySelectorAll('[role="dialog"], .fixed').length,
+                // Theme lives on the root element, outside the body entirely.
+                root.getAttribute('data-theme') ?? '',
+                root.className,
+              ].join('|')
+            })
+          const askedBefore = asked.length
+          const before = await signature()
+          // A control already in its selected state is SUPPOSED to do nothing:
+          // the tab you are on, the theme already applied, the role somebody
+          // already has. Read from the element rather than from a list of
+          // names, so every segmented control is covered and none is excused
+          // by accident.
+          const alreadyOn = (await button.getAttribute('aria-pressed')) === 'true'
+
           await button.click({ timeout: 1500, trial: false })
           clicked++
           await page.waitForTimeout(120)
@@ -442,6 +518,14 @@ for (const theme of ['dark', 'day']) {
           // is always on the page, and a way back always exists.
           const alive = await page.locator('body *:visible').count()
           if (alive < 3) issues.push(`clicking "${name}" emptied the screen`)
+
+          // Give an in-flight request a moment to land before judging.
+          if (asked.length === askedBefore) await page.waitForTimeout(250)
+          const after = await signature()
+          if (asked.length === askedBefore && after === before && !alreadyOn && !INERT.some((re) => re.test(name.trim()))) {
+            issues.push(`clicking "${name}" did nothing: no request, no navigation, nothing changed on screen`)
+          }
+
           await page.keyboard.press('Escape').catch(() => {})
           await page.waitForTimeout(60)
         } catch (e) {

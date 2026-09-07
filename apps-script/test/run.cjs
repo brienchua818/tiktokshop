@@ -113,7 +113,8 @@ ${src}
     signSession_, readSession_, issueSession_, verifySession_, SESSION_TTL_MS,
     imageDims_, sheetsImageFit_, fail_, codeOf_, ttReason_, SHEETS_IMAGE_MAX_PIXELS,
     photoCandidates_, PHOTO_FETCH_PX, identifierFromVariation_, describeResolution_,
-    MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME
+    MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME,
+    normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED
   };
 `
 
@@ -1319,6 +1320,39 @@ check('issueSession_ lasts fourteen hours and verifySession_ accepts it', () => 
   eq(r.ok, true); eq(r.email, 'brienchua@sheldonglobal.com')
   const left = new Date(issued.session_expires_at).getTime() - Date.now()
   if (left < 13.9 * 3600 * 1000 || left > 14.1 * 3600 * 1000) throw new Error('ttl off: ' + left)
+})
+
+check('normaliseRole_ trims and lowercases whatever was typed in the Sheet', () => {
+  eq(gs.normaliseRole_('Lister'), 'lister')
+  eq(gs.normaliseRole_(' ADMIN '), 'admin')
+  eq(gs.normaliseRole_('Blocked'), 'blocked')
+  eq(gs.normaliseRole_(''), '')
+  eq(gs.normaliseRole_(null), '')
+  eq(gs.normaliseRole_(undefined), '')
+})
+
+check('a role typed with a capital letter still grants access', () => {
+  // The bug this exists to stop: the Users tab is a spreadsheet somebody edits
+  // by hand, so "Lister" and "Admin" turn up. Every check that lowercased kept
+  // working and every check that did not locked the person out silently, which
+  // is the worst split available: access looks granted in the Sheet and is
+  // refused by the app.
+  eq(gs.isAdmin_({ role: 'Admin' }), true)
+  eq(gs.isAdmin_({ role: ' admin ' }), true)
+  eq(gs.isAdmin_({ role: 'ADMIN' }), true)
+  eq(gs.canList_({ role: 'Lister' }), true)
+  eq(gs.canList_({ role: 'Admin' }), true)
+})
+
+check('and a role that is not admin still is not', () => {
+  eq(gs.isAdmin_({ role: 'lister' }), false)
+  eq(gs.isAdmin_({ role: 'administrator' }), false)
+  eq(gs.isAdmin_({ role: '' }), false)
+  eq(gs.isAdmin_(null), false)
+  eq(gs.isAdmin_(undefined), false)
+  eq(gs.canList_({ role: 'pending' }), false)
+  eq(gs.canList_({ role: 'blocked' }), false)
+  eq(gs.canList_(null), false)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

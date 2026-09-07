@@ -37,10 +37,11 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | Code | Where | Message (as raised) |
 | --- | --- | --- |
 | `TS-UNC-00` | Api.gs | An error without a code reached the API handler. The message is prefixed with the runtime error type (TypeError, Exception). This is a gap in the code: find the line from the execution log stack and give it a code. |
-| `TS-API-01` | Api.gs:334 | Unknown role: |
-| `TS-API-02` | Api.gs:337 | The owner account cannot be demoted. |
-| `TS-API-03` | Api.gs:350 | No such user: |
+| `TS-API-01` | Api.gs:369 | Unknown role: . Expected one of , . |
+| `TS-API-02` | Api.gs:376 | The owner account cannot be demoted. |
+| `TS-API-03` | Api.gs:389 | No such user: |
 | `TS-API-04` | Api.gs:26 | took s |
+| `TS-API-05` | Api.gs:372 | No email given, so there is nobody to change. |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
 | `TS-EXP-02` | Export.gs:535 | Unknown shop: |
 | `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |

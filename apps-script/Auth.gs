@@ -269,12 +269,26 @@ function touchLastSeen_(email) {
   });
 }
 
+/**
+ * A role as the code compares it, whatever a person typed in the Sheet.
+ *
+ * The Users tab is a spreadsheet somebody edits by hand, so "Lister", " admin "
+ * and "ADMIN" all turn up. Every check that lowercased before comparing kept
+ * working and every check that did not silently locked the person out — which
+ * is the worst possible split, because access looks granted in the Sheet and
+ * is refused by the app. So the comparison happens in exactly one place.
+ */
+function normaliseRole_(role) {
+  return String(role == null ? '' : role).trim().toLowerCase();
+}
+
 function canList_(user) {
-  return user && (user.role === ROLE_ADMIN || user.role === ROLE_LISTER);
+  var role = normaliseRole_(user && user.role);
+  return Boolean(user) && (role === ROLE_ADMIN || role === ROLE_LISTER);
 }
 
 function isAdmin_(user) {
-  return user && user.role === ROLE_ADMIN;
+  return Boolean(user) && normaliseRole_(user && user.role) === ROLE_ADMIN;
 }
 
 /**

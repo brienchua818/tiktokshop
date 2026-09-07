@@ -1192,12 +1192,26 @@ function touchLastSeen_(email) {
   });
 }
 
+/**
+ * A role as the code compares it, whatever a person typed in the Sheet.
+ *
+ * The Users tab is a spreadsheet somebody edits by hand, so "Lister", " admin "
+ * and "ADMIN" all turn up. Every check that lowercased before comparing kept
+ * working and every check that did not silently locked the person out — which
+ * is the worst possible split, because access looks granted in the Sheet and
+ * is refused by the app. So the comparison happens in exactly one place.
+ */
+function normaliseRole_(role) {
+  return String(role == null ? '' : role).trim().toLowerCase();
+}
+
 function canList_(user) {
-  return user && (user.role === ROLE_ADMIN || user.role === ROLE_LISTER);
+  var role = normaliseRole_(user && user.role);
+  return Boolean(user) && (role === ROLE_ADMIN || role === ROLE_LISTER);
 }
 
 function isAdmin_(user) {
-  return user && user.role === ROLE_ADMIN;
+  return Boolean(user) && normaliseRole_(user && user.role) === ROLE_ADMIN;
 }
 
 /**
@@ -4295,7 +4309,7 @@ function handle_(e, method) {
       // the start of a stream is good until well after it ends.
       var session = issueSession_(user);
       return json_({
-        email: user.email, name: user.name, role: user.role,
+        email: user.email, name: user.name, role: normaliseRole_(user.role),
         approved: canList_(user), admin: isAdmin_(user),
         session_token: session.session_token, session_expires_at: session.session_expires_at,
         // Where the data actually lives. Served rather than hardcoded in the
@@ -4310,10 +4324,10 @@ function handle_(e, method) {
       // Deliberately explicit: a person waiting for approval should know that
       // is what is happening, not see a generic refusal.
       return json_({
-        error: user.role === ROLE_BLOCKED
+        error: normaliseRole_(user.role) === ROLE_BLOCKED
           ? 'This account has been blocked.'
           : 'Your account is awaiting approval. Ask Brien to approve ' + user.email + '.',
-        role: user.role
+        role: normaliseRole_(user.role)
       }, 403);
     }
 
@@ -4469,18 +4483,48 @@ function route_(action, params, body, user) {
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
-      return json_(usersAll_());
+      return json_(usersForClient_());
 
-    // Left POST-only on purpose. It is an admin action taken once in a while,
-    // never mid-stream, so it does not need to survive a broken redirect — and
-    // the fewer ways there are to change someone's role, the better.
+    /**
+     * Reads its arguments from the query string as well as the body.
+     *
+     * It was body-only, on the reasoning that a write should be POST-only so
+     * it cannot happen by following a link. The reasoning was sound and the
+     * result was broken: every Apps Script reply is delivered by a 302 to a
+     * GET-only host, and when a browser preserves the method instead of
+     * downgrading it, the client retries the same call as a GET. On that leg
+     * the body is gone, so `body.role` was undefined and every role change
+     * failed with "Unknown role: undefined".
+     *
+     * So it accepts both, like every other action. The protection that
+     * actually holds is the one shared by all of them: no request without a
+     * valid session or ID token gets an identity, and no identity without the
+     * admin role gets past the line above.
+     */
     case 'setRole':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
-      return json_(setRole_(body.email, body.role, user));
+      return json_(setRole_(params.email || body.email, params.role || body.role, user));
 
     default:
       return json_({ error: 'Unknown action: ' + action }, 400);
   }
+}
+
+/**
+ * The allowlist as the app should see it, with the role canonicalised.
+ *
+ * The Users tab is edited by hand, so a role arrives as "Lister", " admin " or
+ * "ADMIN". The backend's own checks lowercase before comparing, so those all
+ * work for access; the app compared the raw string and showed the person with
+ * no role selected at all. One place to normalise beats two places to remember.
+ */
+function usersForClient_() {
+  return usersAll_().map(function (u) {
+    var copy = {};
+    Object.keys(u).forEach(function (k) { copy[k] = u[k]; });
+    copy.role = normaliseRole_(u.role);
+    return copy;
+  });
 }
 
 function shopsForClient_() {
@@ -4498,9 +4542,18 @@ function shopsForClient_() {
 
 /** Change someone's role. Admins only, and the owner cannot be demoted. */
 function setRole_(email, role, actor) {
-  var target = String(email || '').toLowerCase();
+  var target = String(email || '').trim().toLowerCase();
+  var want = normaliseRole_(role);
   var allowed = [ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED];
-  if (allowed.indexOf(role) === -1) throw fail_('TS-API-01', 'Unknown role: ' + role);
+  // Names the role it was given and the ones it would accept. "Unknown role:
+  // undefined" was the whole error message for a fortnight and said nothing
+  // about what had actually gone wrong.
+  if (allowed.indexOf(want) === -1) {
+    throw fail_('TS-API-01',
+      'Unknown role: ' + JSON.stringify(role) + '. Expected one of ' + allowed.join(', ') + '.');
+  }
+  if (!target) throw fail_('TS-API-05', 'No email given, so there is nobody to change.');
+  role = want;
   if (target === String(OWNER_EMAIL).toLowerCase() && role !== ROLE_ADMIN) {
     // Without this, one mistake locks everyone out of approving anyone.
     throw fail_('TS-API-02', 'The owner account cannot be demoted.');

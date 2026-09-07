@@ -21,11 +21,30 @@ const ROLES = [
   { id: 'blocked', label: 'Blocked', hint: 'Signed in, refused everything' },
 ] as const
 
+/**
+ * The role as this screen compares it.
+ *
+ * The Users tab is a spreadsheet somebody edits by hand, so a role arrives as
+ * "Lister" or " admin ". The backend's checks lowercase before comparing, so
+ * such a person has access; this screen compared the raw string and drew their
+ * row with no role selected at all, which reads as "no access" and is wrong.
+ * Normalised on both sides now, so neither can drift.
+ */
+const roleOf = (row: UserRow) => String(row.role ?? '').trim().toLowerCase()
+
 export default function Users({ me }: { me: SignedInUser & { admin?: boolean } }) {
   const [rows, setRows] = useState<UserRow[] | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [note, setNote] = useState('')
+  /**
+   * What happened to the row that was last tapped, shown on that row.
+   *
+   * The banners sit at the top of the screen. On a four-person list the row
+   * being changed is a screen away from them, so a refusal could be reported
+   * and never seen — which looks exactly like a tap that did nothing.
+   */
+  const [rowError, setRowError] = useState<{ email: string; message: string } | null>(null)
 
   const load = useCallback(async () => {
     setError('')
@@ -45,13 +64,16 @@ export default function Users({ me }: { me: SignedInUser & { admin?: boolean } }
     setBusy(row.email)
     setError('')
     setNote('')
+    setRowError(null)
     try {
       await api.setRole(row.email, role)
       const label = ROLES.find((r) => r.id === role)?.label ?? role
       setNote(`${row.name || row.email} — ${label}.`)
       await load()
     } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.display : String(e))
+      const message = e instanceof ApiError ? e.display : String(e)
+      setError(message)
+      setRowError({ email: row.email, message })
     } finally {
       setBusy('')
     }
@@ -68,8 +90,8 @@ export default function Users({ me }: { me: SignedInUser & { admin?: boolean } }
     )
   }
 
-  const waiting = (rows ?? []).filter((r) => r.role === 'pending')
-  const active = (rows ?? []).filter((r) => r.role !== 'pending')
+  const waiting = (rows ?? []).filter((r) => roleOf(r) === 'pending')
+  const active = (rows ?? []).filter((r) => roleOf(r) !== 'pending')
 
   return (
     <div className="space-y-3">
@@ -122,10 +144,20 @@ export default function Users({ me }: { me: SignedInUser & { admin?: boolean } }
             </p>
             {active.map((row) => (
               <div key={row.email} className="px-3 py-3 border-t border-hair space-y-2">
-                <Who row={row} />
+                <div className="flex items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <Who row={row} />
+                  </div>
+                  {/* Immediate proof the tap registered. Without it the only
+                      sign anything happened was the list quietly reloading a
+                      second later. */}
+                  {busy === row.email && (
+                    <span className="text-xs text-info shrink-0 pt-0.5">Saving…</span>
+                  )}
+                </div>
                 <div className="flex gap-1 p-1 rounded-lg bg-sunken border border-line2">
                   {ROLES.map((role) => {
-                    const on = row.role === role.id
+                    const on = roleOf(row) === role.id
                     return (
                       <button
                         key={role.id}
@@ -142,6 +174,9 @@ export default function Users({ me }: { me: SignedInUser & { admin?: boolean } }
                     )
                   })}
                 </div>
+                {rowError?.email === row.email && (
+                  <p className="text-xs text-bad">{rowError.message}</p>
+                )}
               </div>
             ))}
           </section>

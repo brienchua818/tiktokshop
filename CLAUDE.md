@@ -128,6 +128,26 @@ fails rather than a habit that slips.
   layers differ deliberately, so a fixed bar over scrolled content is not a
   finding.
 
+- **A control that does nothing is a bug, even when it renders perfectly.**
+  Brien could not change anyone's role, and every check passed: the buttons
+  rendered, were named, were 44px, and survived a click. So the audit now
+  records every backend call and a signature of the page, and fails a click
+  that produces no request, no navigation and no visible change. A control
+  already in its selected state is exempt, read from its own `aria-pressed`
+  rather than from a list of names, so every segmented control is covered and
+  none is excused by accident. It found a second bug immediately: Sign out
+  awaited Google's script before clearing local state, so on a blocked or dead
+  connection it did nothing at all.
+- **A disabled control is a deliberate state, not a fault.** The audit skips
+  clicking one. It used to time out on the segment showing someone's current
+  role and report the screen as broken while it worked.
+- **Compare a role in one place.** The Users tab is a spreadsheet people edit
+  by hand, so "Lister" and " admin " turn up. Checks that lowercased kept
+  working, checks that did not locked people out silently, which is the worst
+  split available: access looks granted in the Sheet and is refused by the
+  app. `normaliseRole_` is the only comparison, and the frontend normalises
+  too so neither side can drift.
+
 Run it with `npm run audit:ui` (add `:shots` for screenshots in
 `dist/ui-audit`). The build **must** carry `VITE_APPS_SCRIPT_URL` and
 `VITE_GOOGLE_CLIENT_ID` or the app renders a config error and the audit sees

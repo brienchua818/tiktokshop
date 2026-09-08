@@ -1869,7 +1869,21 @@ function ttGetProduct_(prefix, productId) {
       skuImgUrl: skuImageUrl_(attribute),
       priceAmount: String((raw.price && (raw.price.sale_price || raw.price.amount)) || ''),
       quantity: Number(inventory.quantity || 0),
-      warehouseId: inventory.warehouse_id || ''
+      warehouseId: inventory.warehouse_id || '',
+      /**
+       * Every warehouse on this SKU, not just the first.
+       *
+       * A stock write has to echo the whole array back. TikTok's rule: "You
+       * must include all warehouse IDs assigned to this SKU, along with the
+       * respective quantity. Do not omit any or add unrelated warehouses",
+       * enforced by 12019028, 12052037 and 12052533. `quantity` and
+       * `warehouseId` above stay as the first warehouse, because that is what
+       * every existing caller means by "the stock", and Singapore listings
+       * here have one.
+       */
+      inventories: (raw.inventory || []).map(function (inv) {
+        return { warehouse_id: String(inv.warehouse_id || ''), quantity: Number(inv.quantity || 0) };
+      })
     };
   });
   return {
@@ -2971,6 +2985,46 @@ function listedSkusForClient_(listingId) {
 }
 
 /**
+ * The variation to change stock on, or a refusal that says why.
+ *
+ * Shared by the stock write and the semantics diagnostic. One home per check,
+ * because the error registry allows a code at exactly one site — which is the
+ * point: `TS-STK-02` has to mean one thing, or a photographed banner cannot be
+ * looked up.
+ */
+function skuForStock_(live, identifier) {
+  var sku = null;
+  for (var i = 0; i < live.skus.length; i++) {
+    if (String(live.skus[i].sellerSku) === String(identifier)) { sku = live.skus[i]; break; }
+  }
+  if (!sku) {
+    throw fail_('TS-STK-02',
+      identifier + ' is not one of the variations TikTok is returning for this listing. ' +
+      'A variation still under review is not returned, so wait for it to go live before changing its stock.');
+  }
+  if (!sku.warehouseId && !(sku.inventories && sku.inventories.length)) {
+    throw fail_('TS-STK-03', identifier + ' has no warehouse on TikTok, so its stock cannot be changed.');
+  }
+  return sku;
+}
+
+/**
+ * TikTok's documented range, checked before anything is sent.
+ *
+ * The floor is 1, not 0, so there is no way to zero a variation from here.
+ * Said plainly rather than clamped: a clamp to 1 leaves one phantom unit
+ * sellable on something meant to be off sale.
+ */
+function checkStockTotal_(want) {
+  if (!isFinite(want) || Math.floor(want) !== want || want < 1 || want > 99999) {
+    throw fail_('TS-STK-04',
+      'Stock has to be a whole number between 1 and 99,999, and ' + want + ' is not.' +
+      (want < 1 ? ' TikTok cannot set a variation to zero from here — remove the variation instead.' : ''));
+  }
+  return want;
+}
+
+/**
  * Does TikTok's inventory endpoint SET the quantity, or ADD to it?
  *
  * The one fact standing between the app and a "top up this variation" button,
@@ -3021,19 +3075,7 @@ function checkStockSemantics() {
     return;
   }
 
-  var live = ttGetProduct_(shopId, listingId);
-  var sku = null;
-  for (var i = 0; i < live.skus.length; i++) {
-    if (String(live.skus[i].sellerSku) === String(identifier)) { sku = live.skus[i]; break; }
-  }
-  if (!sku) {
-    throw fail_('TS-STK-02',
-      'No variation "' + identifier + '" on listing ' + listingId + '. ' +
-      'A variation still under review is not returned by TikTok, so pick one that is live.');
-  }
-  if (!sku.warehouseId) {
-    throw fail_('TS-STK-03', identifier + ' has no warehouse on TikTok, so its stock cannot be written.');
-  }
+  var sku = skuForStock_(ttGetProduct_(shopId, listingId), identifier);
 
   var before = Number(sku.quantity || 0);
   // Distinct from the current level and from double it, so neither reading can
@@ -3087,13 +3129,29 @@ function checkStockSemantics() {
  *   `if (r.code !== 0) throw` misses them entirely.
  */
 function writeStockOnce_(shopId, listingId, sku, quantity) {
-  if (quantity < 1 || quantity > 99999) {
-    throw fail_('TS-STK-04', 'Stock must be between 1 and 99,999. Got ' + quantity + '.');
+  checkStockTotal_(quantity);
+
+  /**
+   * One warehouse only, and it refuses rather than guesses.
+   *
+   * With two warehouses each holding stock, "set the total to 25" has no
+   * single answer: it could be 25 and 0, or 12 and 13, and picking silently
+   * would move real inventory between locations. Singapore listings here have
+   * one warehouse, so this is a guard rather than a limitation — and if it
+   * ever fires, the right response is a decision, not a default.
+   */
+  var inventories = sku.inventories && sku.inventories.length
+    ? sku.inventories
+    : [{ warehouse_id: String(sku.warehouseId), quantity: Number(sku.quantity || 0) }];
+  if (inventories.length > 1) {
+    throw fail_('TS-STK-09',
+      'This variation stocks in ' + inventories.length + ' warehouses, so there is no single total to set. ' +
+      'Change it in Seller Center, per warehouse.');
   }
 
   var r = ttFetch_(shopId, 'post',
     '/product/202309/products/' + listingId + '/inventory/update', {},
-    { skus: [{ id: String(sku.id), inventory: [{ warehouse_id: String(sku.warehouseId), quantity: quantity }] }] });
+    { skus: [{ id: String(sku.id), inventory: [{ warehouse_id: String(inventories[0].warehouse_id), quantity: quantity }] }] });
 
   if (r.code !== 0) {
     throw fail_('TS-STK-05', 'TikTok refused the stock change: ' + ttReason_(r));
@@ -3119,6 +3177,91 @@ function writeStockOnce_(shopId, listingId, sku, quantity) {
   throw fail_('TS-STK-06',
     'The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. ' +
     'Nothing further was sent.');
+}
+
+/**
+ * Change one variation's stock on TikTok, and report what TikTok then holds.
+ *
+ * Established by `checkStockSemantics` against the real endpoint on 8 Sep:
+ * **the quantity sent REPLACES the stock.** B15 was at 21, two writes of 5
+ * left it at 5 both times. So a top-up is read-modify-write, and the read has
+ * to be fresh.
+ *
+ * `delta` adds to whatever TikTok holds right now; `absolute` sets it outright.
+ * The app sends a delta for "add 10 more", which is the case that matters: it
+ * means two people topping up during a broadcast add 10 and 10 rather than
+ * both writing the same stale total and one silently undoing the other.
+ *
+ * There is no ETag, no version field and no idempotency key on this endpoint,
+ * so this is an unguarded read-modify-write. A buyer's order landing between
+ * the read and the write is the likely case during a stream, not the edge
+ * case, and it would be erased into real oversell. Two things narrow it: the
+ * whole sequence is one call with nothing in between, and it is taken under
+ * the same script lock as every other write, so two phones cannot interleave.
+ *
+ * What it returns is the RE-READ figure, never the intended one. A write that
+ * reports success and does something else is the failure worth catching.
+ */
+function setVariationStock_(listingId, identifier, delta, absolute, actor) {
+  if (!listingId || !identifier) {
+    throw fail_('TS-STK-10', 'A stock change needs a listing and a variation.');
+  }
+
+  // The shop comes from the listing, as it does for a removal: the phone knows
+  // which listing it is looking at, and one fewer field to pass is one fewer
+  // field to get wrong.
+  var rows = listSkus_(listingId);
+  var shopId = rows.length ? String(rows[0].shop_id) : '';
+  if (!shopId) {
+    var listing = readAll_(TAB_LISTINGS).filter(function (l) {
+      return String(l.listing_id) === String(listingId);
+    })[0];
+    shopId = listing ? String(listing.shop_id) : '';
+  }
+  if (!shopId) throw fail_('TS-STK-11', 'Unknown listing: ' + listingId);
+
+  var live;
+  try {
+    live = ttGetProduct_(shopId, String(listingId));
+  } catch (e) {
+    throw fail_('TS-STK-01',
+      'Could not read the listing before changing stock, so nothing was sent. ' + (e && e.message ? e.message : e));
+  }
+
+  var sku = skuForStock_(live, identifier);
+  var before = Number(sku.quantity || 0);
+  var want = (absolute === null || absolute === undefined || absolute === '')
+    ? before + Number(delta || 0)
+    : Number(absolute);
+
+  checkStockTotal_(want);
+
+  var after = writeStockOnce_(shopId, listingId, sku, want);
+
+  if (after !== want) {
+    // Not corrected automatically. A second write on top of an outcome we do
+    // not understand is how one wrong number becomes two.
+    throw fail_('TS-STK-07',
+      'TikTok accepted the change for ' + identifier + ' but is now reporting ' + after +
+      ' rather than ' + want + '. Nothing further was sent. Check Seller Center before trying again.');
+  }
+
+  // The Sheet's `stock` column means "the total currently listed", so keeping
+  // it in step is what lets the app show "N left of M" honestly again after an
+  // in-app change. An edit made in Seller Center still leaves it stale, which
+  // is why the screen hides the denominator when it cannot be true.
+  rows = listSkus_(listingId);
+  for (var j = 0; j < rows.length; j++) {
+    if (String(rows[j].identifier) === String(identifier)) {
+      markSkus_([{ sku_id: String(rows[j].sku_id), stock: after }]);
+      break;
+    }
+  }
+
+  logEvent_(actor && actor.name, 'set_stock', String(listingId),
+    identifier + ': ' + before + ' -> ' + after, 'ok');
+
+  return { identifier: String(identifier), before: before, after: after, requested: want };
 }
 
 
@@ -4590,6 +4733,9 @@ function doPost(e) {
  */
 var WRITE_ACTIONS = {
   addListing: 1, saveSku: 1, pushSku: 1, setRole: 1,
+  // Read-modify-write on TikTok's stock, so it must not interleave with
+  // another phone doing the same thing to the same variation.
+  setStock: 1,
   // Rebuilds the product from a read, exactly as pushSku does; two at once
   // would each write the other's variation out of existence.
   removeVariation: 1
@@ -4811,6 +4957,24 @@ function route_(action, params, body, user) {
 
     case 'exportListing':
       return json_(exportListing_(params.listing_id || body.listing_id, requester_(user)));
+
+    /**
+     * Change one variation's stock.
+     *
+     * A delta ("add 10 more") rather than a total, because TikTok's endpoint
+     * REPLACES the quantity — established against the real API on 8 Sep — so
+     * two phones topping up during a broadcast must add 10 and 10 rather than
+     * both writing the same stale total and one silently undoing the other.
+     * The absolute form is there for "set it to exactly this".
+     */
+    case 'setStock':
+      return json_(setVariationStock_(
+        params.listing_id || body.listing_id,
+        params.identifier || body.identifier,
+        Number(params.delta || body.delta || 0),
+        (params.absolute || body.absolute) === undefined ? null : Number(params.absolute || body.absolute),
+        user
+      ));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);

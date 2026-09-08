@@ -129,6 +129,7 @@ const REPLIES = {
     { email: 'franze@sheldonglobal.com', name: 'Franze.S', role: 'Lister', first_seen: '2026-09-06T02:00:00Z', last_seen: '2026-09-07T03:00:00Z', approved_by: 'brienchua@sheldonglobal.com', note: '' },
   ],
   setRole: { email: 'judy@sheldonglobal.com', role: 'lister' },
+  setStock: { identifier: 'A1', before: 48, after: 58, requested: 58 },
   tiktokProducts: { products: [{ id: '1734903629786286062', title: 'HOUZE x Table Matters - I12 Clearance Sale', status: 'ACTIVATE', sku_count: 3 }], next_page_token: '' },
   exportOrders: { url: 'https://docs.google.com/x', name: 'HOUZE - Purchase order.xlsx', folder: 'Exports/2026/2026-09/2026-09-07', folder_url: LINKS.exports, listings: 2, units: 59, revenue: 2394.05, cost_divisor: 1.6, photos_placed: 25, photos_missing: 0 },
 }
@@ -181,6 +182,21 @@ const SCREENS = [
       const row = page.locator('text=I12 Clearance Sale').first()
       if (await row.count()) await row.click()
       await page.waitForTimeout(500)
+    },
+  },
+  {
+    // The stock sheet, open. An overlay that is only reachable by two clicks
+    // never gets screenshotted otherwise, and a sheet is exactly where a
+    // cramped layout or an unreachable control hides.
+    id: 'listing-stock',
+    path: '/live-listing',
+    setup: async (page) => {
+      const row = page.locator('text=I12 Clearance Sale').first()
+      if (await row.count()) await row.click()
+      await page.waitForTimeout(500)
+      const stock = page.getByRole('button', { name: /Change stock for/ }).first()
+      if (await stock.count()) await stock.click()
+      await page.waitForTimeout(300)
     },
   },
   { id: 'orders', path: '/orders', setup: async (page) => page.waitForTimeout(500) },
@@ -503,10 +519,45 @@ for (const theme of ['dark', 'day']) {
       if (cover.trapped.length) issues.push(`  geometry: ${JSON.stringify(cover.geometry)}`)
       await page.evaluate(() => { (document.scrollingElement || document.documentElement).scrollTop = 0 })
 
+      /**
+       * When a modal is open, the clickable surface IS the modal.
+       *
+       * A sheet's scrim covers the page on purpose, so every control behind it
+       * is unclickable and correctly so. Sweeping the whole page with a sheet
+       * open reported sixty-three failures that were all the design working.
+       *
+       * Not the same finding as the Escape one: that was about a sheet with no
+       * way out at all. Here there is a close button and Escape, and the audit
+       * simply has to look in the right place. Scoping this way also means
+       * every overlay gets properly swept rather than only the controls that
+       * happen to be reachable around it.
+       */
+      const overlay = page.locator('.fixed.inset-0').last()
+      const modal = (await overlay.count()) > 0 && (await overlay.isVisible().catch(() => false))
+      const surface = modal ? overlay : page
+
       // Click everything safe, and require the app to survive it.
-      const buttons = await page.locator('button:visible').all()
+      const buttons = await surface.locator('button:visible').all()
       for (const button of buttons) {
-        const name = ((await button.getAttribute('aria-label')) || (await button.textContent()) || '').trim()
+        /**
+         * Read the name defensively, because the list is a snapshot.
+         *
+         * Every control was enumerated before any of them was clicked, and a
+         * click can remove the rest: pressing +10 in the stock sheet closes
+         * the sheet and detaches every other button in it. Playwright then
+         * waits its full 30 second default for the element to reappear and
+         * throws — and this read sat OUTSIDE the try below, so one detached
+         * control killed the entire run rather than being skipped. It took
+         * adding a sheet to surface it; it was never specific to sheets.
+         */
+        const name = await button
+          .getAttribute('aria-label', { timeout: 1000 })
+          .then((label) => label || button.textContent({ timeout: 1000 }))
+          .then((text) => (text || '').trim())
+          .catch(() => null)
+        // Gone since the snapshot. Not a finding: the app did what it was
+        // asked, and what replaced it is checked on the next screen anyway.
+        if (name === null) continue
         if (!name || isDestructive(name)) continue
         // A control that an earlier click navigated away from is not a
         // finding — it is gone because the app did what it was asked. Only

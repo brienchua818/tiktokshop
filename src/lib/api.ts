@@ -458,6 +458,23 @@ export const api = {
       timeoutMs: 45_000,
     }),
 
+  /**
+   * Change one variation's stock, and get back what TikTok then holds.
+   *
+   * A delta, not a total. TikTok's endpoint replaces the quantity, so the
+   * backend reads the current level and writes the sum; sending "+10" rather
+   * than "21" means two phones topping up mid-broadcast add ten each instead
+   * of both writing the same stale figure.
+   *
+   * 90 seconds because it is read, write, re-read against TikTok — three
+   * round trips, and a timeout leaves the outcome unknown rather than failed.
+   */
+  setStock: (body: { listing_id: string; identifier: string; delta?: number; absolute?: number }) =>
+    call<{ identifier: string; before: number; after: number; requested: number }>('setStock', {
+      body,
+      timeoutMs: 90_000,
+    }),
+
   /** Remaining product uploads for today, against the shop's daily cap. */
   listingAllowance: (shopId: string) =>
     call<{ used: number | null; cap: number; remaining: number | null }>('allowance', {

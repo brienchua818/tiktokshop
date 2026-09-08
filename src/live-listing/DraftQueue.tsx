@@ -84,6 +84,8 @@ export default function DraftQueue({
   const [removeBusy, setRemoveBusy] = useState(false)
   /** Stays until dismissed: a confirmation that fades is one nobody sees. */
   const [removedNote, setRemovedNote] = useState('')
+  /** The variation whose stock is being changed, if any. */
+  const [adjusting, setAdjusting] = useState<LiveVariant | null>(null)
 
   /**
    * Did the last check give up rather than answer?
@@ -277,7 +279,9 @@ export default function DraftQueue({
             derived — set minus what remains — because the product API
             reports no sold count; that lives in orders. Labelled so
             nobody takes it for TikTok's own figure. */}
-        {liveFor(live, draft.identifier) && <StockLine v={liveFor(live, draft.identifier)!} />}
+        {liveFor(live, draft.identifier) && (
+          <StockLine v={liveFor(live, draft.identifier)!} onAdjust={setAdjusting} />
+        )}
 
         {/* TikTok's own rejection text, verbatim. A generic "failed" is
             what makes the current app hard to recover from. */}
@@ -480,6 +484,7 @@ export default function DraftQueue({
               v={row.live}
               productStatus={live?.product_status ?? null}
               onRemove={setRemoving}
+              onAdjust={setAdjusting}
             />
           ),
         )}
@@ -490,6 +495,19 @@ export default function DraftQueue({
         </p>
       )}
       </div>
+
+      {adjusting && (
+        <StockSheet
+          v={adjusting}
+          listingId={listingId}
+          onClose={() => setAdjusting(null)}
+          onDone={async (note) => {
+            setRemovedNote(note)
+            setAdjusting(null)
+            await refresh()
+          }}
+        />
+      )}
 
       {removing && (
         <RemoveDialog
@@ -664,10 +682,12 @@ function RemoteRow({
   v,
   productStatus,
   onRemove,
+  onAdjust,
 }: {
   v: LiveVariant
   productStatus: string | null
   onRemove: (v: LiveVariant) => void
+  onAdjust: (v: LiveVariant) => void
 }) {
   const badge = v.external
     ? { text: 'Live', cls: 'text-ok' }
@@ -692,7 +712,7 @@ function RemoteRow({
         <p className="text-xs font-mono text-identifier">{v.identifier || '—'}</p>
         <p className="text-xs text-muted truncate">{v.variant}</p>
         <p className="text-xs text-ghost">{who}</p>
-        {!v.external && <StockLine v={v} />}
+        {!v.external && <StockLine v={v} onAdjust={onAdjust} />}
         {v.external && (
           soldOut(v) ? (
             <p className="text-xs mt-0.5">
@@ -720,7 +740,149 @@ function RemoteRow({
   )
 }
 
-function StockLine({ v }: { v: LiveVariant }) {
+/**
+ * Change one variation's stock, mid-broadcast, without arithmetic.
+ *
+ * Built the day after TikTok's semantics were established: the endpoint
+ * REPLACES the quantity, so a total typed on a phone races every order that
+ * lands while it is being typed. The backend therefore takes a DELTA and does
+ * the read-modify-write itself, and this sheet is built around adding rather
+ * than around setting. "+10" is also what somebody actually wants when a
+ * variation sells out on air.
+ *
+ * Setting an exact number is still here, one tap further away, because
+ * occasionally that is the true intention.
+ *
+ * What comes back is TikTok's own re-read figure, and that is what is
+ * reported — never the number that was asked for.
+ */
+function StockSheet({
+  v,
+  listingId,
+  onClose,
+  onDone,
+}: {
+  v: LiveVariant
+  listingId: string | null
+  onClose: () => void
+  onDone: (note: string) => Promise<void>
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [exact, setExact] = useState('')
+  const [mode, setMode] = useState<'add' | 'set'>('add')
+  useDismiss(busy ? () => {} : onClose)
+
+  const now = v.stock_available ?? 0
+
+  async function apply(body: { delta?: number; absolute?: number }) {
+    if (!listingId) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await api.setStock({ listing_id: listingId, identifier: v.identifier, ...body })
+      // TikTok's number, not ours. "Set to 31" is a promise; "31 left" is a fact.
+      await onDone(`${r.identifier}: ${r.after} left, was ${r.before}.`)
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.display : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-scrim" onClick={busy ? undefined : onClose} />
+      <div className="relative w-full sm:max-w-sm bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] space-y-3">
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-mono text-identifier">{v.identifier}</p>
+            <p className="text-sm text-fg truncate">{v.variant}</p>
+            <p className="text-xs text-faint mt-0.5">
+              {now} left on TikTok
+              {v.sold !== null && v.sold > 0 && ` · ${v.sold} sold`}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="min-h-11 min-w-11 -mr-1 -mt-1 inline-flex items-center justify-center text-muted disabled:opacity-40"
+            aria-label="Close"
+          >
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+
+        {mode === 'add' ? (
+          <>
+            {/* The whole point, and the four amounts a factory run actually
+                uses. One tap, no keyboard, no mental arithmetic. */}
+            <div className="grid grid-cols-4 gap-2">
+              {[1, 5, 10, 20].map((n) => (
+                <button
+                  key={n}
+                  onClick={() => void apply({ delta: n })}
+                  disabled={busy}
+                  className="min-h-12 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white"
+                >
+                  +{n}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={() => setMode('set')}
+              disabled={busy}
+              className="min-h-11 w-full text-xs text-muted underline disabled:opacity-40"
+            >
+              Set an exact number instead
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <input
+                inputMode="numeric"
+                value={exact}
+                onChange={(e) => setExact(e.target.value)}
+                placeholder={String(now)}
+                aria-label="Exact stock"
+                className="flex-1 min-w-0 bg-sunken border border-line rounded-lg px-3 h-12 text-sm text-fg outline-none focus:border-accent"
+              />
+              <button
+                onClick={() => void apply({ absolute: Number(exact) })}
+                disabled={busy || !/^\d+$/.test(exact.trim()) || Number(exact) < 1}
+                className="min-h-12 px-4 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white shrink-0"
+              >
+                Set
+              </button>
+            </div>
+            {/* TikTok's floor is 1, not 0. Said before somebody types 0 and
+                waits, rather than after. */}
+            <p className="text-xs text-ghost">
+              1 to 99,999. TikTok cannot set a variation to zero — remove it instead.
+            </p>
+            <button
+              onClick={() => setMode('add')}
+              disabled={busy}
+              className="min-h-11 w-full text-xs text-muted underline disabled:opacity-40"
+            >
+              Back to adding
+            </button>
+          </>
+        )}
+
+        {busy && <p className="text-xs text-info">Changing stock on TikTok…</p>}
+        {error && <p className="text-xs text-bad">{error}</p>}
+        <p className="text-xs text-ghost">
+          Stock and price changes publish immediately. Adding a variation is what sends the
+          listing back through review; this does not.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+function StockLine({ v, onAdjust }: { v: LiveVariant; onAdjust?: (v: LiveVariant) => void }) {
   if (!v.on_tiktok) {
     // Deleted on purpose. Stated plainly and without alarm — somebody made
     // this decision, and the app agreeing with reality beats it insisting the
@@ -762,24 +924,44 @@ function StockLine({ v }: { v: LiveVariant }) {
   // Nothing left. Said in red and in words, because "0 left of 2" is the same
   // shape as every other stock line and gets read as a number rather than as
   // the one state that needs acting on mid-broadcast.
-  if (soldOut(v)) {
-    return (
-      <p className="text-xs mt-0.5">
-        <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
-        {v.sold !== null && v.sold > 0 && (
-          <span className="text-faint"> · all {v.sold} sold</span>
-        )}
-        {cancelled}
-      </p>
-    )
-  }
-  return (
-    <p className="text-xs text-faint mt-0.5">
+  /**
+   * The stock line is where the stock is changed.
+   *
+   * No new button on the row: it already carries a thumbnail, an identifier, a
+   * name, who listed it, a price, a state and a delete. The number somebody
+   * wants to change IS the control, which is both the smallest addition and
+   * the most obvious place to reach for. Sold out gets the same treatment,
+   * because that is exactly when a top-up is wanted.
+   */
+  const body = soldOut(v) ? (
+    <>
+      <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
+      {v.sold !== null && v.sold > 0 && <span className="text-faint"> · all {v.sold} sold</span>}
+      {cancelled}
+    </>
+  ) : (
+    <>
       <span className="text-fg2">{v.stock_available}</span> left
       {showsOriginalTotal(v) && ` of ${v.stock_set}`}
       {sold}
       {cancelled}
-    </p>
+    </>
+  )
+
+  // Only when TikTok has confirmed the variation and told us a quantity. A
+  // variation under review has no stock to change yet, and offering it would
+  // be offering something that must fail.
+  if (!onAdjust || !v.on_tiktok || v.removed || v.stock_available === null) {
+    return <p className="text-xs text-faint mt-0.5">{body}</p>
+  }
+  return (
+    <button
+      onClick={() => onAdjust(v)}
+      className="text-xs text-faint mt-0.5 text-left min-h-8 -my-1 py-1 block active:opacity-60 underline decoration-dotted decoration-line3 underline-offset-[3px]"
+      aria-label={`Change stock for ${v.identifier || v.variant}, currently ${v.stock_available}`}
+    >
+      {body}
+    </button>
   )
 }
 

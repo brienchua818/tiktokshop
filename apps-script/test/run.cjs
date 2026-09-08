@@ -116,7 +116,8 @@ ${src}
     MAX_SKUS_PER_PRODUCT, VALUE_NAME_MAX, VARIANT_ATTRIBUTE_NAME,
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
-    groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES
+    groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
+    checkStockTotal_, skuForStock_
   };
 `
 
@@ -1478,6 +1479,46 @@ check('a stock change cannot move the sold count, which was the whole point', ()
   // The new one reads the same three lines regardless of any stock level.
   const lines = [line({}), line({ order_id: 'o2' }), line({ order_id: 'o3' })]
   eq(gs.salesIndex_(gs.groupVariationSales_(lines))['id:9001'].units, 3)
+})
+
+/**
+ * Stock changes. TikTok's endpoint REPLACES the quantity — established against
+ * the real API on 8 Sep, B15 at 21 with two writes of 5 landing at 5 both
+ * times — so every guard in front of it matters more than usual.
+ */
+check('stock has to be a whole number in TikTok\'s documented range', () => {
+  eq(gs.checkStockTotal_(1), 1)
+  eq(gs.checkStockTotal_(99999), 99999)
+  var threw = function (n) {
+    try { gs.checkStockTotal_(n); return '' } catch (e) { return gs.codeOf_(e) }
+  }
+  // The floor is 1, not 0. There is no documented way to zero a variation, and
+  // a clamp to 1 would leave one phantom unit sellable on something meant to
+  // be off sale — so it refuses instead.
+  eq(threw(0), 'TS-STK-04')
+  eq(threw(-5), 'TS-STK-04')
+  eq(threw(100000), 'TS-STK-04')
+  eq(threw(2.5), 'TS-STK-04')
+  eq(threw(NaN), 'TS-STK-04')
+  eq(threw(Infinity), 'TS-STK-04')
+})
+
+check('a stock change refuses a variation TikTok is not returning', () => {
+  // Under review is the case: TikTok omits such a variation from a read, so
+  // there is nothing to write to and the app must say so rather than send.
+  var live = { skus: [{ sellerSku: 'A1', id: '9001', warehouseId: 'W1', quantity: 5 }] }
+  eq(gs.skuForStock_(live, 'A1').id, '9001')
+  try { gs.skuForStock_(live, 'B99'); throw new Error('accepted a missing variation') }
+  catch (e) { eq(gs.codeOf_(e), 'TS-STK-02') }
+})
+
+check('a stock change refuses a variation with no warehouse', () => {
+  var live = { skus: [{ sellerSku: 'A1', id: '9001', warehouseId: '', quantity: 0, inventories: [] }] }
+  try { gs.skuForStock_(live, 'A1'); throw new Error('accepted a warehouseless variation') }
+  catch (e) { eq(gs.codeOf_(e), 'TS-STK-03') }
+  // One warehouse recorded only in the array is still a warehouse.
+  var ok = { skus: [{ sellerSku: 'A1', id: '9001', warehouseId: '', inventories: [{ warehouse_id: 'W1', quantity: 3 }] }] }
+  eq(gs.skuForStock_(ok, 'A1').id, '9001')
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

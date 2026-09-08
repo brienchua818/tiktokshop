@@ -82,6 +82,9 @@ function doPost(e) {
  */
 var WRITE_ACTIONS = {
   addListing: 1, saveSku: 1, pushSku: 1, setRole: 1,
+  // Read-modify-write on TikTok's stock, so it must not interleave with
+  // another phone doing the same thing to the same variation.
+  setStock: 1,
   // Rebuilds the product from a read, exactly as pushSku does; two at once
   // would each write the other's variation out of existence.
   removeVariation: 1
@@ -303,6 +306,24 @@ function route_(action, params, body, user) {
 
     case 'exportListing':
       return json_(exportListing_(params.listing_id || body.listing_id, requester_(user)));
+
+    /**
+     * Change one variation's stock.
+     *
+     * A delta ("add 10 more") rather than a total, because TikTok's endpoint
+     * REPLACES the quantity — established against the real API on 8 Sep — so
+     * two phones topping up during a broadcast must add 10 and 10 rather than
+     * both writing the same stale total and one silently undoing the other.
+     * The absolute form is there for "set it to exactly this".
+     */
+    case 'setStock':
+      return json_(setVariationStock_(
+        params.listing_id || body.listing_id,
+        params.identifier || body.identifier,
+        Number(params.delta || body.delta || 0),
+        (params.absolute || body.absolute) === undefined ? null : Number(params.absolute || body.absolute),
+        user
+      ));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);

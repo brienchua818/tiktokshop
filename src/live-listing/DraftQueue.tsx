@@ -15,7 +15,7 @@ import {
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
-import { driftedDrafts, landed, mergeRows, soldOut, splitRows } from './reconcile'
+import { driftedDrafts, landed, mergeRows, showsOriginalTotal, soldOut, splitRows } from './reconcile'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
@@ -775,7 +775,8 @@ function StockLine({ v }: { v: LiveVariant }) {
   }
   return (
     <p className="text-xs text-faint mt-0.5">
-      <span className="text-fg2">{v.stock_available}</span> left of {v.stock_set}
+      <span className="text-fg2">{v.stock_available}</span> left
+      {showsOriginalTotal(v) && ` of ${v.stock_set}`}
       {sold}
       {cancelled}
     </p>

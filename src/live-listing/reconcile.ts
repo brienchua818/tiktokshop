@@ -126,3 +126,26 @@ export function soldOut(v: LiveVariant): boolean {
   if (v.stock_available === null || v.stock_available > 0) return false
   return v.external ? true : (v.stock_set ?? 0) > 0
 }
+
+/**
+ * Whether "of N" can honestly be shown beside the stock left.
+ *
+ * `stock_set` is what THIS APP asked for when it listed the variation. It is
+ * not what TikTok holds now, and nothing keeps the two in step: raising stock
+ * in Seller Center leaves the Sheet untouched.
+ *
+ * Brien, 8 Sep: B15 was listed with 1, he added 10 in Seller Center, and the
+ * row read **"11 left of 1"**. The 11 was right, freshly read from TikTok. The
+ * "of 1" was a stale record of an old intention presented as a current total,
+ * and it read as nonsense — which is worse than reading as nothing.
+ *
+ * So the denominator is shown only while it can still be true. Once TikTok
+ * holds more than the app ever listed, the app does not know the real total —
+ * `available + sold` does not recover it either, because a cancelled unit may
+ * or may not have returned to stock — so it says "11 left" and stops there.
+ */
+export function showsOriginalTotal(v: LiveVariant): boolean {
+  if (v.stock_set === null || v.stock_set <= 0) return false
+  if (v.stock_available === null) return false
+  return v.stock_available <= v.stock_set
+}

@@ -96,6 +96,9 @@ const REPLIES = {
       variant({ identifier: '', variant: 'Diatomite Absorbent Mat', external: true, tiktok_sku_id: '9003', created_at: '', created_by: '', stock_set: null, sold: null }),
       // Sold out, so the red label renders and gets audited.
       variant({ identifier: 'L12', variant: 'L12 Rattan Basket Large', tiktok_sku_id: '9004', created_by: 'Liz Liu', created_at: '2026-09-07T05:55:00Z', stock_set: 2, stock_available: 0, sold: 2 }),
+      // Stock raised in Seller Center beyond what the app listed. Brien's B15:
+      // this used to render "11 left of 1".
+      variant({ identifier: 'B15', variant: 'B15 Showroom Floor Lamp', tiktok_sku_id: '9006', created_by: 'Brien Chua', created_at: '2026-09-08T00:30:00Z', stock_set: 1, stock_available: 11, sold: 0, cancelled: 0 }),
       // Removed, so the second tab exists and its button is clicked.
       variant({ identifier: 'B1', variant: 'B1 Oval Storage Ottoman', tiktok_sku_id: '9005', created_by: 'Liz Liu', created_at: '2026-09-07T00:30:00Z', on_tiktok: false, removed: true, stock_available: 0, sold: null }),
     ],
@@ -340,12 +343,33 @@ const TRAPPED = () => {
     if (r.height > window.innerHeight * 0.5) continue
     bars.push({ node, top: r.top })
   }
-  if (bars.length === 0) return { barTop: null, trapped: [] }
+  if (bars.length === 0) return { barTop: null, trapped: [], geometry: null }
   const barTop = Math.min(...bars.map((b) => b.top))
   const inBar = (node) => bars.some((b) => b.node.contains(node))
 
   // Leaf text only: a container's box may legitimately extend under a bar as
   // long as nothing readable sits down there.
+  /**
+   * The element's own scroller, if it sits inside one.
+   *
+   * Needed because a row scrolled out of view inside a `max-h` list still
+   * reports its real position, which can be below the list's visible box. This
+   * check read that as "hidden behind the bottom bar" and failed the listing
+   * screen the moment a sixth variation was added to the fixtures — a false
+   * positive, and one that would have sent somebody looking for a layout bug
+   * that was not there. Such a row is hidden by its own list and is reachable
+   * by scrolling that list, which is the design working.
+   */
+  const clippedByOwnScroller = (node, r) => {
+    for (let n = node.parentElement; n && n !== document.body; n = n.parentElement) {
+      const cs = getComputedStyle(n)
+      if (!/auto|scroll|hidden/.test(cs.overflowY)) continue
+      const box = n.getBoundingClientRect()
+      if (r.top >= box.bottom - 1 || r.bottom <= box.top + 1) return true
+    }
+    return false
+  }
+
   const trapped = []
   for (const node of document.querySelectorAll('p, span, h1, h2, h3, td, th, li, label, button, a, div')) {
     if (node.children.length > 0) continue
@@ -355,11 +379,33 @@ const TRAPPED = () => {
     if (getComputedStyle(node).visibility === 'hidden') continue
     const r = node.getBoundingClientRect()
     if (r.height === 0 || r.width === 0) continue
+    if (clippedByOwnScroller(node, r)) continue
     // Above the bar, or scrolled off the top: either way not trapped.
     if (r.bottom <= barTop + 1 || r.top >= window.innerHeight) continue
     trapped.push({ text: text.slice(0, 40), bottom: Math.round(r.bottom) })
   }
-  return { barTop: Math.round(barTop), trapped: trapped.slice(0, 3) }
+  // Enough to diagnose a finding without a second run: whether the page could
+  // scroll at all, and how much room was actually reserved below the content.
+  const main = document.querySelector('main')
+  return {
+    barTop: Math.round(barTop),
+    trapped: trapped.slice(0, 3),
+    geometry: {
+      vh: window.innerHeight,
+      scrolled: Math.round(el.scrollTop),
+      scrollable: Math.round(el.scrollHeight - el.clientHeight),
+      mainBottom: main ? Math.round(main.getBoundingClientRect().bottom) : null,
+      mainPadBottom: main ? getComputedStyle(main).paddingBottom : null,
+      spacerCount: document.querySelectorAll('main .h-14').length,
+      innerScrollers: [...document.querySelectorAll('main *')]
+        .filter((n) => /auto|scroll/.test(getComputedStyle(n).overflowY))
+        .map((n) => {
+          const r = n.getBoundingClientRect()
+          return `${n.tagName.toLowerCase()} bottom=${Math.round(r.bottom)} h=${Math.round(r.height)} maxH=${getComputedStyle(n).maxHeight}`
+        })
+        .slice(0, 3),
+    },
+  }
 }
 
 let failures = 0
@@ -454,6 +500,7 @@ for (const theme of ['dark', 'day']) {
       cover.trapped.forEach((t) =>
         issues.push(`hidden behind the bottom bar at full scroll: "${t.text}" (bottom ${t.bottom}px, bar top ${cover.barTop}px)`),
       )
+      if (cover.trapped.length) issues.push(`  geometry: ${JSON.stringify(cover.geometry)}`)
       await page.evaluate(() => { (document.scrollingElement || document.documentElement).scrollTop = 0 })
 
       // Click everything safe, and require the app to survive it.

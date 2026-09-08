@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ListingState, LiveVariant } from '../lib/api'
 import type { QueuedDraft } from '../offline/queue'
-import { driftedDrafts, isRemoved, landed, mergeRows, soldOut, splitRows } from './reconcile'
+import { driftedDrafts, isRemoved, landed, mergeRows, showsOriginalTotal, soldOut, splitRows } from './reconcile'
 
 function variant(over: Partial<LiveVariant>): LiveVariant {
   return {
@@ -197,5 +197,28 @@ describe('soldOut', () => {
 
   it('is true for an external variation at zero, which has no stock_set to check', () => {
     expect(soldOut(variant({ external: true, on_tiktok: true, under_review: false, stock_set: null, stock_available: 0 }))).toBe(true)
+  })
+})
+
+describe('showsOriginalTotal', () => {
+  it("hides the total once TikTok holds more than the app ever listed", () => {
+    // Brien's B15 on 8 Sep: listed with 1, ten added in Seller Center, and the
+    // row read "11 left of 1". The 11 was correct and current; the "of 1" was
+    // a stale intention shown as a total.
+    expect(showsOriginalTotal(variant({ stock_set: 1, stock_available: 11 }))).toBe(false)
+  })
+
+  it('shows it while it can still be true', () => {
+    expect(showsOriginalTotal(variant({ stock_set: 50, stock_available: 48 }))).toBe(true)
+    // Equal is fine: nothing has sold and nothing has been added.
+    expect(showsOriginalTotal(variant({ stock_set: 2, stock_available: 2 }))).toBe(true)
+  })
+
+  it('hides it when there is nothing to compare', () => {
+    // A Seller Center variation has no stock_set at all, and a variation under
+    // review has no available figure yet.
+    expect(showsOriginalTotal(variant({ external: true, stock_set: null, stock_available: 4 }))).toBe(false)
+    expect(showsOriginalTotal(variant({ stock_set: 5, stock_available: null }))).toBe(false)
+    expect(showsOriginalTotal(variant({ stock_set: 0, stock_available: 0 }))).toBe(false)
   })
 })

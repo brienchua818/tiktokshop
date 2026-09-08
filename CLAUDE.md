@@ -157,6 +157,15 @@ reporting zero controls is a failure, not a pass.
 When adding a check, prove it fires: break the thing on purpose, watch it fail,
 then fix it back. A check that has never gone red is not known to work.
 
+And prove it does not fire on the legitimate case either. The trapped-content
+check read a row scrolled out of view inside the queue's own `max-h` list as
+"hidden behind the bottom bar", because a clipped element still reports its
+real position. It only surfaced when a sixth variation was added to the
+fixtures, and it would have sent somebody hunting a layout bug that was not
+there. A false alarm costs more than a missing check, because it teaches people
+to ignore the output. When a check reports something, it must also report
+enough geometry to diagnose it without a second run.
+
 ## Shipping
 
 - Frontend: `npm test`, `npm run build` (`tsc -b` is stricter than

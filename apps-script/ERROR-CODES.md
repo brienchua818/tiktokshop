@@ -113,6 +113,12 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-29` | Product.gs:1177 | Listing check failed. |
 | `TS-PRD-30` | Product.gs:1184 | TikTok returned no product ID. |
 | `TS-SHT-01` | Sheet.gs:239 | Unknown shop: |
+| `TS-STK-02` | Product.gs:1358 | No variation " " on listing . A variation still under review is not returned by TikTok, so pick one that is live. |
+| `TS-STK-03` | Product.gs:1363 | has no warehouse on TikTok, so its stock cannot be written. |
+| `TS-STK-04` | Product.gs:1419 | Stock must be between 1 and 99,999. Got . |
+| `TS-STK-05` | Product.gs:1427 | TikTok refused the stock change: |
+| `TS-STK-06` | Product.gs:1447 | The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. Nothing further was sent. |
+| `TS-STK-08` | Product.gs:1437 | TikTok reported success but refused this SKU: no reason given ( ) |
 | `TS-TT-01` | TikTok.gs:20 | No app credentials for . Add _APP_KEY and _APP_SECRET in Script Properties. |
 | `TS-TT-02` | TikTok.gs:67 | Set _SERVICE_ID in Script Properties first.\n\n It comes from THIS project\'s app in TikTok Partner Center — next to the App Key and App Secret, or as the number after "service_id=" in the authorisation link Partner Cent… |
 | `TS-TT-03` | TikTok.gs:195 | token exchange failed |

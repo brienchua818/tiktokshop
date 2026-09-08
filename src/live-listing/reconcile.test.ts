@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { ListingState, LiveVariant } from '../lib/api'
 import type { QueuedDraft } from '../offline/queue'
-import { driftedDrafts, isRemoved, landed, mergeRows, showsOriginalTotal, soldOut, splitRows } from './reconcile'
+import {
+  driftedDrafts,
+  isRemoved,
+  landed,
+  mergeRows,
+  nameWithoutIdentifier,
+  showsOriginalTotal,
+  soldOut,
+  splitRows,
+} from './reconcile'
 
 function variant(over: Partial<LiveVariant>): LiveVariant {
   return {
@@ -220,5 +229,34 @@ describe('showsOriginalTotal', () => {
     expect(showsOriginalTotal(variant({ external: true, stock_set: null, stock_available: 4 }))).toBe(false)
     expect(showsOriginalTotal(variant({ stock_set: 5, stock_available: null }))).toBe(false)
     expect(showsOriginalTotal(variant({ stock_set: 0, stock_available: 0 }))).toBe(false)
+  })
+})
+
+describe('nameWithoutIdentifier', () => {
+  it('drops the identifier the app prefixed onto the name', () => {
+    // The queue was printing "A1  A1 Ceramic Serving Bowl" on the one line
+    // where width is worth most.
+    expect(nameWithoutIdentifier('A1 Ceramic Serving Bowl', 'A1')).toBe('Ceramic Serving Bowl')
+    expect(nameWithoutIdentifier('L12 Cat trolley in pink', 'L12')).toBe('Cat trolley in pink')
+    expect(nameWithoutIdentifier('B15 - Showroom Lamp', 'B15')).toBe('Showroom Lamp')
+    expect(nameWithoutIdentifier('b15 showroom lamp', 'B15')).toBe('showroom lamp')
+  })
+
+  it('leaves a name alone when the match is not a whole token', () => {
+    // "L1" must not eat the "2" off "L12 Rattan Basket".
+    expect(nameWithoutIdentifier('L12 Rattan Basket', 'L1')).toBe('L12 Rattan Basket')
+    expect(nameWithoutIdentifier('A1000 Trolley', 'A1')).toBe('A1000 Trolley')
+  })
+
+  it('never returns an empty name', () => {
+    // A variation named only by its identifier keeps it rather than vanishing.
+    expect(nameWithoutIdentifier('A1', 'A1')).toBe('A1')
+    expect(nameWithoutIdentifier('A1 ', 'A1')).toBe('A1')
+    expect(nameWithoutIdentifier('', 'A1')).toBe('')
+    expect(nameWithoutIdentifier('Ceramic Bowl', '')).toBe('Ceramic Bowl')
+  })
+
+  it('leaves an unrelated name alone', () => {
+    expect(nameWithoutIdentifier('Ceramic Serving Bowl', 'A1')).toBe('Ceramic Serving Bowl')
   })
 })

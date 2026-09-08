@@ -149,3 +149,28 @@ export function showsOriginalTotal(v: LiveVariant): boolean {
   if (v.stock_available === null) return false
   return v.stock_available <= v.stock_set
 }
+
+/**
+ * The variant name with its identifier taken off the front.
+ *
+ * Every variant name this app sends to TikTok is prefixed with the identifier,
+ * because that is what a buyer sees in the picker and how a factory matches a
+ * box to a row. Which means the queue was printing it twice: "A1  A1 Ceramic
+ * Serving Bowl", on the one line where width is worth most.
+ *
+ * Only a leading, whole-token match is removed, so a name that genuinely
+ * begins with something similar is left alone: "L1" does not strip "L12", and
+ * a name that is nothing but its identifier keeps it rather than becoming
+ * blank.
+ */
+export function nameWithoutIdentifier(name: string, identifier: string): string {
+  const id = identifier.trim()
+  const full = name.trim()
+  if (!id || !full) return full
+  if (!full.toUpperCase().startsWith(id.toUpperCase())) return full
+  const rest = full.slice(id.length)
+  // A whole token: the next character has to be a separator, or there was none.
+  if (rest && !/^[\s\-–—:·,.]/.test(rest)) return full
+  const trimmed = rest.replace(/^[\s\-–—:·,.]+/, '').trim()
+  return trimmed || full
+}

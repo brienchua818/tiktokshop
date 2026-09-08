@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, ApiError, type ListingState, type LiveVariant } from '../lib/api'
 import { toBase64 } from '../lib/bytes'
 import {
@@ -15,7 +15,15 @@ import {
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
-import { driftedDrafts, landed, mergeRows, showsOriginalTotal, soldOut, splitRows } from './reconcile'
+import {
+  driftedDrafts,
+  landed,
+  mergeRows,
+  nameWithoutIdentifier,
+  showsOriginalTotal,
+  soldOut,
+  splitRows,
+} from './reconcile'
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
@@ -264,85 +272,53 @@ export default function DraftQueue({
     )
   }
 
-  const renderDraft = (draft: QueuedDraft) => (
-    <li
-      key={draft.draft_id}
-      className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0"
-    >
-      <Thumbnail draft={draft} fallback={liveFor(live, draft.identifier)?.image_url ?? ''} />
+  const renderDraft = (draft: QueuedDraft) => {
+    const v = liveFor(live, draft.identifier)
+    const canAdjust = Boolean(v && v.on_tiktok && !v.removed && v.stock_available !== null)
+    const stuckHere = draft.status === 'failed' && draft.attempts >= MAX_AUTO_ATTEMPTS
+    const error = draft.error ? draft.error.replace(LISTING_FULL_MARKER, '').trim() : ''
 
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-mono text-identifier">{draft.identifier}</p>
-        <p className="text-xs text-muted truncate">{draft.title}</p>
+    // Removing from TikTok takes something away from buyers, so it asks
+    // first; discarding a draft that never got there does not. One or the
+    // other, never both, and neither until there is something to act on.
+    const onTikTok = Boolean(v?.on_tiktok && v.tiktok_sku_id && !v.removed)
+    const remove =
+      draft.status !== 'pushed'
+        ? { fn: () => void onDelete(draft.draft_id), label: `Delete ${draft.identifier}` }
+        : onTikTok && v
+          ? { fn: () => setRemoving(v), label: `Remove ${draft.identifier} from TikTok` }
+          : null
 
-        {/* Stock as TikTok has it, once a refresh has been done. Sold is
-            derived — set minus what remains — because the product API
-            reports no sold count; that lives in orders. Labelled so
-            nobody takes it for TikTok's own figure. */}
-        {liveFor(live, draft.identifier) && (
-          <StockLine v={liveFor(live, draft.identifier)!} onAdjust={setAdjusting} />
-        )}
-
-        {/* TikTok's own rejection text, verbatim. A generic "failed" is
-            what makes the current app hard to recover from. */}
-        {draft.error && (
-          <p className="text-xs text-bad mt-0.5">
-            {/* The marker is for the code, not the operator. */}
-            {draft.error.replace(LISTING_FULL_MARKER, '').trim()}
-          </p>
-        )}
-
-        {/* Only on a SKU that has stopped trying by itself. Offering it
-            on one still counting down would invite a second push of
-            something already in flight. */}
-        {draft.status === 'failed' && draft.attempts >= MAX_AUTO_ATTEMPTS && (
+    return (
+      <VariantRow
+        key={draft.draft_id}
+        identifier={draft.identifier}
+        name={draft.title}
+        photo={<Thumbnail draft={draft} fallback={v?.image_url ?? ''} />}
+        price={draft.price}
+        stock={v ? <StockState v={v} /> : <span className="text-faint shrink-0">Queued</span>}
+        meta={v ? variantMeta(v) : ''}
+        badge={<StatusBadge draft={draft} live={v} productStatus={live?.product_status ?? null} />}
+        {...(canAdjust && v ? { onOpen: () => setAdjusting(v) } : {})}
+        {...(remove ? { onDelete: remove.fn, deleteLabel: remove.label } : {})}
+      >
+        {/* TikTok's own rejection text, verbatim. A generic "failed" is what
+            makes an app impossible to recover from mid-broadcast. */}
+        {error && <p className="text-[11px] text-bad">{error}</p>}
+        {/* Only on a SKU that has stopped trying by itself. Offering it on one
+            still counting down invites a second copy of something in flight. */}
+        {stuckHere && (
           <button
             onClick={() => void retryDraft(draft.draft_id).then(onChanged)}
-            className="mt-1 text-xs px-2.5 min-h-8 inline-flex items-center gap-1 rounded-lg bg-accent/90 hover:bg-accent text-white"
+            className="mt-1 text-[11px] px-2.5 min-h-8 inline-flex items-center gap-1 rounded-lg bg-accent/90 hover:bg-accent text-white"
           >
             <Icon name="refresh" size={14} />
             Retry {draft.identifier}
           </button>
         )}
-      </div>
-
-      <div className="flex items-center gap-2 shrink-0">
-        <span className="text-xs text-faint">${draft.price}</span>
-        <StatusBadge
-          draft={draft}
-          live={liveFor(live, draft.identifier)}
-          productStatus={live?.product_status ?? null}
-        />
-        {draft.status !== 'pushed' ? (
-          // Not on TikTok yet: deleting only discards the local draft, so
-          // no confirmation stands between the tap and the result.
-          <button
-            onClick={() => void onDelete(draft.draft_id)}
-            className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
-            aria-label={`Delete ${draft.identifier}`}
-          >
-            <Icon name="trash" size={16} />
-          </button>
-        ) : (
-          // On TikTok: this takes something away from buyers, so it asks
-          // first. Only offered once TikTok is actually showing it —
-          // there is nothing to remove by id until then.
-          (() => {
-            const v = liveFor(live, draft.identifier)
-            return v?.on_tiktok && v.tiktok_sku_id && !v.removed ? (
-              <button
-                onClick={() => setRemoving(v)}
-                className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
-                aria-label={`Remove ${draft.identifier} from TikTok`}
-              >
-                <Icon name="trash" size={16} />
-              </button>
-            ) : null
-          })()
-        )}
-      </div>
-    </li>
-  )
+      </VariantRow>
+    )
+  }
 
   return (
     <div className="bg-raised border border-line2 rounded-xl overflow-hidden">
@@ -661,8 +637,8 @@ function Thumbnail({ draft, fallback }: { draft: QueuedDraft; fallback: string }
   // row survives in the queue but its photo does not: without it a SKU this
   // phone listed itself would show an empty square.
   const src = url || fallback
-  if (!src) return <div className="w-14 h-14 rounded-lg bg-chip shrink-0" />
-  return <img src={src} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
+  if (!src) return <div className="w-12 h-12 rounded-lg bg-chip shrink-0" />
+  return <img src={src} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />
 }
 
 /** The live record for one identifier, if a refresh has been done. */
@@ -698,64 +674,47 @@ function RemoteRow({
         : productStatus === 'ACTIVATE'
           ? { text: 'Live', cls: 'text-ok' }
           : { text: 'Sent', cls: 'text-muted' }
-  const who = v.external ? 'added outside this app' : v.created_by ? `listed by ${v.created_by}` : 'listed from another phone'
+
+  // A Seller Center variation has no row of ours to update, so its stock is
+  // read-only here rather than offered and then refused.
+  const canAdjust = !v.external && v.on_tiktok && !v.removed && v.stock_available !== null
+  const canRemove = v.on_tiktok && Boolean(v.tiktok_sku_id) && !v.removed
+
   return (
-    <li className="flex items-start gap-2 py-1.5 border-b border-hair last:border-0">
-      {v.image_url ? (
-        <img src={v.image_url} alt="" className="w-14 h-14 rounded-lg object-cover shrink-0" />
-      ) : (
-        <div className="w-14 h-14 rounded-lg bg-chip shrink-0 flex items-center justify-center text-ghost text-[10px]">
-          {v.external ? 'SC' : '—'}
-        </div>
-      )}
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-mono text-identifier">{v.identifier || '—'}</p>
-        <p className="text-xs text-muted truncate">{v.variant}</p>
-        <p className="text-xs text-ghost">{who}</p>
-        {!v.external && <StockLine v={v} onAdjust={onAdjust} />}
-        {v.external && (
+    <VariantRow
+      identifier={v.identifier}
+      name={v.variant}
+      photo={
+        v.image_url ? (
+          <img src={v.image_url} alt="" className="w-12 h-12 rounded-lg object-cover shrink-0" />
+        ) : (
+          <div className="w-12 h-12 rounded-lg bg-chip shrink-0 flex items-center justify-center text-ghost text-[10px]">
+            {v.external ? 'SC' : '—'}
+          </div>
+        )
+      }
+      price={v.price}
+      stock={
+        v.external ? (
           soldOut(v) ? (
-            <p className="text-xs mt-0.5">
-              <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
-            </p>
+            <span className="text-bad font-semibold tracking-wide shrink-0">SOLD OUT</span>
           ) : (
-            <p className="text-xs text-faint mt-0.5">{v.stock_available ?? 0} in stock</p>
+            <span className="text-fg2 shrink-0">{v.stock_available ?? 0} in stock</span>
           )
-        )}
-      </div>
-      <div className="flex items-center gap-2 shrink-0">
-        {v.price && <span className="text-xs text-faint">${v.price}</span>}
-        <span className={`text-xs ${badge.cls}`}>{badge.text}</span>
-        {v.on_tiktok && v.tiktok_sku_id && !v.removed && (
-          <button
-            onClick={() => onRemove(v)}
-            className="text-ghost hover:text-bad min-h-11 min-w-9 flex items-center justify-center"
-            aria-label={`Remove ${v.identifier || v.variant} from TikTok`}
-          >
-            <Icon name="trash" size={16} />
-          </button>
-        )}
-      </div>
-    </li>
+        ) : (
+          <StockState v={v} />
+        )
+      }
+      meta={variantMeta(v)}
+      badge={<span className={`text-[11px] ${badge.cls}`}>{badge.text}</span>}
+      {...(canAdjust ? { onOpen: () => onAdjust(v) } : {})}
+      {...(canRemove
+        ? { onDelete: () => onRemove(v), deleteLabel: `Remove ${v.identifier || v.variant} from TikTok` }
+        : {})}
+    />
   )
 }
 
-/**
- * Change one variation's stock, mid-broadcast, without arithmetic.
- *
- * Built the day after TikTok's semantics were established: the endpoint
- * REPLACES the quantity, so a total typed on a phone races every order that
- * lands while it is being typed. The backend therefore takes a DELTA and does
- * the read-modify-write itself, and this sheet is built around adding rather
- * than around setting. "+10" is also what somebody actually wants when a
- * variation sells out on air.
- *
- * Setting an exact number is still here, one tap further away, because
- * occasionally that is the true intention.
- *
- * What comes back is TikTok's own re-read figure, and that is what is
- * reported — never the number that was asked for.
- */
 function StockSheet({
   v,
   listingId,
@@ -882,97 +841,155 @@ function StockSheet({
   )
 }
 
-function StockLine({ v, onAdjust }: { v: LiveVariant; onAdjust?: (v: LiveVariant) => void }) {
-  if (!v.on_tiktok) {
-    // Deleted on purpose. Stated plainly and without alarm — somebody made
-    // this decision, and the app agreeing with reality beats it insisting the
-    // SKU should still be there.
-    if (v.removed) {
-      return <p className="text-xs text-faint mt-0.5">Removed from TikTok.</p>
-    }
-    // Absence is not loss. TikTok omits a variation still under review, so a
-    // SKU it has issued an id for is waiting, not gone — B5 read as missing
-    // and went live minutes later. Calling that "retry this SKU" invites a
-    // second copy of something already on its way.
-    if (v.under_review) {
-      return (
-        <p className="text-xs text-warn/90 mt-0.5">
-          Under review — not shown by TikTok yet. Nothing to do.
-        </p>
-      )
-    }
-    // Ambiguous, and said so. Telling someone to retry a variation that is
-    // merely pending adds a second copy, so this stops short of advising it.
-    return (
-      <p className="text-xs text-warn/90 mt-0.5">
-        Not shown by TikTok yet. If it has not appeared in 30 minutes it was not added.
-      </p>
-    )
-  }
-  /**
-   * Sold now comes from order line items, so it is a count rather than a
-   * subtraction and cannot be moved by a stock change. Cancelled is shown
-   * beside it and never netted off: a single silently-net number is the one
-   * that changes after the fact and cannot be explained to a factory.
-   */
-  const sold = v.sold !== null && v.sold > 0 ? <span className="text-ok/80"> · {v.sold} sold</span> : null
-  const cancelled =
-    v.cancelled !== null && v.cancelled > 0 ? (
-      <span className="text-warn/80"> · {v.cancelled} cancelled</span>
-    ) : null
-
-  // Nothing left. Said in red and in words, because "0 left of 2" is the same
-  // shape as every other stock line and gets read as a number rather than as
-  // the one state that needs acting on mid-broadcast.
-  /**
-   * The stock line is where the stock is changed.
-   *
-   * No new button on the row: it already carries a thumbnail, an identifier, a
-   * name, who listed it, a price, a state and a delete. The number somebody
-   * wants to change IS the control, which is both the smallest addition and
-   * the most obvious place to reach for. Sold out gets the same treatment,
-   * because that is exactly when a top-up is wanted.
-   */
-  const body = soldOut(v) ? (
+/**
+ * One variation, as one row, for both kinds of row there are.
+ *
+ * Brien, 8 Sep: "the uxui now sucks. Image size seems wrong. Each row and font
+ * size all suddenly don't look aligned and neat anymore." He was right, and no
+ * single change caused it: the row took six today — a bigger photo, a sold
+ * count, a cancelled count, SOLD OUT, a tappable stock figure, an affordance
+ * for it — each landing in whichever of the TWO duplicated row markups it
+ * touched. Nothing was ever redesigned. It accreted.
+ *
+ * So there is one row now, and it holds to three rules.
+ *
+ *   1. EVERY ROW IS THE SAME HEIGHT. It was three lines for a variation with
+ *      nobody recorded against it and four for one with, so the list had no
+ *      rhythm and the photo matched neither. Two lines of text, always,
+ *      whatever is missing.
+ *   2. THE PHOTO SETS THE HEIGHT and everything centres against it. A 56px
+ *      photo against a text block of 48 or 64 floated high on one row and low
+ *      on the next; 48px against a fixed two lines cannot.
+ *   3. TWO TEXT SIZES, NOT ONE. Everything was 12px in four different greys,
+ *      which is exactly why it read as mush. 13px for what identifies the
+ *      variation, 11px for what qualifies it, so the size carries the
+ *      hierarchy and the colours do not have to.
+ *
+ * The whole row is the control for changing stock, which is why there is no
+ * plus icon and no dotted underline — both were tried today and both were
+ * worse. A 48px full-width target beats a 12px squiggle, costs nothing
+ * visually, and is what a list row does everywhere else. Delete is a sibling
+ * rather than a nested button, so the markup is valid and the two targets
+ * cannot overlap.
+ */
+function VariantRow({
+  identifier,
+  name,
+  photo,
+  price,
+  stock,
+  meta,
+  badge,
+  onOpen,
+  onDelete,
+  deleteLabel,
+  children,
+}: {
+  identifier: string
+  name: string
+  photo: ReactNode
+  price: string
+  /** The stock state, already worded and coloured. */
+  stock: ReactNode
+  /** Sold, cancelled, who listed it: everything that qualifies the row. */
+  meta: string
+  badge: ReactNode
+  /** Opens the stock sheet. Absent while there is no stock to change. */
+  onOpen?: () => void
+  onDelete?: () => void
+  deleteLabel?: string
+  /** An error and a retry, below the row rather than crammed inside it. */
+  children?: ReactNode
+}) {
+  const inner = (
     <>
-      <span className="text-bad font-semibold tracking-wide">SOLD OUT</span>
-      {v.sold !== null && v.sold > 0 && <span className="text-faint"> · all {v.sold} sold</span>}
-      {cancelled}
-    </>
-  ) : (
-    <>
-      <span className="text-fg2">{v.stock_available}</span> left
-      {showsOriginalTotal(v) && ` of ${v.stock_set}`}
-      {sold}
-      {cancelled}
+      {photo}
+      <span className="min-w-0 flex-1">
+        <span className="flex items-baseline gap-1.5">
+          <span className="text-[13px] font-mono font-semibold text-identifier shrink-0">
+            {identifier || '—'}
+          </span>
+          <span className="text-[13px] text-fg truncate">
+            {nameWithoutIdentifier(name, identifier)}
+          </span>
+        </span>
+        <span className="flex items-baseline gap-1 text-[11px] mt-0.5">
+          {stock}
+          {meta && <span className="text-ghost truncate">{meta}</span>}
+        </span>
+      </span>
+      <span className="shrink-0 flex flex-col items-end gap-0.5 pl-1">
+        {price && <span className="text-[13px] text-fg2 tabular-nums">${price}</span>}
+        {badge}
+      </span>
     </>
   )
 
-  // Only when TikTok has confirmed the variation and told us a quantity. A
-  // variation under review has no stock to change yet, and offering it would
-  // be offering something that must fail.
-  if (!onAdjust || !v.on_tiktok || v.removed || v.stock_available === null) {
-    return <p className="text-xs text-faint mt-0.5">{body}</p>
-  }
   return (
-    <button
-      onClick={() => onAdjust(v)}
-      className="text-xs text-faint mt-0.5 text-left min-h-8 -my-1 py-1 block active:opacity-60 underline decoration-dotted decoration-line3 underline-offset-[3px]"
-      aria-label={`Change stock for ${v.identifier || v.variant}, currently ${v.stock_available}`}
-    >
-      {body}
-    </button>
+    <li className="border-b border-hair last:border-0">
+      <div className="flex items-stretch">
+        {onOpen ? (
+          <button
+            onClick={onOpen}
+            className="flex-1 min-w-0 flex items-center gap-2.5 py-2 text-left active:bg-chip rounded-lg"
+            aria-label={`Change stock for ${identifier || name}`}
+          >
+            {inner}
+          </button>
+        ) : (
+          <div className="flex-1 min-w-0 flex items-center gap-2.5 py-2">{inner}</div>
+        )}
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            className="text-ghost hover:text-bad w-11 flex items-center justify-center shrink-0"
+            aria-label={deleteLabel}
+          >
+            <Icon name="trash" size={16} />
+          </button>
+        )}
+      </div>
+      {children && <div className="pb-2 -mt-1 pl-[3.375rem]">{children}</div>}
+    </li>
   )
 }
 
 /**
- * The state of one SKU, from this device's view and TikTok's.
+ * The stock state as one short phrase that never wraps.
  *
- * "Pushed" used to be drawn as "Live", which was wrong in a way that mattered:
- * TikTok accepting a SKU only starts a review, and every added variation sends
- * the whole product back through it. So a sent SKU reads as "Sent" until a
- * refresh confirms the listing is ACTIVATE, and only then as "Live".
+ * Split out so both kinds of row read identically, and so the states a
+ * variation can be in are visible in one place rather than spread across two
+ * markups — which is how "Missing" and then "Failed" both ended up wrong
+ * earlier in this build.
  */
+function StockState({ v }: { v: LiveVariant }) {
+  if (v.removed) return <span className="text-faint shrink-0">Removed</span>
+  if (!v.on_tiktok) {
+    // Absence is not loss: TikTok omits a variation still under review, and
+    // telling somebody to retry one that is merely pending adds a second copy.
+    return <span className="text-warn/90 shrink-0">{v.under_review ? 'Under review' : 'Not shown yet'}</span>
+  }
+  if (soldOut(v)) {
+    return <span className="text-bad font-semibold tracking-wide shrink-0">SOLD OUT</span>
+  }
+  return (
+    <span className="text-fg2 shrink-0">
+      {v.stock_available} left
+      {showsOriginalTotal(v) && <span className="text-faint"> of {v.stock_set}</span>}
+    </span>
+  )
+}
+
+/** Sold, cancelled and who listed it, as one line that truncates. */
+function variantMeta(v: LiveVariant): string {
+  const bits: string[] = []
+  if (v.sold !== null && v.sold > 0) bits.push(`${v.sold} sold`)
+  if (v.cancelled !== null && v.cancelled > 0) bits.push(`${v.cancelled} cancelled`)
+  if (v.external) bits.push('added outside this app')
+  else if (v.created_by) bits.push(v.created_by)
+  return bits.length ? `· ${bits.join(' · ')}` : ''
+}
+
 function StatusBadge({
   draft,
   live,

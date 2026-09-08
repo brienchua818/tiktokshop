@@ -128,6 +128,24 @@ fails rather than a habit that slips.
   layers differ deliberately, so a fixed bar over scrolled content is not a
   finding.
 
+- **One row, one component.** The variation row existed as two near-identical
+  markups, one for a local draft and one for everything else. Six changes in a
+  day each landed in whichever copy it touched, and the result was a list where
+  rows were three lines or four depending on whether anybody was recorded
+  against them, a photo that matched neither height, and everything at 12px in
+  four greys. Brien's words: "the uxui now sucks... suddenly don't look aligned
+  and neat anymore." He was right, and no single change was at fault —
+  duplication was. Anything rendered twice will drift, and nobody notices until
+  it is ugly enough to complain about.
+- **Three rules for a list row**, since that is what the fix came down to:
+  every row the same height whatever data is missing; the image sets the height
+  and everything centres against it; two text sizes, not one, so the size
+  carries the hierarchy and the colours do not have to.
+- **Screenshots catch what checks cannot.** The audit passed the accreted row on
+  every device: nothing was dead, undersized, overlapping or spilling. Two
+  affordances for the tappable stock figure also passed and both looked wrong —
+  a plus icon that wrapped onto its own line, then a dotted underline that read
+  as a spell-check squiggle. Look at the picture before saying it is done.
 - **A control that does nothing is a bug, even when it renders perfectly.**
   Brien could not change anyone's role, and every check passed: the buttons
   rendered, were named, were 44px, and survived a click. So the audit now

@@ -20,6 +20,10 @@ export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
   const [shops, setShops] = useState<Shop[]>([])
+  /** Why the shop list could not be read, if it could not. */
+  const [shopsError, setShopsError] = useState('')
+  /** Bumped to ask again after a failure, without a full reload. */
+  const [shopsReload, setShopsReload] = useState(0)
   const [shopId, setShopId] = useState<string | null>(null)
   const [pending, setPending] = useState(0)
   const [theme, setTheme] = useState<ThemeChoice>(readChoice)
@@ -85,6 +89,7 @@ export default function App() {
 
   useEffect(() => {
     if (!user) return
+    setShopsError('')
     api
       .shops()
       .then((rows) => {
@@ -95,8 +100,21 @@ export default function App() {
         const valid = rows.find((s) => s.shop_id === remembered) ?? rows[0]
         setShopId(valid?.shop_id ?? null)
       })
-      .catch(() => setShops([]))
-  }, [user])
+      .catch((e: unknown) => {
+        /**
+         * A failed shops call is not "you have no shops".
+         *
+         * The backend serves the three shops from a constant, so the list is
+         * NEVER legitimately empty — which means the empty state below could
+         * only ever appear after a failure, and it told Brien on 14 Sep that
+         * no shops were connected while all three were connected and working.
+         * Swallowing the error made a transport problem look like a
+         * configuration one.
+         */
+        setShops([])
+        setShopsError(e instanceof ApiError ? e.display : String(e))
+      })
+  }, [user, shopsReload])
 
   const refreshPending = useCallback(() => {
     allDrafts()
@@ -224,9 +242,25 @@ export default function App() {
           hidden. Without it the last SKU in the queue sits under the tabs. */}
       <main className="flex-1 px-3 pt-2 pb-16 md:pb-4 max-w-5xl mx-auto w-full">
         {!shop && shops.length === 0 ? (
-          <p className="text-sm text-faint py-10 text-center">
-            No shops are connected yet. Authorise a TikTok Shop to start listing.
-          </p>
+          <div className="py-10 text-center space-y-3">
+            {shopsError ? (
+              <>
+                <p className="text-sm text-bad">Could not read the shop list.</p>
+                <p className="text-xs text-faint px-4">{shopsError}</p>
+                <p className="text-xs text-ghost px-4">
+                  The shops themselves are fine — this is the app failing to ask.
+                </p>
+                <button
+                  onClick={() => setShopsReload((n) => n + 1)}
+                  className="min-h-11 px-4 rounded-lg bg-accent hover:bg-accent-hover text-sm font-medium text-white"
+                >
+                  Try again
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-faint">Loading shops…</p>
+            )}
+          </div>
         ) : (
           <Routes>
             <Route path="/" element={<Navigate to="/live-listing" replace />} />

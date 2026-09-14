@@ -91,13 +91,33 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
 
     let cancelled = false
     void (async () => {
+      /**
+       * The button and the silent prompt are separate, and only one of them
+       * failing is worth a message.
+       *
+       * They were one try block, so a declined prompt painted "Could not load
+       * Google sign-in" over a button that was sitting right there working.
+       * And Google declines routinely: One Tap goes into an exponential
+       * cooldown after a few dismissals, which is exactly what a week of
+       * signing in and out during testing produces. Brien, 14 Sep: trouble
+       * logging in.
+       *
+       * So the button is what must work, and its failure is the only one that
+       * gets reported. A prompt that declines is silent by design.
+       */
       try {
         if (buttonRef.current) await renderSignInButton(buttonRef.current)
-        if (!cancelled) await promptSilently()
       } catch (e: unknown) {
         if (!cancelled) {
           setError(e instanceof SignInUnavailable ? e.message : 'Could not load Google sign-in.')
         }
+        return
+      }
+      try {
+        if (!cancelled) await promptSilently()
+      } catch {
+        // Google declined to offer the one-tap. The button below is the way in
+        // and is already on screen, so there is nothing to report.
       }
     })()
 

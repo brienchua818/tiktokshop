@@ -90,9 +90,34 @@ export default function App() {
   useEffect(() => {
     if (!user) return
     setShopsError('')
-    api
-      .shops()
+    /**
+     * Tried three times before giving up, because this one call gates the app.
+     *
+     * It ran exactly once at sign-in, so a single blip left the whole app
+     * showing no shops until somebody thought to fully reload the page —
+     * which is what happened to Brien on 14 Sep, and a reload is what fixed
+     * it. Every other call in the app is either retried by the queue or has a
+     * button behind it; this one had neither, on the path that blocks
+     * listing, orders and everything else.
+     *
+     * Only retryable failures: a timeout or a 5xx is worth asking again, a
+     * 401 or a 403 is not and would only delay saying so.
+     */
+    let cancelled = false
+    const attempt = async (n: number): Promise<Shop[]> => {
+      try {
+        return await api.shops()
+      } catch (e: unknown) {
+        const retryable = e instanceof ApiError ? e.isRetryable : true
+        if (n >= 3 || !retryable || cancelled) throw e
+        await new Promise((r) => setTimeout(r, n * 1_000))
+        return attempt(n + 1)
+      }
+    }
+
+    attempt(1)
       .then((rows) => {
+        if (cancelled) return
         setShops(rows)
         // Remember the last shop across sessions: the team works one brand at
         // a time and re-picking it every morning is friction for nothing.
@@ -111,9 +136,14 @@ export default function App() {
          * Swallowing the error made a transport problem look like a
          * configuration one.
          */
+        if (cancelled) return
         setShops([])
         setShopsError(e instanceof ApiError ? e.display : String(e))
       })
+
+    return () => {
+      cancelled = true
+    }
   }, [user, shopsReload])
 
   const refreshPending = useCallback(() => {

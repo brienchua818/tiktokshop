@@ -422,7 +422,21 @@ export const api = {
    * without opening Seller Center.
    */
   listingState: (listingId: string) =>
-    call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs: 40_000 }),
+    /**
+     * Retried twice, not three times.
+     *
+     * Left out of `retryRead` at first because it has a refresh button behind
+     * it — wrong: a failed refresh does not merely annoy, it makes the screen
+     * hide nothing and count everything, so Brien's listing read 19 against a
+     * listing carrying 3 (15 Sep, 7:13pm). This screen IS the listing during a
+     * broadcast.
+     *
+     * Two attempts rather than three because each one waits 40 seconds, and a
+     * third would mean over two minutes staring at a stale list mid-stream.
+     * Two covers the random slow response, which is what this is; a genuinely
+     * slow backend needs fixing, not asking again.
+     */
+    retryRead(() => call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs: 40_000 }), 2),
 
   /**
    * The variations taken off a listing. Asked for only when that tab is opened.

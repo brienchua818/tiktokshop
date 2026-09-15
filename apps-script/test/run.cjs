@@ -132,6 +132,8 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
+    lineStatusMeaning_, LINE_STATUS_MEANING,
+    returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
@@ -2061,35 +2063,40 @@ const HOURS = 3600 * 1000
 const NOW = Date.parse('2026-09-15T14:00:00.000Z')
 
 check('syncs a shop that has listed recently', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS }, NOW, 6), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS }, NOW, 6, 72), ['HZ'])
 })
 
-check('leaves a shop that has been quiet', () => {
-  // Overnight this must cost three property reads and a return, nothing more.
-  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, 6), [])
+check('keeps watching a shop the morning after a stream', () => {
+  // The hole this closes: cancellations and refunds arrive AFTER a broadcast,
+  // and an export built before somebody presses Sync counts them as sold.
+  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, 6, 72), ['HZ'])
 })
 
-check('syncs every active shop, and only those', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS, PM: NOW - 2 * HOURS, TM: NOW - 30 * HOURS }, NOW, 6),
+check('lets a shop go once even the tail has passed', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 100 * HOURS }, NOW, 6, 72), [])
+})
+
+check('syncs every shop still inside the tail, and only those', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS, PM: NOW - 2 * HOURS, TM: NOW - 300 * HOURS }, NOW, 6, 72),
      ['HZ', 'PM'])
 })
 
 check('a shop that has never listed is not synced', () => {
-  eq(gs.shopsToSync_({ HZ: 0 }, NOW, 6), [])
-  eq(gs.shopsToSync_({ '': NOW }, NOW, 6), [])
+  eq(gs.shopsToSync_({ HZ: 0 }, NOW, 6, 72), [])
+  eq(gs.shopsToSync_({ '': NOW }, NOW, 6, 72), [])
 })
 
 check('nothing at all is an empty list, not a crash', () => {
   // This runs seven hundred times a day inside a timer, and Apps Script
   // disables a trigger that keeps throwing \u2014 a sync that silently stopped
   // weeks ago is the worst version of this feature.
-  eq(gs.shopsToSync_({}, NOW, 6), [])
-  eq(gs.shopsToSync_(null, NOW, 6), [])
+  eq(gs.shopsToSync_({}, NOW, 6, 72), [])
+  eq(gs.shopsToSync_(null, NOW, 6, 72), [])
 })
 
 check('the boundary is inclusive, so a shop on the edge still syncs', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 6 * HOURS }, NOW, 6), ['HZ'])
-  eq(gs.shopsToSync_({ HZ: NOW - 6 * HOURS - 1 }, NOW, 6), [])
+  eq(gs.shopsToSync_({ HZ: NOW - 72 * HOURS }, NOW, 6, 72), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 72 * HOURS - 1 }, NOW, 6, 72), [])
 })
 
 console.log('\nsyncing touches only what changed')
@@ -2297,6 +2304,243 @@ check('an order exactly on the watermark is not stale', () => {
   // The bound is inclusive, so the same order may come back once. Harmless,
   // and the alternative is a one-second hole in the record.
   eq(gs.changedSince_([{ id: 'a', update_time: SINCE }], SINCE).applied, true)
+})
+
+console.log('\nwhat a status means for the money')
+
+/**
+ * This decides the one number a factory is paid against, so the default
+ * matters more than any single entry.
+ *
+ * It used to be a denylist: CANCELLED, CANCEL and UNPAID were not sold, and
+ * EVERYTHING else was — including every status nobody had thought of, and
+ * every status TikTok might add. On a payout figure that default is the wrong
+ * way round.
+ *
+ * The nine order statuses are TikTok's complete set, verified 15 Sep against
+ * three of their own sources that agree, including a state diagram whose nodes
+ * carry TikTok's internal codes (UNPAID 100 ... CANCELLED 140). Nine, no others.
+ */
+check('an unrecognised status is never sold', () => {
+  // The whole point. A value nobody has seen must raise a question, not enter
+  // a payout.
+  eq(gs.lineStatusMeaning_('SOMETHING_NEW'), 'unknown')
+  eq(gs.lineStatusMeaning_('REFUNDED'), 'unknown')
+  eq(gs.lineStatusMeaning_('PARTIALLY_REFUNDED'), 'unknown')
+})
+
+check('a blank or missing status is unknown, not sold', () => {
+  // TikTok returning nothing for a field is not evidence the money stuck.
+  eq(gs.lineStatusMeaning_(''), 'unknown')
+  eq(gs.lineStatusMeaning_(null), 'unknown')
+  eq(gs.lineStatusMeaning_(undefined), 'unknown')
+  eq(gs.lineStatusMeaning_('   '), 'unknown')
+})
+
+check('the money did not stick on these three', () => {
+  eq(gs.lineStatusMeaning_('UNPAID'), 'unsold')
+  eq(gs.lineStatusMeaning_('CANCELLED'), 'unsold')
+  eq(gs.lineStatusMeaning_('CANCEL'), 'unsold')
+})
+
+check('ON_HOLD is held, not sold', () => {
+  // Paid, but inside the buyer remorse window: TikTok's own overview says the
+  // buyer may cancel "without the seller's approval" there. Committed stock,
+  // not yet revenue. It counted as SOLD before.
+  eq(gs.lineStatusMeaning_('ON_HOLD'), 'held')
+})
+
+check('the shipping and delivery statuses are sold', () => {
+  ;['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'PARTIALLY_SHIPPING', 'IN_TRANSIT',
+    'DELIVERED', 'COMPLETED', 'TO_SHIP'].forEach(function (st) {
+    eq(gs.lineStatusMeaning_(st), 'sold', st)
+  })
+})
+
+check('case and whitespace do not change the answer', () => {
+  eq(gs.lineStatusMeaning_(' delivered '), 'sold')
+  eq(gs.lineStatusMeaning_('Cancelled'), 'unsold')
+})
+
+check('every status in the table has a meaning the counter understands', () => {
+  // A typo'd value here would silently become "unknown" for every order with
+  // that status — sold units quietly dropping out of a payout.
+  const allowed = { sold: 1, unsold: 1, held: 1 }
+  Object.keys(gs.LINE_STATUS_MEANING).forEach(function (k) {
+    if (!allowed[gs.LINE_STATUS_MEANING[k]]) throw new Error(k + ' => ' + gs.LINE_STATUS_MEANING[k])
+  })
+})
+
+console.log('\nno unit is ever lost')
+
+const ln = (o) => Object.assign({
+  order_id: 'o1', sku_id: '9001', seller_sku: 'B1', variation: 'B1 Mug',
+  quantity: 1, sale_price: '10', status: 'DELIVERED',
+}, o)
+
+check('a blank quantity counts as one unit, not none', () => {
+  // One line item is one unit. A row written before the quantity column
+  // existed is padded with '', and `Number('' || 0)` made it zero — so the
+  // line contributed to NOTHING: not sold, not cancelled, not revenue. It
+  // vanished from the purchase order instead of appearing in a column.
+  const g = gs.groupVariationSales_([ln({ quantity: '' }), ln({ quantity: undefined })])
+  eq(g['9001'].units, 2)
+})
+
+check('held and unknown units are counted apart, never as sold', () => {
+  const g = gs.groupVariationSales_([
+    ln({}),
+    ln({ status: 'ON_HOLD' }),
+    ln({ status: 'WHO_KNOWS' }),
+    ln({ status: 'CANCELLED' }),
+  ])
+  eq(g['9001'].units, 1)
+  eq(g['9001'].held_units, 1)
+  eq(g['9001'].unknown_units, 1)
+  eq(g['9001'].unsold_units, 1)
+  // And the unrecognised value is named, so the fix is a table entry rather
+  // than an investigation.
+  eq(Object.keys(g['9001'].unknown_statuses), ['WHO_KNOWS'])
+})
+
+check('revenue follows sold only', () => {
+  const g = gs.groupVariationSales_([ln({}), ln({ status: 'ON_HOLD' }), ln({ status: 'CANCELLED' })])
+  eq(g['9001'].revenue, 10)
+})
+
+check('two variations answering to one identifier report neither count', () => {
+  // identifierFromVariation_ can recover the same identifier from two
+  // different variations, and the last one written used to win — so a
+  // variation whose TikTok id was unknown was handed ANOTHER variation's sold
+  // count. A confident wrong number is worse than none, and this one is paid
+  // against.
+  const idx = gs.salesIndex_(gs.groupVariationSales_([
+    ln({ sku_id: '9001', seller_sku: 'B1' }),
+    ln({ sku_id: '9002', seller_sku: 'B1' }),
+  ]))
+  eq(gs.salesFor_(idx, '', 'B1'), null)
+  // Addressed by its own id, each is still answerable.
+  eq(gs.salesFor_(idx, '9001', 'B1').units, 1)
+  eq(gs.salesFor_(idx, '9002', 'B1').units, 1)
+})
+
+console.log('\na refund the order status cannot show')
+
+/**
+ * No order status distinguishes a refund from a sale. TikTok's Order API
+ * overview says three times that a fully refunded order lands in COMPLETED,
+ * and the line-item display_status enum has no REFUNDED value at all — a
+ * refunded line still reads DELIVERED.
+ *
+ * So refunds are read from /return_refund/202309/returns/search and applied
+ * over the top. Every "sold" figure before this was "sold, before refunds",
+ * on the number a factory is paid.
+ */
+check('the buyer has the money back', () => {
+  eq(gs.returnStatusMeaning_('RETURN_OR_REFUND_REQUEST_COMPLETE'), 'refunded')
+  eq(gs.returnStatusMeaning_('RETURN_OR_REFUND_REQUEST_SUCCESS'), 'refunded')
+  eq(gs.returnStatusMeaning_('REPLACEMENT_REQUEST_REFUND_SUCCESS'), 'refunded')
+})
+
+check('a request that is open is neither sold nor lost', () => {
+  ;['RETURN_OR_REFUND_REQUEST_PENDING', 'AWAITING_BUYER_SHIP', 'BUYER_SHIPPED_ITEM',
+    'AWAITING_BUYER_RESPONSE'].forEach((st) => eq(gs.returnStatusMeaning_(st), 'at_risk', st))
+})
+
+check('the seller keeps it when the request is refused or withdrawn', () => {
+  ;['REFUND_OR_RETURN_REQUEST_REJECT', 'REJECT_RECEIVE_PACKAGE',
+    'RETURN_OR_REFUND_REQUEST_CANCEL'].forEach((st) => eq(gs.returnStatusMeaning_(st), 'kept', st))
+})
+
+check('an unrecognised return status is at risk, never kept', () => {
+  // The safe direction. Treating an unknown return as "kept" would put money
+  // in a payout on the strength of a string nobody has seen.
+  eq(gs.returnStatusMeaning_('SOMETHING_NEW'), 'at_risk')
+  eq(gs.returnStatusMeaning_(''), 'at_risk')
+  eq(gs.returnStatusMeaning_(null), 'at_risk')
+})
+
+check('one return covering several line items becomes several rows', () => {
+  // Each line is decided on its own, so the row key is the return LINE item.
+  const rows = gs.returnRows_('HZ', [{
+    return_id: 'r1', order_id: 'o1', return_type: 'REFUND',
+    return_status: 'RETURN_OR_REFUND_REQUEST_COMPLETE',
+    create_time: 100, update_time: 200,
+    return_line_items: [
+      { return_line_item_id: 'rl1', order_line_item_id: 'li1', sku_id: '9001', seller_sku: 'B1',
+        refund_amount: { refund_total: '14.88', currency: 'SGD' } },
+      { return_line_item_id: 'rl2', order_line_item_id: 'li2', sku_id: '9001', seller_sku: 'B1',
+        refund_amount: { refund_total: '14.88', currency: 'SGD' } },
+    ],
+  }], 'NOW')
+  eq(rows.length, 2)
+  eq(rows[0].line_item_id, 'li1')
+  eq(rows[1].return_line_item_id, 'rl2')
+  eq(rows[0].refund_total, '14.88')
+})
+
+check('a return with no line items yields nothing rather than a blank row', () => {
+  eq(gs.returnRows_('HZ', [{ return_id: 'r1', order_id: 'o1' }], 'NOW'), [])
+  eq(gs.returnRows_('HZ', null, 'NOW'), [])
+})
+
+check('the worst outcome wins when one line has two returns against it', () => {
+  // A rejected request followed by a successful second attempt. The unit is
+  // refunded, whatever the first attempt said.
+  const idx = gs.refundIndex_([
+    { line_item_id: 'li1', return_status: 'REFUND_OR_RETURN_REQUEST_REJECT' },
+    { line_item_id: 'li1', return_status: 'RETURN_OR_REFUND_REQUEST_COMPLETE' },
+  ])
+  eq(idx['li1'], 'refunded')
+  // And in the other order, so it is the ranking and not the sequence.
+  const other = gs.refundIndex_([
+    { line_item_id: 'li2', return_status: 'RETURN_OR_REFUND_REQUEST_COMPLETE' },
+    { line_item_id: 'li2', return_status: 'REFUND_OR_RETURN_REQUEST_REJECT' },
+  ])
+  eq(other['li2'], 'refunded')
+})
+
+check('a return row with no line item id is ignored, not indexed under blank', () => {
+  eq(Object.keys(gs.refundIndex_([{ line_item_id: '', return_status: 'RETURN_OR_REFUND_REQUEST_COMPLETE' }])), [])
+})
+
+console.log('\nthe refund beats the order status')
+
+const li = (o) => Object.assign({
+  order_id: 'o1', sku_id: '9001', seller_sku: 'B1', variation: 'B1 Mug',
+  quantity: 1, sale_price: '10', status: 'DELIVERED', line_item_id: 'li1',
+}, o)
+
+check('a refunded unit stops counting as sold, though it reads DELIVERED', () => {
+  // The whole point. This is what a factory was being paid for.
+  const g = gs.groupVariationSales_([li({})], { li1: 'refunded' })
+  eq(g['9001'].units, 0)
+  eq(g['9001'].refunded_units, 1)
+  eq(g['9001'].revenue, 0)
+})
+
+check('an open request is counted apart from both', () => {
+  const g = gs.groupVariationSales_([li({})], { li1: 'at_risk' })
+  eq(g['9001'].units, 0)
+  eq(g['9001'].at_risk_units, 1)
+})
+
+check('a rejected return leaves the sale alone', () => {
+  const g = gs.groupVariationSales_([li({})], { li1: 'kept' })
+  eq(g['9001'].units, 1)
+  eq(g['9001'].refunded_units, 0)
+})
+
+check('a cancelled line stays cancelled even with a return against it', () => {
+  // It was never sold, so it cannot be refunded out of a payout twice.
+  const g = gs.groupVariationSales_([li({ status: 'CANCELLED' })], { li1: 'refunded' })
+  eq(g['9001'].unsold_units, 0)
+  eq(g['9001'].refunded_units, 1)
+})
+
+check('no refunds at all behaves exactly as before', () => {
+  const g = gs.groupVariationSales_([li({})])
+  eq(g['9001'].units, 1)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

@@ -150,6 +150,7 @@ var REMOVAL_GRACE_MS = 10 * 60 * 1000;
 
 var TAB_ORDERS = 'Orders';
 var TAB_ORDER_ITEMS = 'Order Items';
+var TAB_RETURNS = 'Returns';
 var TAB_LOG = 'Log';
 var TAB_USERS = 'Users';
 
@@ -618,6 +619,23 @@ HEADERS[TAB_ORDERS] = [
 ];
 // One row per line item, not per order, because an order can hold items from
 // two listings and per-listing figures have to come from the items.
+/**
+ * Returns and refunds, in their own tab.
+ *
+ * Separate from Order Items on purpose. The two are written by two different
+ * syncs that run at different times, and an order re-synced after a refund
+ * would otherwise erase the refund — the exact failure this table exists to
+ * prevent. Nothing the order sync does can touch a row here.
+ *
+ * Keyed by return_line_item_id: one return can cover several line items, and
+ * each is refunded or rejected on its own.
+ */
+HEADERS[TAB_RETURNS] = [
+  'return_line_item_id', 'return_id', 'shop_id', 'order_id', 'line_item_id',
+  'sku_id', 'seller_sku', 'return_type', 'return_status',
+  'refund_total', 'currency', 'create_epoch', 'update_epoch', 'synced_at'
+];
+
 HEADERS[TAB_ORDER_ITEMS] = [
   'order_id', 'shop_id', 'listing_id', 'product_name', 'sku_id', 'seller_sku',
   'variation', 'quantity', 'sale_price', 'currency', 'status',
@@ -625,7 +643,23 @@ HEADERS[TAB_ORDER_ITEMS] = [
   // TikTok's own picture of the variation, as sold. Present on every line item,
   // including variations this app never created — which is what makes the
   // purchase order's photo column complete rather than "ours only".
-  'sku_image'
+  'sku_image',
+  /**
+   * The id a RETURN points at, and what that return became.
+   *
+   * No order status distinguishes a refund from a sale — TikTok's own overview
+   * says three times that a fully refunded order lands in COMPLETED, and the
+   * line-item enum has no REFUNDED value at all. Refunds live in a separate
+   * object, /return_refund/202309/returns/search, whose return_line_items each
+   * carry an `order_line_item_id`. Without that id stored here there is nothing
+   * to match a refund against, so it is recorded from the first sync onwards.
+   *
+   * The refund itself is NOT stored on this row. An order is re-synced whenever
+   * it changes, and a re-sync rewrites the whole row — so a refund kept here
+   * would be wiped by the next shipping update. Returns have their own tab,
+   * which the order sync never touches.
+   */
+  'line_item_id'
 ];
 HEADERS[TAB_LOG] = ['timestamp_sgt', 'actor', 'action', 'shop', 'detail', 'result'];
 HEADERS[TAB_USERS] = ['email', 'name', 'role', 'first_seen', 'last_seen', 'approved_by', 'note'];
@@ -755,7 +789,7 @@ function ensureHeaders_(name, sh) {
 
 /** Run once to lay the spreadsheet out. Safe to re-run. */
 function setupSheets() {
-  [TAB_LISTINGS, TAB_SKUS, TAB_ORDERS, TAB_ORDER_ITEMS, TAB_LOG, TAB_USERS]
+  [TAB_LISTINGS, TAB_SKUS, TAB_ORDERS, TAB_ORDER_ITEMS, TAB_RETURNS, TAB_LOG, TAB_USERS]
     .forEach(function (n) { sheet_(n); });
   ensureOwner_();
   logEvent_('system', 'setup_sheets', '', 'Tabs ensured', 'ok');
@@ -2549,7 +2583,39 @@ function listingState_(listingId) {
        * has no "left", and orders that have never been synced are not zero.
        */
       stock_available: st.quantity,
-      stock_total: st.quantity === null ? null : st.quantity + (sold || 0),
+      /**
+       * Every unit accounted for, or the total is a guess.
+       *
+       * available + sold was not enough. A unit sitting in ON_HOLD is PAID and
+       * already deducted from TikTok's available figure, but it is not revenue
+       * — the buyer can still cancel it alone. A unit under a status this app
+       * does not recognise is likewise gone from available and unexplained.
+       * Leaving either out of the total makes the total smaller than the number
+       * of units that have actually existed.
+       *
+       * Cancelled units are deliberately NOT added: TikTok returns them to
+       * stock (Brien, confirmed — cancel an order of 2 and 2 come back), so
+       * they are already inside `available` and adding them would count them
+       * twice.
+       */
+      stock_total: st.quantity === null
+        ? null
+        : st.quantity + (sold || 0) +
+          (sale ? (sale.held || 0) + (sale.unknown || 0) + (sale.at_risk || 0) : 0),
+      /** Paid, and still cancellable by the buyer alone. Shown, never netted. */
+      held: sale ? (sale.held || 0) : null,
+      /**
+       * The buyer has the money back. NOT added to the total.
+       *
+       * TikTok returns a refunded unit to stock, exactly as it does a
+       * cancellation, so it is already inside `stock_available`. Adding it
+       * again would count it twice and make the total larger than the number
+       * of units that ever existed — in the direction that overstates what a
+       * factory sold.
+       */
+      refunded: sale ? (sale.refunded || 0) : null,
+      /** A return request is open and undecided. Still committed stock. */
+      at_risk: sale ? (sale.at_risk || 0) : null,
 
       /**
        * Sold, from the order line items. Not from stock arithmetic.
@@ -2593,7 +2659,12 @@ function listingState_(listingId) {
       stock_available: extState.quantity,
       stock_total: extState.quantity === null
         ? null
-        : extState.quantity + (extSale ? extSale.units : 0),
+        : extState.quantity + (extSale
+            ? (extSale.units || 0) + (extSale.held || 0) + (extSale.unknown || 0) + (extSale.at_risk || 0)
+            : 0),
+      held: extSale ? (extSale.held || 0) : null,
+      refunded: extSale ? (extSale.refunded || 0) : null,
+      at_risk: extSale ? (extSale.at_risk || 0) : null,
       // A variation added in Seller Center still sells, and its line items
       // carry TikTok's sku id, so it can be matched and counted like any
       // other.
@@ -2730,6 +2801,9 @@ function removedVariations_(listingId) {
         removed: true,
         stock_available: null,
         stock_total: null,
+        held: null,
+        refunded: null,
+        at_risk: null,
         sold: null,
         cancelled: null
       };
@@ -4100,10 +4174,86 @@ function sgtStampFromEpoch_(epochSeconds) {
   );
 }
 
-/** Statuses that mean the money did not stick, so they must not count as sold. */
+/**
+ * What a line item's status means for the money. The FULL table, not a
+ * denylist.
+ *
+ * It was a denylist — CANCELLED, CANCEL, UNPAID were not sold, and everything
+ * else, including every status nobody had thought of, was sold. On the one
+ * number a factory is paid against, that default is the wrong way round: a
+ * status TikTok adds tomorrow, or one this code has never seen, would silently
+ * be counted as money kept.
+ *
+ * The nine order-level statuses below are TikTok's complete set, verified 15
+ * Sep against three of their own sources that agree: the Get Order List enum
+ * (doc 650aa8094a0bb702c06df242), Get Order Detail (6894134ba28e5204961601a5),
+ * and the Order API overview (650b1b4bbace3e02b76d1011), whose embedded state
+ * diagram carries TikTok's internal codes — UNPAID[100], ON_HOLD[105],
+ * AWAITING_SHIPMENT[111], AWAITING_COLLECTION[112], PARTIALLY_SHIPPING[114],
+ * IN_TRANSIT[121], DELIVERED[122], COMPLETED[130], CANCELLED[140]. Nine nodes,
+ * no others. The `docv2` pages are a JavaScript shell with no text in them;
+ * they were read through the documentation site's own JSON API at
+ * /api/v1/document/detail?document_id=<id>&workspace_id=3.
+ *
+ * Four outcomes, because three were not enough to be honest:
+ *
+ *   sold    the seller kept the money
+ *   unsold  the money did not stick, and TikTok returns the units to stock
+ *   held    PAID, but the buyer may still cancel unilaterally. Committed
+ *           stock, not yet revenue — counting it as either is a lie.
+ *   unknown a status this table does not list. Never counted as sold, always
+ *           logged, so an unrecognised value is a question rather than an
+ *           overpayment.
+ */
+var LINE_STATUS_MEANING = {
+  UNPAID: 'unsold',
+  CANCELLED: 'unsold',
+  CANCEL: 'unsold',
+  ON_HOLD: 'held',
+  AWAITING_SHIPMENT: 'sold',
+  AWAITING_COLLECTION: 'sold',
+  PARTIALLY_SHIPPING: 'sold',
+  IN_TRANSIT: 'sold',
+  DELIVERED: 'sold',
+  COMPLETED: 'sold',
+  // Seen on real line items on 15 Sep, and not in TikTok's published enum.
+  TO_SHIP: 'sold'
+};
+
+/**
+ * What a status means, with the unknown case named rather than assumed.
+ *
+ * A blank status is `unknown`, not sold. TikTok returning nothing for a field
+ * is not evidence that the money stuck.
+ */
+function lineStatusMeaning_(status) {
+  var key = String(status || '').trim().toUpperCase();
+  if (!key) return 'unknown';
+  return LINE_STATUS_MEANING[key] || 'unknown';
+}
+
+/**
+ * Kept because the export and the old tests name it, and because "is this one
+ * of the statuses that definitely did not sell" is still a real question.
+ */
 var UNSOLD_STATUSES = {
   CANCELLED: 1, CANCEL: 1, UNPAID: 1
 };
+
+/**
+ * NOT A COMPLETE ANSWER, and the code says so where it matters.
+ *
+ * TikTok's own overview states three times that a FULLY REFUNDED order lands
+ * in COMPLETED — transitions 7, 14 and 15, verbatim: "Once the order amount is
+ * a full refund to the buyer, the order status will be updated to COMPLETED."
+ * The line-item `display_status` enum has no REFUNDED, RETURNED or
+ * PARTIALLY_REFUNDED value at all; a fully refunded line still reads DELIVERED.
+ *
+ * So no order status distinguishes a refund from a sale. Refunds live in a
+ * separate object, /return_refund/202309/returns/search, and until this app
+ * reads it every "sold" figure here is "sold, before refunds".
+ */
+var SOLD_IS_BEFORE_REFUNDS = true;
 
 /**
  * Per-listing totals inside a window.
@@ -4120,6 +4270,10 @@ function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (shopId && String(r.shop_id) !== String(shopId)) return false;
     var t = Number(r.created_epoch || 0);
+    // Undated lines belong to every window rather than none. See
+    // listingOrders_ for why: the alternative drops units from the export
+    // while the listing screen still counts them.
+    if (!t) return true;
     return t >= fromEpoch && t < toEpoch;
   });
 
@@ -4382,14 +4536,30 @@ function describeResolution_(c) {
  * screen wants: a variation's lifetime sales, not this window's.
  */
 function variationSales_(listingId, fromEpoch, toEpoch, known_) {
+  var undated = 0;
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (String(r.listing_id) !== String(listingId)) return false;
     if (fromEpoch === null && toEpoch === null) return true;
     var t = Number(r.created_epoch || 0);
+    /**
+     * A line with no creation time belongs to every window, not to none.
+     *
+     * It used to fall out of both bounds, so the export dropped it — while the
+     * listing screen, which passes no window at all, still counted it. The two
+     * screens disagreed about the same units and the export was the one that
+     * lost them, which is the direction that shorts a factory. Including it and
+     * saying so is the honest reading: we know the sale happened, we do not
+     * know exactly when.
+     */
+    if (!t) { undated++; return true; }
     if (fromEpoch !== null && t < fromEpoch) return false;
     if (toEpoch !== null && t >= toEpoch) return false;
     return true;
   });
+  if (undated) {
+    warn_('TS-ORD-27', undated + ' order line(s) on ' + listingId + ' carry no creation time, ' +
+      'so they are counted in every window rather than none.');
+  }
 
   // Rows synced before seller_sku was being filled at sync time get the same
   // treatment here, so an old sync does not need repeating to read correctly.
@@ -4398,7 +4568,39 @@ function variationSales_(listingId, fromEpoch, toEpoch, known_) {
     if (shopId) resolveSellerSkus_(shopId, items, known_);
   }
 
-  return { byVariation: groupVariationSales_(items), items: items };
+  /**
+   * Refunds, matched to these lines before anything is counted.
+   *
+   * Read from its own tab rather than from the order, because the order cannot
+   * say. Small: a returns tab holds one row per returned line item, not per
+   * order.
+   */
+  var refunds = refundIndex_(readAll_(TAB_RETURNS).filter(function (r) {
+    return !items.length || String(r.shop_id) === String(items[0].shop_id || '');
+  }));
+
+  var byVariation = groupVariationSales_(items, refunds);
+
+  /**
+   * An unrecognised status is a question, not a silent zero.
+   *
+   * The old denylist counted anything it did not recognise as SOLD, so a value
+   * TikTok adds tomorrow would quietly enter a factory's payout. It is now
+   * counted apart and named here, so the fix is a line in
+   * LINE_STATUS_MEANING rather than an investigation.
+   */
+  var unknown = {};
+  Object.keys(byVariation).forEach(function (k) {
+    Object.keys(byVariation[k].unknown_statuses).forEach(function (st) { unknown[st] = true; });
+  });
+  var names = Object.keys(unknown);
+  if (names.length) {
+    warn_('TS-ORD-26', 'Order line statuses this app does not recognise on ' + listingId +
+      ': ' + names.join(', ') + '. They are NOT counted as sold. Add them to ' +
+      'LINE_STATUS_MEANING once their meaning is confirmed.');
+  }
+
+  return { byVariation: byVariation, items: items };
 }
 
 /**
@@ -4410,7 +4612,8 @@ function variationSales_(listingId, fromEpoch, toEpoch, known_) {
  * and wrong sold figure: the correct arithmetic was not reachable from
  * anywhere else.
  */
-function groupVariationSales_(items) {
+function groupVariationSales_(items, refunds) {
+  var refunded = refunds || {};
   var byVariation = {};
   items.forEach(function (r) {
     // sku_id first: seller_sku is empty on anything this app did not list,
@@ -4426,6 +4629,15 @@ function groupVariationSales_(items) {
         sku_image: String(r.sku_image || ''),
         units: 0,
         unsold_units: 0,
+        /** Paid but still cancellable by the buyer alone. ON_HOLD. */
+        held_units: 0,
+        /** A status this app does not recognise. Never counted as sold. */
+        unknown_units: 0,
+        /** The buyer has the money back. Was counted as sold until 15 Sep. */
+        refunded_units: 0,
+        /** A return or refund request is open and undecided. */
+        at_risk_units: 0,
+        unknown_statuses: {},
         revenue: 0,
         price: String(r.sale_price || '')
       };
@@ -4433,12 +4645,54 @@ function groupVariationSales_(items) {
     var g = byVariation[key];
     if (!g.sku_image && r.sku_image) g.sku_image = String(r.sku_image);
     if (!g.seller_sku && r.seller_sku) g.seller_sku = String(r.seller_sku);
-    var qty = Number(r.quantity || 0);
-    if (UNSOLD_STATUSES[String(r.status || '').toUpperCase()]) {
-      g.unsold_units += qty;
-    } else {
+
+    /**
+     * One line item is one unit, so a blank quantity is one, not none.
+     *
+     * This read `Number(r.quantity || 0)`, which turned a row written before
+     * the column existed — padded with '' when the headers were migrated —
+     * into zero. Such a row then contributed nothing to sold, nothing to
+     * cancelled and nothing to revenue: it disappeared from the purchase order
+     * entirely rather than appearing in either column. Vanishing is the one
+     * outcome a number a factory is paid on must never have.
+     */
+    var qty = Number(r.quantity);
+    if (!isFinite(qty) || qty <= 0) qty = 1;
+
+    var meaning = lineStatusMeaning_(r.status);
+
+    /**
+     * A refund overrides the order status, because the order status cannot see
+     * it.
+     *
+     * A refunded line still reads DELIVERED or COMPLETED — TikTok has no
+     * status for "refunded" at all. So the refund is looked up separately and
+     * applied here, and a unit the buyer has been given the money back for
+     * stops counting as sold however healthy the order looks.
+     *
+     * An open request is neither: it is not yet lost, and calling it sold
+     * would put money in a payout that may be handed back next week.
+     */
+    var refund = refunded[String(r.line_item_id || '')];
+    if (refund === 'refunded') meaning = 'refunded';
+    else if (refund === 'at_risk' && meaning === 'sold') meaning = 'at_risk';
+
+    if (meaning === 'sold') {
       g.units += qty;
       g.revenue += Number(r.sale_price || 0) * qty;
+    } else if (meaning === 'unsold') {
+      g.unsold_units += qty;
+    } else if (meaning === 'held') {
+      // Paid, inside the buyer's remorse window, cancellable without the
+      // seller's agreement. Committed stock; not yet money.
+      g.held_units += qty;
+    } else if (meaning === 'refunded') {
+      g.refunded_units += qty;
+    } else if (meaning === 'at_risk') {
+      g.at_risk_units += qty;
+    } else {
+      g.unknown_units += qty;
+      g.unknown_statuses[String(r.status || '(blank)')] = true;
     }
   });
   return byVariation;
@@ -4451,8 +4705,34 @@ function salesIndex_(byVariation) {
     var g = byVariation[k];
     // Indexed by both keys the listing screen can match on. A variation this
     // app listed has a seller_sku; one added in Seller Center has only an id.
-    if (g.sku_id) compact['id:' + g.sku_id] = { units: g.units, unsold: g.unsold_units };
-    if (g.seller_sku) compact['sku:' + g.seller_sku] = { units: g.units, unsold: g.unsold_units };
+    var entry = {
+      units: g.units,
+      unsold: g.unsold_units,
+      held: g.held_units,
+      unknown: g.unknown_units,
+      refunded: g.refunded_units,
+      at_risk: g.at_risk_units
+    };
+    if (g.sku_id) compact['id:' + g.sku_id] = entry;
+    /**
+     * The seller_sku key is written only when no other variation has claimed
+     * it.
+     *
+     * `identifierFromVariation_` can recover the same identifier from two
+     * different variations' names, and the last writer used to win — so a
+     * variation whose TikTok id was unknown would be handed ANOTHER
+     * variation's sold count rather than none. A wrong number presented
+     * confidently is worse than no number, and this one is paid against.
+     */
+    if (g.seller_sku) {
+      var key = 'sku:' + g.seller_sku;
+      if (compact[key] && compact[key].__owner !== g.sku_id) {
+        compact[key] = { units: null, unsold: null, held: null, unknown: null, ambiguous: true };
+      } else if (!compact[key]) {
+        compact[key] = entry;
+        compact[key].__owner = g.sku_id;
+      }
+    }
   });
   return compact;
 }
@@ -4503,9 +4783,14 @@ function variationSalesCached_(listingId, known_) {
 /** Sold and cancelled for one variation, by TikTok id then by identifier. */
 function salesFor_(sales, tiktokSkuId, identifier) {
   if (!sales) return null;
-  return sales['id:' + String(tiktokSkuId || '')] ||
-         sales['sku:' + String(identifier || '')] ||
-         null;
+  var hit = sales['id:' + String(tiktokSkuId || '')] ||
+            sales['sku:' + String(identifier || '')] ||
+            null;
+  // An identifier two variations both answer to tells us nothing about either.
+  // Null reads on screen as "no sold figure", which is true; a number would
+  // not be.
+  if (hit && hit.ambiguous) return null;
+  return hit;
 }
 
 function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
@@ -4566,6 +4851,11 @@ var SYNC_TRIGGER_FN = 'syncRecentOrders';
 var LAST_LISTED_PREFIX = 'LAST_LISTED_';
 var LAST_SYNCED_PREFIX = 'LAST_SYNCED_';
 var SYNC_BACKFILL_MIN = 60;
+/** How long after a shop's last push its orders are still watched for changes. */
+var SYNC_TAIL_HOURS = 72;
+var LAST_RETURNS_PREFIX = 'LAST_RETURNS_';
+/** First returns run looks back this far, so an existing refund is not missed. */
+var SYNC_RETURNS_BACKFILL_H = 720;
 
 /**
  * Install the timer. Run once, by hand, from the editor.
@@ -4611,13 +4901,28 @@ function removeOrderSync() {
  *
  * Pure so the rule can be asserted without a Sheet or a clock.
  */
-function shopsToSync_(lastListed, nowMs, activeHours) {
+function shopsToSync_(lastListed, nowMs, activeHours, tailHours) {
   var cutoff = nowMs - (activeHours || SYNC_ACTIVE_HOURS) * 3600 * 1000;
+  /**
+   * A long tail, because an order does not stop changing when a stream ends.
+   *
+   * The gate was six hours from the last push, which is right for "is a
+   * broadcast running". It is wrong for cancellations and refunds, which
+   * arrive the next morning — and exports read the Sheet, not TikTok, so a
+   * purchase order built before somebody remembered to press Sync counts
+   * cancelled units as sold. That is the failure this whole sync exists to
+   * prevent, arriving through the back door.
+   *
+   * So a shop stays in the sync for a good while after it last listed. The
+   * cost of a firing with nothing to report is one TikTok call that answers
+   * empty, which is the point of asking by change rather than by window.
+   */
+  var tail = nowMs - (tailHours || SYNC_TAIL_HOURS) * 3600 * 1000;
   var out = [];
   Object.keys(lastListed || {}).forEach(function (shopId) {
     if (!shopId) return;
     var at = Number(lastListed[shopId] || 0);
-    if (at && at >= cutoff) out.push(shopId);
+    if (at && at >= Math.min(cutoff, tail)) out.push(shopId);
   });
   return out.sort();
 }
@@ -4748,10 +5053,30 @@ function syncRecentOrders() {
       // Nothing changed. No Sheet is opened, nothing is written, and the
       // watermark does not move — which is the whole point of the question
       // being "what changed" rather than "what exists".
-      if (!check.count) return;
+      if (check.count) {
+        writeOrders_(shopId, orders, 'background sync');
+        props.setProperty(markKey, String(check.watermark));
+      }
 
-      writeOrders_(shopId, orders, 'background sync');
-      props.setProperty(markKey, String(check.watermark));
+      /**
+       * Refunds, on their own watermark.
+       *
+       * A separate endpoint and a separate clock: a refund can land days after
+       * the order stopped changing, so sharing the orders watermark would make
+       * the refund pass ask about a window the orders pass had already moved
+       * past. Separate here also means a shop whose returns scope is not yet
+       * granted still gets its orders — the failure is contained to the pass
+       * that needs the permission.
+       */
+      try {
+        var returnsKey = LAST_RETURNS_PREFIX + shopId;
+        var returnsSince = Number(props.getProperty(returnsKey) || 0) ||
+          (nowEpoch - SYNC_RETURNS_BACKFILL_H * 3600);
+        syncReturns_(shopId, returnsSince, 'background sync');
+        props.setProperty(returnsKey, String(nowEpoch));
+      } catch (e) {
+        warn_('TS-ORD-30', shopId + ': returns sync failed (orders are unaffected): ' + e);
+      }
     } catch (e) {
       // One shop failing must not stop the others, and must not disable the
       // timer. The log is where a sync that has been failing all week is found.
@@ -4820,7 +5145,9 @@ function writeOrders_(shopId, orders, actor) {
         currency: String(li.currency || 'SGD'),
         status: String(li.display_status || o.status || ''),
         created_at_sgt: created ? sgtStampFromEpoch_(created) : '',
-        created_epoch: created
+        created_epoch: created,
+        // What a refund is matched on. See HEADERS[TAB_ORDER_ITEMS].
+        line_item_id: String(li.id || '')
       });
     });
   });
@@ -4849,6 +5176,154 @@ function writeOrders_(shopId, orders, actor) {
 
   return { orders: orders.length, items: itemRows.length, filledNote: filledNote };
 
+}
+
+// ── returns and refunds ───────────────────────────────────────────────
+
+/**
+ * What a return status means for the money.
+ *
+ * The complete enum, read on 15 Sep from TikTok's own Search Returns page
+ * (doc 650ab69edefece02be70785b, `POST /return_refund/202309/returns/search`)
+ * through the documentation site's JSON API. The rendered page is a JavaScript
+ * shell with no text in it, which is why an earlier attempt to check this
+ * "against the docs" found nothing and why this table is quoted rather than
+ * remembered.
+ *
+ * This exists because NO ORDER STATUS CAN ANSWER IT. TikTok's Order API
+ * overview states three times that a fully refunded order lands in COMPLETED —
+ * "Once the order amount is a full refund to the buyer, the order status will
+ * be updated to COMPLETED" — and the line-item `display_status` enum has no
+ * REFUNDED, RETURNED or PARTIALLY_REFUNDED value at all. A refunded line still
+ * reads DELIVERED. Every "sold" figure this app produced before this table was
+ * "sold, before refunds", and a factory was paid on it.
+ *
+ *   refunded  the buyer has the money back, or certainly will
+ *   at_risk   a request is open and undecided
+ *   kept      the request was rejected, cancelled or withdrawn
+ */
+var RETURN_STATUS_MEANING = {
+  // "The return/refund was processed successfully. The buyer has been refunded."
+  RETURN_OR_REFUND_REQUEST_COMPLETE: 'refunded',
+  // "The return/refund request was approved. The buyer will be refunded."
+  RETURN_OR_REFUND_REQUEST_SUCCESS: 'refunded',
+  // "Buyer's replacement request was resolved by refund due to insufficient inventory."
+  REPLACEMENT_REQUEST_REFUND_SUCCESS: 'refunded',
+
+  // Open and undecided. The money is still the seller's for now, but naming it
+  // separately is what lets the screen say "3 sold, 1 being returned" rather
+  // than picking one of those and being wrong either way.
+  RETURN_OR_REFUND_REQUEST_PENDING: 'at_risk',
+  AWAITING_BUYER_SHIP: 'at_risk',
+  BUYER_SHIPPED_ITEM: 'at_risk',
+  AWAITING_BUYER_RESPONSE: 'at_risk',
+  REPLACEMENT_REQUEST_PENDING: 'at_risk',
+
+  // Decided in the seller's favour.
+  REFUND_OR_RETURN_REQUEST_REJECT: 'kept',
+  REJECT_RECEIVE_PACKAGE: 'kept',
+  RETURN_OR_REFUND_REQUEST_CANCEL: 'kept',
+  REPLACEMENT_REQUEST_REJECT: 'kept',
+  REPLACEMENT_REQUEST_CANCEL: 'kept'
+};
+
+/** Unknown is at_risk, never kept: an unrecognised return must not read as a sale. */
+function returnStatusMeaning_(status) {
+  var key = String(status || '').trim().toUpperCase();
+  if (!key) return 'at_risk';
+  return RETURN_STATUS_MEANING[key] || 'at_risk';
+}
+
+/** One page of returns. Filters are documented on the Search Returns page. */
+function ttSearchReturns_(prefix, sinceEpoch, pageToken) {
+  var query = { page_size: String(ORDER_PAGE_SIZE) };
+  if (pageToken) query.page_token = pageToken;
+  var r = ttFetch_(prefix, 'post', '/return_refund/202309/returns/search', query, {
+    update_time_ge: Number(sinceEpoch)
+  });
+  if (r.code !== 0) throw fail_('TS-ORD-28', 'Could not read returns: ' + ttReason_(r));
+  var data = r.data || {};
+  return { returns: data.return_orders || [], nextPageToken: data.next_page_token || '' };
+}
+
+/**
+ * Flatten TikTok's returns into one row per returned line item.
+ *
+ * Pure, so the shape can be asserted without the network. One return can cover
+ * several line items and each is decided on its own, so the row key is the
+ * return LINE item rather than the return.
+ */
+function returnRows_(shopId, returns, syncedAt) {
+  var rows = [];
+  (returns || []).forEach(function (ret) {
+    (ret.return_line_items || []).forEach(function (li) {
+      rows.push({
+        return_line_item_id: String(li.return_line_item_id || ''),
+        return_id: String(ret.return_id || ''),
+        shop_id: shopId,
+        order_id: String(ret.order_id || ''),
+        line_item_id: String(li.order_line_item_id || ''),
+        sku_id: String(li.sku_id || ''),
+        seller_sku: String(li.seller_sku || ''),
+        return_type: String(ret.return_type || ''),
+        return_status: String(ret.return_status || ''),
+        refund_total: String((li.refund_amount && li.refund_amount.refund_total) || ''),
+        currency: String((li.refund_amount && li.refund_amount.currency) || 'SGD'),
+        create_epoch: Number(ret.create_time || 0),
+        update_epoch: Number(ret.update_time || ret.create_time || 0),
+        synced_at: syncedAt
+      });
+    });
+  });
+  return rows;
+}
+
+/**
+ * Refund state per order line item id, for the sold count to consult.
+ *
+ * Keyed by `line_item_id` because that is the only field a return and an order
+ * line agree on. When one line item has more than one return against it — a
+ * rejected request followed by a second attempt — the WORST outcome wins:
+ * refunded beats at_risk beats kept. A unit refunded on the second attempt is
+ * refunded, whatever the first attempt said.
+ */
+function refundIndex_(returnRows) {
+  var rank = { kept: 0, at_risk: 1, refunded: 2 };
+  var out = {};
+  (returnRows || []).forEach(function (r) {
+    var id = String(r.line_item_id || '');
+    if (!id) return;
+    var meaning = returnStatusMeaning_(r.return_status);
+    if (!out[id] || rank[meaning] > rank[out[id]]) out[id] = meaning;
+  });
+  return out;
+}
+
+/** Pull returns changed since the watermark into the Returns tab. */
+function syncReturns_(shopId, sinceEpoch, actor) {
+  var all = [];
+  var token = '';
+  var pages = 0;
+  do {
+    var page = ttSearchReturns_(shopId, sinceEpoch, token);
+    all = all.concat(page.returns);
+    token = page.nextPageToken;
+    pages++;
+    if (pages >= 60 && token) {
+      warn_('TS-ORD-29', shopId + ': more than ' + (60 * ORDER_PAGE_SIZE) +
+        ' returns changed since ' + sinceEpoch + '; stopping and keeping what was read.');
+      break;
+    }
+  } while (token);
+
+  var rows = returnRows_(shopId, all, new Date().toISOString());
+  if (rows.length) {
+    withScriptLock_(30000, function () {
+      replaceByKey_(TAB_RETURNS, 'return_line_item_id', rows);
+    });
+    logEvent_(actor, 'sync_returns', shopId, rows.length + ' return line(s)', 'ok');
+  }
+  return { returns: all.length, lines: rows.length };
 }
 
 
@@ -6058,4 +6533,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '662b5d6 2026-09-15';
+var BACKEND_BUILD = 'ef8a433-dirty 2026-09-15';

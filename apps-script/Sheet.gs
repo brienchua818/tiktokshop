@@ -34,6 +34,23 @@ HEADERS[TAB_ORDERS] = [
 ];
 // One row per line item, not per order, because an order can hold items from
 // two listings and per-listing figures have to come from the items.
+/**
+ * Returns and refunds, in their own tab.
+ *
+ * Separate from Order Items on purpose. The two are written by two different
+ * syncs that run at different times, and an order re-synced after a refund
+ * would otherwise erase the refund — the exact failure this table exists to
+ * prevent. Nothing the order sync does can touch a row here.
+ *
+ * Keyed by return_line_item_id: one return can cover several line items, and
+ * each is refunded or rejected on its own.
+ */
+HEADERS[TAB_RETURNS] = [
+  'return_line_item_id', 'return_id', 'shop_id', 'order_id', 'line_item_id',
+  'sku_id', 'seller_sku', 'return_type', 'return_status',
+  'refund_total', 'currency', 'create_epoch', 'update_epoch', 'synced_at'
+];
+
 HEADERS[TAB_ORDER_ITEMS] = [
   'order_id', 'shop_id', 'listing_id', 'product_name', 'sku_id', 'seller_sku',
   'variation', 'quantity', 'sale_price', 'currency', 'status',
@@ -41,7 +58,23 @@ HEADERS[TAB_ORDER_ITEMS] = [
   // TikTok's own picture of the variation, as sold. Present on every line item,
   // including variations this app never created — which is what makes the
   // purchase order's photo column complete rather than "ours only".
-  'sku_image'
+  'sku_image',
+  /**
+   * The id a RETURN points at, and what that return became.
+   *
+   * No order status distinguishes a refund from a sale — TikTok's own overview
+   * says three times that a fully refunded order lands in COMPLETED, and the
+   * line-item enum has no REFUNDED value at all. Refunds live in a separate
+   * object, /return_refund/202309/returns/search, whose return_line_items each
+   * carry an `order_line_item_id`. Without that id stored here there is nothing
+   * to match a refund against, so it is recorded from the first sync onwards.
+   *
+   * The refund itself is NOT stored on this row. An order is re-synced whenever
+   * it changes, and a re-sync rewrites the whole row — so a refund kept here
+   * would be wiped by the next shipping update. Returns have their own tab,
+   * which the order sync never touches.
+   */
+  'line_item_id'
 ];
 HEADERS[TAB_LOG] = ['timestamp_sgt', 'actor', 'action', 'shop', 'detail', 'result'];
 HEADERS[TAB_USERS] = ['email', 'name', 'role', 'first_seen', 'last_seen', 'approved_by', 'note'];
@@ -171,7 +204,7 @@ function ensureHeaders_(name, sh) {
 
 /** Run once to lay the spreadsheet out. Safe to re-run. */
 function setupSheets() {
-  [TAB_LISTINGS, TAB_SKUS, TAB_ORDERS, TAB_ORDER_ITEMS, TAB_LOG, TAB_USERS]
+  [TAB_LISTINGS, TAB_SKUS, TAB_ORDERS, TAB_ORDER_ITEMS, TAB_RETURNS, TAB_LOG, TAB_USERS]
     .forEach(function (n) { sheet_(n); });
   ensureOwner_();
   logEvent_('system', 'setup_sheets', '', 'Tabs ensured', 'ok');

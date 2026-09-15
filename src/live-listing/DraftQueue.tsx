@@ -1102,6 +1102,12 @@ function variantBadge(v: LiveVariant): { text: string; cls: string } {
 function variantMeta(v: LiveVariant): string {
   const bits: string[] = []
   if (v.sold !== null && v.sold > 0) bits.push(`${v.sold} sold`)
+  // Each shown on its own, never netted into the sold figure. A factory asking
+  // "why is this less than we called out" deserves the breakdown, and a single
+  // number that has had deductions folded into it silently is unexplainable.
+  if (v.refunded !== null && v.refunded > 0) bits.push(`${v.refunded} refunded`)
+  if (v.at_risk !== null && v.at_risk > 0) bits.push(`${v.at_risk} returning`)
+  if (v.held !== null && v.held > 0) bits.push(`${v.held} unconfirmed`)
   if (v.cancelled !== null && v.cancelled > 0) bits.push(`${v.cancelled} cancelled`)
   if (v.external) bits.push('added outside this app')
   else if (v.created_by) bits.push(v.created_by)

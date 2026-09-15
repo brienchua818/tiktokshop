@@ -118,6 +118,7 @@ var REMOVAL_GRACE_MS = 10 * 60 * 1000;
 
 var TAB_ORDERS = 'Orders';
 var TAB_ORDER_ITEMS = 'Order Items';
+var TAB_RETURNS = 'Returns';
 var TAB_LOG = 'Log';
 var TAB_USERS = 'Users';
 

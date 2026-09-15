@@ -610,7 +610,39 @@ function listingState_(listingId) {
        * has no "left", and orders that have never been synced are not zero.
        */
       stock_available: st.quantity,
-      stock_total: st.quantity === null ? null : st.quantity + (sold || 0),
+      /**
+       * Every unit accounted for, or the total is a guess.
+       *
+       * available + sold was not enough. A unit sitting in ON_HOLD is PAID and
+       * already deducted from TikTok's available figure, but it is not revenue
+       * — the buyer can still cancel it alone. A unit under a status this app
+       * does not recognise is likewise gone from available and unexplained.
+       * Leaving either out of the total makes the total smaller than the number
+       * of units that have actually existed.
+       *
+       * Cancelled units are deliberately NOT added: TikTok returns them to
+       * stock (Brien, confirmed — cancel an order of 2 and 2 come back), so
+       * they are already inside `available` and adding them would count them
+       * twice.
+       */
+      stock_total: st.quantity === null
+        ? null
+        : st.quantity + (sold || 0) +
+          (sale ? (sale.held || 0) + (sale.unknown || 0) + (sale.at_risk || 0) : 0),
+      /** Paid, and still cancellable by the buyer alone. Shown, never netted. */
+      held: sale ? (sale.held || 0) : null,
+      /**
+       * The buyer has the money back. NOT added to the total.
+       *
+       * TikTok returns a refunded unit to stock, exactly as it does a
+       * cancellation, so it is already inside `stock_available`. Adding it
+       * again would count it twice and make the total larger than the number
+       * of units that ever existed — in the direction that overstates what a
+       * factory sold.
+       */
+      refunded: sale ? (sale.refunded || 0) : null,
+      /** A return request is open and undecided. Still committed stock. */
+      at_risk: sale ? (sale.at_risk || 0) : null,
 
       /**
        * Sold, from the order line items. Not from stock arithmetic.
@@ -654,7 +686,12 @@ function listingState_(listingId) {
       stock_available: extState.quantity,
       stock_total: extState.quantity === null
         ? null
-        : extState.quantity + (extSale ? extSale.units : 0),
+        : extState.quantity + (extSale
+            ? (extSale.units || 0) + (extSale.held || 0) + (extSale.unknown || 0) + (extSale.at_risk || 0)
+            : 0),
+      held: extSale ? (extSale.held || 0) : null,
+      refunded: extSale ? (extSale.refunded || 0) : null,
+      at_risk: extSale ? (extSale.at_risk || 0) : null,
       // A variation added in Seller Center still sells, and its line items
       // carry TikTok's sku id, so it can be matched and counted like any
       // other.
@@ -791,6 +828,9 @@ function removedVariations_(listingId) {
         removed: true,
         stock_available: null,
         stock_total: null,
+        held: null,
+        refunded: null,
+        at_risk: null,
         sold: null,
         cancelled: null
       };

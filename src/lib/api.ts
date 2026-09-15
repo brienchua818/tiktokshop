@@ -199,6 +199,18 @@ export interface LiveVariant {
    * rises with it, and the variation stops being sold out on its own.
    */
   stock_total: number | null
+  /** Paid, but the buyer can still cancel alone. Committed, not yet revenue. */
+  held: number | null
+  /**
+   * Units the buyer has been refunded for.
+   *
+   * No order status shows this: TikTok's own overview says a fully refunded
+   * order lands in COMPLETED, and the line-item enum has no REFUNDED value at
+   * all. It comes from the returns endpoint and overrides the order status.
+   */
+  refunded: number | null
+  /** A return or refund request is open and undecided. */
+  at_risk: number | null
   /**
    * Units sold, counted from order line items rather than derived from stock.
    *

@@ -525,10 +525,35 @@ function pageInsteadOfData(attempt: Attempt): ScriptError {
       'REDIRECT_METHOD',
     )
   }
+  /**
+   * A 404 from the content host is not a sharing problem, and saying it was
+   * sent Brien to check a deployment that was fine.
+   *
+   * Apps Script answers by redirecting to a one-time reply on
+   * script.googleusercontent.com. A 404 there means the reply is not
+   * there — the execution produced none. Overwhelmingly that is the six-minute
+   * execution limit on a long job (an order sync or an export), or a crash.
+   * The deployment itself cannot be the cause: an unshared or missing one is
+   * refused at script.google.com with 401/403, before any content URL exists.
+   *
+   * Verified on 15 Sep: `ping` answered 200 anonymously in two seconds while
+   * this message was telling him the deployment was probably not published.
+   */
+  if (attempt.status === 404 && /googleusercontent/.test(host)) {
+    return new ScriptError(
+      502,
+      'The backend started this but never finished it, so there is no reply to read. ' +
+        'That usually means it ran past Apps Script\u2019s six-minute limit — most likely on a ' +
+        'long sync or export. It may have got part of the way, so check before repeating it. ' +
+        'The Execution log for this run says how far it got.',
+      'NOT_JSON',
+    )
+  }
+
   return new ScriptError(
     502,
     `The backend returned a page instead of data (HTTP ${attempt.status} from ${host}). ` +
-      'The Apps Script deployment is probably not published to "Anyone", or is out of date. ' +
+      'The Apps Script deployment may not be published to "Anyone", or may be out of date. ' +
       'Check its Execution log.',
     'NOT_JSON',
   )

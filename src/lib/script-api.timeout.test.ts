@@ -248,3 +248,73 @@ describe('the wording matches what actually happened', () => {
     vi.useRealTimers()
   })
 })
+
+/**
+ * A 404 from the content host must not be reported as a sharing problem.
+ *
+ * Apps Script answers by redirecting to a one-time reply on
+ * script.googleusercontent.com. A 404 there means the execution produced no
+ * reply — the six-minute limit, or a crash. An unshared or missing deployment
+ * is refused earlier, at script.google.com, before a content URL exists.
+ *
+ * On 15 Sep this told Brien the deployment was "probably not published to
+ * Anyone" while `ping` was answering 200 anonymously in two seconds, sending
+ * him to check something that was fine.
+ */
+describe('a page instead of data', () => {
+  beforeEach(() => {
+    vi.stubEnv('VITE_APPS_SCRIPT_URL', 'https://script.google.com/macros/s/test/exec')
+    vi.resetModules()
+  })
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.unstubAllGlobals()
+  })
+
+  /**
+   * `response.url` is what the diagnosis reads, and a hand-built Response has
+   * an empty one — which sends every case down the generic branch. The first
+   * version of this test passed that way without ever reaching the code it
+   * claimed to cover, so the URL is set explicitly and the assertions name the
+   * wording rather than only the code.
+   */
+  async function failWith(url: string, status: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        const res = new Response('<!doctype html><title>Error</title>', {
+          status,
+          headers: { 'content-type': 'text/html' },
+        })
+        Object.defineProperty(res, 'url', { value: url })
+        return Promise.resolve(res)
+      }),
+    )
+    const mod = await import('./script-api')
+    mod.setIdToken('h.' + btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })) + '.s')
+    const err = (await mod
+      .call('exportOrders', { body: {}, timeoutMs: 1_000 })
+      .then(() => null, (e: unknown) => e)) as InstanceType<typeof mod.ScriptError>
+    return err
+  }
+
+  it('reads a 404 from the content host as a job that never finished', async () => {
+    const err = await failWith('https://script.googleusercontent.com/macros/echo?k=1', 404)
+    expect(err.code).toBe('NOT_JSON')
+    expect(err.message).toMatch(/six-minute limit/)
+    expect(err.message).toMatch(/check before repeating it/)
+    // It must NOT send anyone to look at the deployment.
+    expect(err.message).not.toMatch(/published/)
+    // A long job may have written part of its work.
+    expect(err.isOutcomeUnknown).toBe(true)
+  })
+
+  it('still names the deployment for a 403 at the script host', async () => {
+    // The other half: a real sharing problem must keep the advice that fits it,
+    // or the fix above would have removed a useful message instead of a wrong one.
+    const err = await failWith('https://script.google.com/macros/s/test/exec', 403)
+    expect(err.code).toBe('NOT_JSON')
+    expect(err.message).toMatch(/published/)
+    expect(err.message).toMatch(/403/)
+  })
+})

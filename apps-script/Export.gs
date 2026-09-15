@@ -541,6 +541,32 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     throw fail_('TS-EXP-03', 'The cost divisor must be greater than zero.');
   }
 
+  /**
+   * Check the window against TikTok before building anything from it.
+   *
+   * This is the moment the number decides what a factory is paid, and until
+   * now nothing had ever compared the Sheet against TikTok. An order that
+   * stopped being returned sat at its last-seen status for ever and was
+   * counted as sold in every export made afterwards.
+   *
+   * It never blocks the export. The check cannot tell a cancelled-and-dropped
+   * order from one merely absent from that response, so refusing to build
+   * would be as wrong as building silently. It reports, on the sheet where the
+   * money is, and the person paying decides.
+   */
+  var reconciliation = { checked: 0, missing: [], units: 0 };
+  try {
+    reconciliation = reconcileWindow_(
+      shopId,
+      sgtEpoch_(fromDate, fromTime || '00:00'),
+      sgtEndEpoch_(toDate, toTime)
+    );
+  } catch (e) {
+    warn_('TS-EXP-23', 'Could not reconcile this window against TikTok: ' + e +
+      '. The export is built from the Sheet as recorded.');
+    reconciliation.error = String(e && e.message ? e.message : e);
+  }
+
   var summary = orderSummary_(shopId, fromDate, fromTime, toDate, toTime);
   var wanted = {};
   (listingIds || []).forEach(function (id) { wanted[String(id)] = 1; });
@@ -566,8 +592,43 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       ['Requested by ' + actor + ' on ' + sgtStamp_()],
       ['']
     ];
+
+    /**
+     * The reconciliation, on the face of the purchase order.
+     *
+     * Not in a log nobody opens. Whoever signs this off is the person who can
+     * tell a cancelled order from one TikTok merely did not return, and they
+     * can only do that if the question reaches them — so it sits above the
+     * numbers it affects, not beside them.
+     */
+    if (reconciliation.error) {
+      head.splice(4, 0,
+        ['NOT CHECKED against TikTok: ' + reconciliation.error],
+        ['These figures are the Sheet as recorded, which may include orders TikTok has since dropped.'],
+        ['']);
+    } else if (reconciliation.missing.length) {
+      head.splice(4, 0,
+        ['CHECK BEFORE PAYING: ' + reconciliation.missing.length + ' recorded order(s) are not in ' +
+         'TikTok\u2019s list for this window'],
+        ['They carry ' + reconciliation.units + ' unit(s) counted as sold below. They may have been ' +
+         'cancelled and dropped, or may simply be missing from that response.'],
+        ['Orders: ' + reconciliation.missing.slice(0, 12).join(', ') +
+         (reconciliation.missing.length > 12
+           ? ' and ' + (reconciliation.missing.length - 12) + ' more \u2014 see the Log tab'
+           : '')],
+        ['']);
+    } else if (reconciliation.checked) {
+      head.splice(4, 0,
+        ['Checked against TikTok: all ' + reconciliation.checked +
+         ' recorded line(s) in this window are still on TikTok.'],
+        ['']);
+    }
+
     sh.getRange(1, 1, head.length, 1).setValues(head);
     sh.getRange(1, 1).setFontWeight('bold').setFontSize(13);
+    if (reconciliation.missing.length || reconciliation.error) {
+      sh.getRange(5, 1).setFontWeight('bold');
+    }
 
     // The id is a link (HYPERLINK survives the xlsx conversion; a rich-text
     // link may not) and the URL is also written out in plain text, so it can

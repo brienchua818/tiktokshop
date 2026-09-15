@@ -1373,3 +1373,80 @@ function syncReturns_(shopId, sinceEpoch, actor) {
   }
   return { returns: all.length, lines: rows.length };
 }
+
+// ── reconciliation ────────────────────────────────────────────────────
+
+/**
+ * Orders this app has recorded that TikTok is no longer returning.
+ *
+ * `replaceByKey_` only ever touches keys present in the incoming batch. There
+ * is no delete pass and no tombstone, so an order that drops out of TikTok's
+ * results stays in the Sheet at its last-seen status FOREVER — and if that
+ * status was a selling one, its units are counted as sold in every export made
+ * from then on. Nothing reconciled the Sheet against TikTok and nothing aged a
+ * row out.
+ *
+ * Pure, so the comparison can be asserted without the network.
+ *
+ * It reports rather than decides, and that is deliberate. An order TikTok does
+ * not return may have been cancelled and dropped — in which case counting it
+ * as sold overpays — or may simply be absent from that particular response, in
+ * which case removing it underpays. Both are wrong and this function cannot
+ * tell which, so it names them and leaves the judgement to someone who can.
+ */
+function ordersMissingFromTikTok_(sheetOrderIds, tiktokOrderIds) {
+  var live = {};
+  (tiktokOrderIds || []).forEach(function (id) { if (id) live[String(id)] = true; });
+  var missing = [];
+  var seen = {};
+  (sheetOrderIds || []).forEach(function (id) {
+    var key = String(id || '');
+    if (!key || seen[key]) return;
+    seen[key] = true;
+    if (!live[key]) missing.push(key);
+  });
+  return missing;
+}
+
+/**
+ * Check a window's recorded orders against TikTok, at the moment it matters.
+ *
+ * At export time rather than on a timer. An export IS the moment the number
+ * decides what a factory is paid, it already takes minutes, and a check that
+ * runs then cannot be forgotten — whereas a nightly one can have been failing
+ * for a week before anyone builds a purchase order.
+ *
+ * Asks by creation time, which is the same window the export uses, so the two
+ * are comparing the same thing.
+ */
+function reconcileWindow_(shopId, fromEpoch, toEpoch) {
+  var recorded = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
+    if (String(r.shop_id) !== String(shopId)) return false;
+    var t = Number(r.created_epoch || 0);
+    // An undated row cannot be placed in a window, so it cannot be judged
+    // missing from one either.
+    if (!t) return false;
+    return t >= fromEpoch && t < toEpoch;
+  });
+  if (!recorded.length) return { checked: 0, missing: [], units: 0 };
+
+  var live = ttAllOrders_(shopId, fromEpoch, toEpoch).map(function (o) { return String(o.id || ''); });
+  var missing = ordersMissingFromTikTok_(
+    recorded.map(function (r) { return r.order_id; }), live);
+
+  var gone = {};
+  missing.forEach(function (id) { gone[id] = true; });
+  var units = recorded.filter(function (r) {
+    return gone[String(r.order_id)] && lineStatusMeaning_(r.status) === 'sold';
+  }).length;
+
+  if (missing.length) {
+    warn_('TS-ORD-32', shopId + ': ' + missing.length + ' recorded order(s) are not in ' +
+      'TikTok\'s list for this window, carrying ' + units + ' unit(s) still counted as sold. ' +
+      'They may have been cancelled and dropped, or may simply be absent from this ' +
+      'response — check before paying on them. Orders: ' + missing.slice(0, 20).join(', ') +
+      (missing.length > 20 ? ' and ' + (missing.length - 20) + ' more' : ''));
+  }
+
+  return { checked: recorded.length, missing: missing, units: units };
+}

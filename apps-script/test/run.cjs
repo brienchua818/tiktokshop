@@ -141,7 +141,7 @@ ${src}
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
-    strippedVariantName_, REMOVED_RECENT,
+    strippedVariantName_, REMOVED_RECENT, ordersMissingFromTikTok_,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -2591,6 +2591,49 @@ check('the removed list is short on purpose', () => {
   if (!(gs.REMOVED_RECENT > 0 && gs.REMOVED_RECENT <= 20)) {
     throw new Error('REMOVED_RECENT is ' + gs.REMOVED_RECENT)
   }
+})
+
+console.log('\norders TikTok has stopped returning')
+
+/**
+ * `replaceByKey_` only touches keys present in the incoming batch. There is no
+ * delete pass and no tombstone, so an order that drops out of TikTok's results
+ * sat in the Sheet at its last-seen status FOREVER — and if that was a selling
+ * status, its units were counted as sold in every export made afterwards.
+ *
+ * The check reports rather than decides, on purpose. An absent order may have
+ * been cancelled and dropped (counting it as sold overpays) or may simply be
+ * missing from that response (removing it underpays). Both are wrong, and this
+ * cannot tell which.
+ */
+check('names what the Sheet has and TikTok does not', () => {
+  eq(gs.ordersMissingFromTikTok_(['o1', 'o2', 'o3'], ['o1', 'o3']), ['o2'])
+})
+
+check('nothing missing is an empty list', () => {
+  eq(gs.ordersMissingFromTikTok_(['o1', 'o2'], ['o2', 'o1']), [])
+})
+
+check('an order reported once, however many line items it has', () => {
+  // The Sheet holds one row per UNIT, so a three-unit order appears three
+  // times. Reporting it three times would read as three missing orders.
+  eq(gs.ordersMissingFromTikTok_(['o1', 'o1', 'o1', 'o2'], ['o2']), ['o1'])
+})
+
+check('extra orders on TikTok are not a fault here', () => {
+  // TikTok having more than the Sheet is a sync that has not caught up, which
+  // is a different problem with a different fix.
+  eq(gs.ordersMissingFromTikTok_(['o1'], ['o1', 'o2', 'o3']), [])
+})
+
+check('blank ids are ignored on both sides', () => {
+  eq(gs.ordersMissingFromTikTok_(['', null, 'o1'], ['o1']), [])
+  eq(gs.ordersMissingFromTikTok_(['o1'], ['', null]), ['o1'])
+})
+
+check('nothing recorded means nothing to check', () => {
+  eq(gs.ordersMissingFromTikTok_([], ['o1']), [])
+  eq(gs.ordersMissingFromTikTok_(null, null), [])
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

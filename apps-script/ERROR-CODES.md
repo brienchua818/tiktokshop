@@ -57,7 +57,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
 | `TS-EXP-02` | Export.gs:535 | Unknown shop: |
 | `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |
-| `TS-EXP-04` | Export.gs:551 | No orders in that window for those listings. |
+| `TS-EXP-04` | Export.gs:577 | No orders in that window for those listings. |
 | `TS-EXP-10` | Export.gs:148 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-11` | Export.gs:150 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-12` | Export.gs:153 | Non-fatal reason attached to a result (see the line). |
@@ -71,6 +71,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
 | `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
 | `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
+| `TS-EXP-23` | Export.gs:565 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
 | `TS-ORD-01` | Orders.gs:59 | Could not read orders: |
 | `TS-ORD-02` | Orders.gs:85 | That range has more than orders. Narrow the dates and sync again. |
 | `TS-ORD-03` | Orders.gs:101 | Not a date: |
@@ -91,6 +92,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-ORD-29` | Orders.gs:1361 | : more than returns changed since ; stopping and keeping what was read. |
 | `TS-ORD-30` | Orders.gs:1126 | : returns sync failed (orders are unaffected): |
 | `TS-ORD-31` | Orders.gs:882 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
+| `TS-ORD-32` | Orders.gs:1444 | : recorded order(s) are not in TikTok\'s list for this window, carrying unit(s) still counted as sold. They may have been cancelled and dropped, or may simply be absent from this response — check before paying on them. O… |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:246 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:507 | Unknown listing: |

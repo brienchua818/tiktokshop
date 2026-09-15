@@ -860,6 +860,36 @@ function invalidateRead_(name) {
   else READ_CACHE_ = {};
 }
 
+/**
+ * A timestamp as an ISO string, whatever the cell actually holds.
+ *
+ * Sheets converts an ISO-8601 string into a real date cell on write, so
+ * `getValues()` hands back a Date object rather than the text that was
+ * written. `String(date)` then produces "Sun Sep 13 2026 22:00:00 GMT+0800",
+ * and the app sorted its listing on exactly that — alphabetically, by WEEKDAY
+ * NAME. The 13th came before the 14th because "Sun" beats "Mon".
+ *
+ * Brien, 16 Sep: the newest variation was not at the top, and the order
+ * reshuffled when he changed tabs and came back. Both are this.
+ *
+ * Robust to either shape on purpose: a cell may hold a Date, or a string the
+ * Sheet declined to parse, or nothing. The one thing that must never leave
+ * this backend is a timestamp that does not sort.
+ */
+function isoOf_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? '' : value.toISOString();
+  }
+  var text = String(value).trim();
+  if (!text) return '';
+  // Already ISO: left exactly as it is, so a value that never went through a
+  // cell is not rewritten and cannot drift by a millisecond.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) return text;
+  var parsed = new Date(text);
+  return isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
 function readAll_(name) {
   if (Object.prototype.hasOwnProperty.call(READ_CACHE_, name)) return READ_CACHE_[name];
   var sh = sheet_(name);
@@ -2407,7 +2437,7 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
     // Already marked and still absent: nothing to say.
     if (status === 'removed') return;
 
-    var seenAt = Date.parse(String(r.confirmed_at || ''));
+    var seenAt = Date.parse(isoOf_(r.confirmed_at));
     if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
       updates.push({ sku_id: String(r.sku_id), status: 'removed',
         error: 'Removed from TikTok', removed_at: new Date().toISOString() });
@@ -2583,7 +2613,7 @@ function listingState_(listingId) {
       external: false,
       tiktok_sku_id: String((match && match.id) || r.tiktok_sku_id || ''),
       image_url: String((match && match.skuImgUrl) || ''),
-      created_at: String(r.created_at || ''),
+      created_at: isoOf_(r.created_at),
       created_by: String(r.created_by || ''),
 
       /**
@@ -2787,7 +2817,7 @@ function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
     if (seen[String(r.identifier)]) return false;
     if (!String(r.tiktok_sku_id || '')) return false;
     if (String(r.confirmed_at || '')) return false;
-    var pushedAt = Date.parse(String(r.pushed_at || r.created_at || ''));
+    var pushedAt = Date.parse(isoOf_(r.pushed_at) || isoOf_(r.created_at));
     return !isNaN(pushedAt) && pushedAt >= cutoff;
   }).map(function (r) {
     return {
@@ -2834,8 +2864,8 @@ function removedVariations_(listingId, limit) {
     return String(r.status) === 'removed';
   });
   var rows = all.slice().sort(function (a, b) {
-    var at = String(a.removed_at || a.created_at || '');
-    var bt = String(b.removed_at || b.created_at || '');
+    var at = isoOf_(a.removed_at) || isoOf_(a.created_at);
+    var bt = isoOf_(b.removed_at) || isoOf_(b.created_at);
     return bt.localeCompare(at);
   }).slice(0, want);
 
@@ -2853,9 +2883,9 @@ function removedVariations_(listingId, limit) {
         external: false,
         tiktok_sku_id: String(r.tiktok_sku_id || ''),
         image_url: '',
-        created_at: String(r.created_at || ''),
+        created_at: isoOf_(r.created_at),
         created_by: String(r.created_by || ''),
-        removed_at: String(r.removed_at || ''),
+        removed_at: isoOf_(r.removed_at),
         /** Enough recorded to put it back. See restoreVariation_. */
         restorable: Boolean(String(r.price || '') && String(r.identifier || '')),
         state: 'removed',
@@ -4081,7 +4111,8 @@ function restoreVariation_(listingId, identifier, stock, user) {
     return String(r.identifier) === String(identifier) && String(r.status) === 'removed';
   });
   var row = rows.sort(function (a, b) {
-    return String(b.removed_at || b.created_at || '').localeCompare(String(a.removed_at || a.created_at || ''));
+    return (isoOf_(b.removed_at) || isoOf_(b.created_at))
+      .localeCompare(isoOf_(a.removed_at) || isoOf_(a.created_at));
   })[0];
   if (!row) throw fail_('TS-PRD-34', identifier + ' is not a removed variation on this listing.');
 
@@ -6889,4 +6920,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '353f1cc 2026-09-15';
+var BACKEND_BUILD = 'd16d42d-dirty 2026-09-15';

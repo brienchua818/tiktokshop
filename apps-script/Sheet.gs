@@ -266,6 +266,36 @@ function invalidateRead_(name) {
   else READ_CACHE_ = {};
 }
 
+/**
+ * A timestamp as an ISO string, whatever the cell actually holds.
+ *
+ * Sheets converts an ISO-8601 string into a real date cell on write, so
+ * `getValues()` hands back a Date object rather than the text that was
+ * written. `String(date)` then produces "Sun Sep 13 2026 22:00:00 GMT+0800",
+ * and the app sorted its listing on exactly that — alphabetically, by WEEKDAY
+ * NAME. The 13th came before the 14th because "Sun" beats "Mon".
+ *
+ * Brien, 16 Sep: the newest variation was not at the top, and the order
+ * reshuffled when he changed tabs and came back. Both are this.
+ *
+ * Robust to either shape on purpose: a cell may hold a Date, or a string the
+ * Sheet declined to parse, or nothing. The one thing that must never leave
+ * this backend is a timestamp that does not sort.
+ */
+function isoOf_(value) {
+  if (!value) return '';
+  if (Object.prototype.toString.call(value) === '[object Date]') {
+    return isNaN(value.getTime()) ? '' : value.toISOString();
+  }
+  var text = String(value).trim();
+  if (!text) return '';
+  // Already ISO: left exactly as it is, so a value that never went through a
+  // cell is not rewritten and cannot drift by a millisecond.
+  if (/^\d{4}-\d{2}-\d{2}T/.test(text)) return text;
+  var parsed = new Date(text);
+  return isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
 function readAll_(name) {
   if (Object.prototype.hasOwnProperty.call(READ_CACHE_, name)) return READ_CACHE_[name];
   var sh = sheet_(name);

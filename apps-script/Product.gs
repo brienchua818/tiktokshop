@@ -418,7 +418,7 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
     // Already marked and still absent: nothing to say.
     if (status === 'removed') return;
 
-    var seenAt = Date.parse(String(r.confirmed_at || ''));
+    var seenAt = Date.parse(isoOf_(r.confirmed_at));
     if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
       updates.push({ sku_id: String(r.sku_id), status: 'removed',
         error: 'Removed from TikTok', removed_at: new Date().toISOString() });
@@ -594,7 +594,7 @@ function listingState_(listingId) {
       external: false,
       tiktok_sku_id: String((match && match.id) || r.tiktok_sku_id || ''),
       image_url: String((match && match.skuImgUrl) || ''),
-      created_at: String(r.created_at || ''),
+      created_at: isoOf_(r.created_at),
       created_by: String(r.created_by || ''),
 
       /**
@@ -798,7 +798,7 @@ function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
     if (seen[String(r.identifier)]) return false;
     if (!String(r.tiktok_sku_id || '')) return false;
     if (String(r.confirmed_at || '')) return false;
-    var pushedAt = Date.parse(String(r.pushed_at || r.created_at || ''));
+    var pushedAt = Date.parse(isoOf_(r.pushed_at) || isoOf_(r.created_at));
     return !isNaN(pushedAt) && pushedAt >= cutoff;
   }).map(function (r) {
     return {
@@ -845,8 +845,8 @@ function removedVariations_(listingId, limit) {
     return String(r.status) === 'removed';
   });
   var rows = all.slice().sort(function (a, b) {
-    var at = String(a.removed_at || a.created_at || '');
-    var bt = String(b.removed_at || b.created_at || '');
+    var at = isoOf_(a.removed_at) || isoOf_(a.created_at);
+    var bt = isoOf_(b.removed_at) || isoOf_(b.created_at);
     return bt.localeCompare(at);
   }).slice(0, want);
 
@@ -864,9 +864,9 @@ function removedVariations_(listingId, limit) {
         external: false,
         tiktok_sku_id: String(r.tiktok_sku_id || ''),
         image_url: '',
-        created_at: String(r.created_at || ''),
+        created_at: isoOf_(r.created_at),
         created_by: String(r.created_by || ''),
-        removed_at: String(r.removed_at || ''),
+        removed_at: isoOf_(r.removed_at),
         /** Enough recorded to put it back. See restoreVariation_. */
         restorable: Boolean(String(r.price || '') && String(r.identifier || '')),
         state: 'removed',
@@ -2092,7 +2092,8 @@ function restoreVariation_(listingId, identifier, stock, user) {
     return String(r.identifier) === String(identifier) && String(r.status) === 'removed';
   });
   var row = rows.sort(function (a, b) {
-    return String(b.removed_at || b.created_at || '').localeCompare(String(a.removed_at || a.created_at || ''));
+    return (isoOf_(b.removed_at) || isoOf_(b.created_at))
+      .localeCompare(isoOf_(a.removed_at) || isoOf_(a.created_at));
   })[0];
   if (!row) throw fail_('TS-PRD-34', identifier + ' is not a removed variation on this listing.');
 

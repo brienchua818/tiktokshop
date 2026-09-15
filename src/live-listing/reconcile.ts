@@ -112,9 +112,13 @@ export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | n
         kind: 'remote',
         key: `remote:${v.tiktok_sku_id || v.identifier || v.variant}`,
         live: v,
-        // A variation listed outside this app has no creation time we know;
-        // it sorts after everything dated, in TikTok's order.
-        sortKey: v.created_at || '9999',
+        // A variation listed outside this app has no creation time we know.
+        // Empty rather than a high sentinel: '9999' sorted FIRST in a
+        // newest-first comparison, putting undated rows at the top of a list
+        // whose whole promise is that the top is the newest. Externals are
+        // already forced last by the side check below, so the sentinel was
+        // doing nothing it was meant to and something it was not.
+        sortKey: v.created_at || '',
       })
     }
   }
@@ -135,8 +139,54 @@ export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | n
     const external = (r: QueueRow) => (r.kind === 'remote' && r.live.external ? 1 : 0)
     const side = external(a) - external(b)
     if (side !== 0) return side
-    return b.sortKey.localeCompare(a.sortKey)
+
+    /**
+     * Compared as instants, not as text.
+     *
+     * `localeCompare` on a timestamp only works while the timestamp is ISO,
+     * and the backend was sending `String(<Date from a Sheet cell>)` —
+     * "Sun Sep 13 2026 22:00:00 GMT+0800". Sorting those as text sorts by
+     * WEEKDAY NAME, which put the 13th above the 14th. The backend now emits
+     * ISO, and this no longer depends on it doing so.
+     */
+    const at = Date.parse(a.sortKey)
+    const bt = Date.parse(b.sortKey)
+    if (!isNaN(at) && !isNaN(bt) && at !== bt) return bt - at
+    // One of them is undated: dated rows first, so an unknown time cannot
+    // claim the top of a newest-first list.
+    if (isNaN(at) !== isNaN(bt)) return isNaN(at) ? 1 : -1
+
+    /**
+     * A tiebreaker, so the order cannot change between two renders.
+     *
+     * Two variations pushed in the same second share a sortKey, and a stable
+     * sort then preserves whatever order they arrived in — which is TikTok's,
+     * and TikTok does not promise one. So the list reshuffled whenever it was
+     * rebuilt, which is what Brien saw switching to the Removed tab and back.
+     *
+     * The identifier is the tiebreaker because it is the one thing every row
+     * has, it is what the host says out loud, and its sequence IS the order
+     * things were listed in. Compared numerically, or B9 would sit above B75.
+     */
+    return identifierRank(rowIdentifier(b)) - identifierRank(rowIdentifier(a))
   })
+}
+
+/** The identifier a row shows, from whichever half of the union it is. */
+function rowIdentifier(r: QueueRow): string {
+  return r.kind === 'draft' ? r.draft.identifier : r.live.identifier
+}
+
+/**
+ * An identifier as a number, for ordering. "B75" ranks above "B9".
+ *
+ * Text comparison puts B9 after B75 because '9' > '7', which is the wrong way
+ * round for a sequence somebody counts upwards. Anything with no number in it
+ * ranks lowest rather than throwing off the rows that do.
+ */
+function identifierRank(identifier: string): number {
+  const digits = /(\d+)\s*$/.exec(String(identifier || ''))
+  return digits ? Number(digits[1]) : -1
 }
 
 /**

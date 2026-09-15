@@ -138,7 +138,7 @@ ${src}
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
-    readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
+    readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_, isoOf_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
     strippedVariantName_, REMOVED_RECENT, ordersMissingFromTikTok_,
@@ -2634,6 +2634,59 @@ check('blank ids are ignored on both sides', () => {
 check('nothing recorded means nothing to check', () => {
   eq(gs.ordersMissingFromTikTok_([], ['o1']), [])
   eq(gs.ordersMissingFromTikTok_(null, null), [])
+})
+
+console.log('\na timestamp that actually sorts')
+
+/**
+ * Sheets turns an ISO string written to a cell into a real date, so
+ * `getValues()` returns a Date — and `String(date)` gives
+ * "Sun Sep 13 2026 22:00:00 GMT+0800". The app sorted its listing on exactly
+ * that, alphabetically, by weekday name. The 13th came before the 14th
+ * because "Sun" beats "Mon".
+ */
+check('a Date from a cell becomes ISO', () => {
+  eq(gs.isoOf_(new Date('2026-09-15T02:14:33.000Z')), '2026-09-15T02:14:33.000Z')
+})
+
+check('an ISO string is left exactly alone', () => {
+  // Not re-parsed, so a value that never went through a cell cannot drift.
+  eq(gs.isoOf_('2026-09-15T02:14:33.000Z'), '2026-09-15T02:14:33.000Z')
+})
+
+check('the shape that caused the bug is converted, not passed through', () => {
+  const out = gs.isoOf_('Sun Sep 13 2026 22:00:00 GMT+0000')
+  eq(out.slice(0, 10), '2026-09-13')
+  if (out.indexOf('Sun') >= 0) throw new Error('still weekday text: ' + out)
+})
+
+check('nothing, or nonsense, is empty rather than a fake date', () => {
+  // An invented timestamp would sort a row into a position it has not earned.
+  eq(gs.isoOf_(''), '')
+  eq(gs.isoOf_(null), '')
+  eq(gs.isoOf_(undefined), '')
+  eq(gs.isoOf_('not a date'), '')
+  eq(gs.isoOf_(new Date('nonsense')), '')
+})
+
+check('ISO strings sort newest-first as text; the old shape inverts days', () => {
+  // The property the whole listing order rests on, asserted directly.
+  const days = ['2026-09-13T22:00:00.000Z', '2026-09-14T02:00:00.000Z', '2026-09-16T09:00:00.000Z']
+  const iso = days.map(gs.isoOf_).sort((a, b) => b.localeCompare(a))
+  eq(iso.map((d) => d.slice(0, 10)), ['2026-09-16', '2026-09-14', '2026-09-13'])
+
+  // And the shape it replaced gets it wrong. Checking the FIRST element would
+  // have proved nothing — with these three dates Wednesday happens to win on
+  // 'W' alone. The inversion is between Sunday the 13th and Monday the 14th,
+  // so that is the pair to assert. (The first version of this test checked
+  // the wrong element and passed the broken data.)
+  const raw = days.map((d) => String(new Date(d))).sort((a, b) => b.localeCompare(a))
+  const dayOf = (t) => t.slice(8, 10)
+  const thirteenth = raw.findIndex((t) => dayOf(t) === '13')
+  const fourteenth = raw.findIndex((t) => dayOf(t) === '14')
+  if (!(thirteenth < fourteenth)) {
+    throw new Error('expected the raw form to put the 13th above the 14th, which is the bug')
+  }
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

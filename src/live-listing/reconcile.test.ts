@@ -145,6 +145,87 @@ describe('mergeRows — every phone shows the same listing', () => {
   })
 })
 
+/**
+ * Newest first, and the same order every time.
+ *
+ * Brien, 16 Sep: the newest variation was not at the top, and the rows
+ * reshuffled when he went to the Removed tab and came back. Two causes.
+ *
+ * The backend sent `String(<Date>)` — Sheets turns an ISO string written to a
+ * cell into a real date, and getValues hands back a Date. Sorting
+ * "Sun Sep 13 2026 22:00:00 GMT+0800" as text sorts by WEEKDAY NAME, which is
+ * why the 13th sat above the 14th.
+ *
+ * And the comparator was not total: two variations pushed in the same second
+ * tie, a stable sort then keeps whatever order they arrived in, and that is
+ * TikTok's — which is not promised to be the same twice. Rebuilding the list
+ * reshuffled them.
+ */
+describe('mergeRows ordering', () => {
+  const at = (iso: string, identifier: string) =>
+    variant({ identifier, created_at: iso, state: 'live', buyable: true, on_tiktok: true })
+
+  const order = (rows: ReturnType<typeof mergeRows>) =>
+    rows.map((r) => (r.kind === 'remote' ? r.live.identifier : r.draft.identifier))
+
+  it('puts the newest first across days', () => {
+    // The exact failure: as text, "Sun Sep 13" beat "Mon Sep 14".
+    const rows = mergeRows([], state([
+      at('2026-09-13T22:00:00.000Z', 'B1'),
+      at('2026-09-16T09:00:00.000Z', 'B4'),
+      at('2026-09-14T02:00:00.000Z', 'B2'),
+      at('2026-09-15T18:00:00.000Z', 'B3'),
+    ]))
+    expect(order(rows)).toEqual(['B4', 'B3', 'B2', 'B1'])
+  })
+
+  it('is not fooled by a non-ISO timestamp', () => {
+    // Belt and braces: the backend emits ISO now, and this must not go back to
+    // sorting weekday names if anything ever sends the old shape again.
+    const rows = mergeRows([], state([
+      at('Sun Sep 13 2026 22:00:00 GMT+0000', 'B1'),
+      at('Mon Sep 14 2026 02:00:00 GMT+0000', 'B2'),
+    ]))
+    expect(order(rows)).toEqual(['B2', 'B1'])
+  })
+
+  it('gives the same order every time when timestamps tie', () => {
+    // Two pushed in the same second. TikTok does not promise a stable order,
+    // so the list must not take one from it.
+    const same = '2026-09-15T18:00:00.000Z'
+    const forwards = mergeRows([], state([at(same, 'B10'), at(same, 'B11'), at(same, 'B12')]))
+    const backwards = mergeRows([], state([at(same, 'B12'), at(same, 'B10'), at(same, 'B11')]))
+    expect(order(forwards)).toEqual(order(backwards))
+    // And newest-first by the sequence somebody counted upwards.
+    expect(order(forwards)).toEqual(['B12', 'B11', 'B10'])
+  })
+
+  it('ranks the identifier as a number, so B9 is not above B75', () => {
+    const same = '2026-09-15T18:00:00.000Z'
+    const rows = mergeRows([], state([at(same, 'B9'), at(same, 'B75'), at(same, 'B100')]))
+    expect(order(rows)).toEqual(['B100', 'B75', 'B9'])
+  })
+
+  it('keeps an undated row out of the top', () => {
+    // '9999' as a sentinel sorted FIRST in a newest-first comparison, putting
+    // rows with no known time at the head of a list whose promise is the
+    // opposite.
+    const rows = mergeRows([], state([
+      at('', 'B1'),
+      at('2026-09-15T18:00:00.000Z', 'B2'),
+    ]))
+    expect(order(rows)).toEqual(['B2', 'B1'])
+  })
+
+  it('still sorts Seller Centre variations last, whatever their time', () => {
+    const rows = mergeRows([], state([
+      variant({ identifier: 'SC1', external: true, created_at: '2026-09-16T23:00:00.000Z', state: 'live', buyable: true, on_tiktok: true }),
+      at('2026-09-10T01:00:00.000Z', 'B1'),
+    ]))
+    expect(order(rows)).toEqual(['B1', 'SC1'])
+  })
+})
+
 describe('splitRows', () => {
   it('sends a removed remote variation to the removed side', () => {
     const rows = mergeRows([], state([

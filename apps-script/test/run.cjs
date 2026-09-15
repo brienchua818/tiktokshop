@@ -93,7 +93,8 @@ const sandbox = `
         return out;
       },
       put: function (k, v) { CACHE_STATE.store[k] = v },
-      putAll: function (map) { Object.keys(map).forEach(function (k) { CACHE_STATE.store[k] = map[k] }) }
+      putAll: function (map) { Object.keys(map).forEach(function (k) { CACHE_STATE.store[k] = map[k] }) },
+      remove: function (k) { delete CACHE_STATE.store[k] }
     }
   } };
   var UrlFetchApp = { fetch: function () {
@@ -134,6 +135,7 @@ ${src}
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     lineStatusMeaning_, LINE_STATUS_MEANING,
     returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
+    SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
@@ -2541,6 +2543,16 @@ check('a cancelled line stays cancelled even with a return against it', () => {
 check('no refunds at all behaves exactly as before', () => {
   const g = gs.groupVariationSales_([li({})])
   eq(g['9001'].units, 1)
+})
+
+check('the sync interval is one Apps Script will actually accept', () => {
+  // `everyMinutes` takes 1, 5, 10, 15 or 30 and NOTHING else. Two was asked
+  // for, two is not on the list, and the trigger API reports that as an
+  // exception in the editor with no clue what would have worked — which is
+  // exactly the kind of thing a constant should not be able to get wrong.
+  if (gs.SYNC_ALLOWED_MINUTES.indexOf(gs.SYNC_EVERY_MINUTES) < 0) {
+    throw new Error(gs.SYNC_EVERY_MINUTES + ' is not one of ' + gs.SYNC_ALLOWED_MINUTES.join(', '))
+  }
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

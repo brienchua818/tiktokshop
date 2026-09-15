@@ -846,7 +846,17 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
  * read and stays fast; sold is never more than one interval old; and it is
  * true on every phone at once, including one that has been in a pocket.
  */
-var SYNC_EVERY_MINUTES = 2;
+/**
+ * Apps Script accepts 1, 5, 10, 15 or 30. Nothing else.
+ *
+ * Brien asked for two and two is not on the list — `everyMinutes(2)` throws
+ * "The value you passed to everyMinutes was invalid". One is the nearest
+ * allowed value in the direction he wanted, and affordable because a firing
+ * with nothing to report is three property reads plus one TikTok call that
+ * answers empty. Five would have been the lazy read of the error.
+ */
+var SYNC_ALLOWED_MINUTES = [1, 5, 10, 15, 30];
+var SYNC_EVERY_MINUTES = 1;
 var SYNC_WINDOW_MIN = 20;
 var SYNC_ACTIVE_HOURS = 6;
 var SYNC_TRIGGER_FN = 'syncRecentOrders';
@@ -866,6 +876,12 @@ var SYNC_RETURNS_BACKFILL_H = 720;
  * so running it twice does not sync twice as often.
  */
 function installOrderSync() {
+  // Checked here rather than discovered at the trigger API, which reports it
+  // as an exception in the editor with no clue which value is acceptable.
+  if (SYNC_ALLOWED_MINUTES.indexOf(SYNC_EVERY_MINUTES) < 0) {
+    throw fail_('TS-ORD-31', 'SYNC_EVERY_MINUTES is ' + SYNC_EVERY_MINUTES +
+      ', which Apps Script will refuse. It must be one of ' + SYNC_ALLOWED_MINUTES.join(', ') + '.');
+  }
   var removed = 0;
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === SYNC_TRIGGER_FN) {
@@ -1001,6 +1017,36 @@ function changedSince_(orders, sinceEpoch) {
  * version of this feature.
  */
 function syncRecentOrders() {
+  /**
+   * One run at a time.
+   *
+   * At a one-minute trigger a slow run — the first returns pass backfills a
+   * month — is still going when the next fires. Both would fetch and write the
+   * same rows. The writes are keyed and idempotent so nothing corrupts, but
+   * they would queue on the script lock behind each other and spend the shop's
+   * rate limit twice over for one answer.
+   *
+   * A cache entry rather than a property: it expires by itself, so a run
+   * killed by the six-minute limit cannot leave the sync switched off for ever.
+   */
+  var guard = null;
+  try {
+    guard = CacheService.getScriptCache();
+    if (guard && guard.get('sync_running')) return;
+    if (guard) guard.put('sync_running', '1', 300);
+  } catch (e) {
+    // No cache is not a reason to skip the sync, only to lose the guard.
+    guard = null;
+  }
+
+  try {
+    syncRecentOrdersOnce_();
+  } finally {
+    try { if (guard) guard.remove('sync_running'); } catch (e) { /* expires anyway */ }
+  }
+}
+
+function syncRecentOrdersOnce_() {
   var shops;
   try {
     shops = shopsToSync_(lastListedAt_(), Date.now(), SYNC_ACTIVE_HOURS);

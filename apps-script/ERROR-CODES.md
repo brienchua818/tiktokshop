@@ -78,18 +78,19 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-ORD-05` | Orders.gs:134 | The end of the range is before its start. |
 | `TS-ORD-06` | Orders.gs:150 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
 | `TS-ORD-07` | Orders.gs:491 | seller_sku lookup: could not read listing : [ ] |
-| `TS-ORD-08` | Orders.gs:1162 | order line(s) have no identifier from any source ( ) |
+| `TS-ORD-08` | Orders.gs:1208 | order line(s) have no identifier from any source ( ) |
 | `TS-ORD-20` | Orders.gs:772 | Sales cache unavailable: |
 | `TS-ORD-21` | Orders.gs:780 | Could not cache sales for : |
 | `TS-ORD-22` | Product.gs:557 | Could not read sales for : |
-| `TS-ORD-23` | Orders.gs:1008 | Background sync could not read its activity marks: |
-| `TS-ORD-24` | Orders.gs:1085 | Background sync failed for : |
-| `TS-ORD-25` | Orders.gs:1044 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
+| `TS-ORD-23` | Orders.gs:1054 | Background sync could not read its activity marks: |
+| `TS-ORD-24` | Orders.gs:1131 | Background sync failed for : |
+| `TS-ORD-25` | Orders.gs:1090 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
 | `TS-ORD-26` | Orders.gs:600 | Order line statuses this app does not recognise on : , . They are NOT counted as sold. Add them to LINE_STATUS_MEANING once their meaning is confirmed. |
 | `TS-ORD-27` | Orders.gs:562 | order line(s) on carry no creation time, so they are counted in every window rather than none. |
-| `TS-ORD-28` | Orders.gs:1246 | Could not read returns: |
-| `TS-ORD-29` | Orders.gs:1315 | : more than returns changed since ; stopping and keeping what was read. |
-| `TS-ORD-30` | Orders.gs:1080 | : returns sync failed (orders are unaffected): |
+| `TS-ORD-28` | Orders.gs:1292 | Could not read returns: |
+| `TS-ORD-29` | Orders.gs:1361 | : more than returns changed since ; stopping and keeping what was read. |
+| `TS-ORD-30` | Orders.gs:1126 | : returns sync failed (orders are unaffected): |
+| `TS-ORD-31` | Orders.gs:882 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:228 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:488 | Unknown listing: |

@@ -9,6 +9,7 @@ import {
   nextBatch,
   getPhoto,
   needsAttention,
+  removeDraft,
   retryDraft,
   updateDraft,
 } from '../offline/queue'
@@ -16,6 +17,7 @@ import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
 import { toSquareJpeg } from '../capture/camera'
 import {
+  draftsTakenOver,
   driftedDrafts,
   landed,
   mergeRows,
@@ -152,7 +154,6 @@ export default function DraftQueue({
    */
   async function reconcile(state: ListingState) {
     const drifted = driftedDrafts(drafts, state)
-    if (!drifted.length) return
     for (const d of drifted) {
       await updateDraft(d.draft_id, {
         status: 'pushed',
@@ -166,7 +167,25 @@ export default function DraftQueue({
         listing_id: d.listing_id ?? state.listing_id,
       })
     }
-    await onChanged()
+
+    /**
+     * Hand the record over to the backend and stop keeping a copy.
+     *
+     * This is what makes two phones agree. See draftsTakenOver: a draft the
+     * backend has spoken about is described in two places, and two places can
+     * disagree — which is exactly what Brien and Wen Xuan were looking at.
+     *
+     * Deliberately after the drift pass, so a draft corrected to `pushed` a
+     * moment ago is considered on the SAME read rather than lingering until
+     * the next one.
+     */
+    const takenOver = draftsTakenOver(
+      drifted.length ? await allDrafts().then((all) => all.filter((d) => d.listing_id === listingId)) : drafts,
+      state,
+    )
+    for (const d of takenOver) await removeDraft(d.draft_id)
+
+    if (drifted.length || takenOver.length) await onChanged()
   }
 
   // Checked once when there is something to check, and after that on request.

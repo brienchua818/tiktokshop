@@ -42,6 +42,46 @@ export function driftedDrafts(drafts: readonly QueuedDraft[], live: ListingState
 }
 
 /**
+ * Drafts the backend has taken over, which this phone should stop keeping.
+ *
+ * **Why two phones showed different rows.**
+ *
+ * The list each phone draws is the server's variations plus that phone's own
+ * drafts. A draft is written locally when a SKU is added, and `removeDraft` is
+ * called from exactly one place — the operator's delete button. So nothing
+ * ever removed a draft once it had been pushed, and every phone accumulated a
+ * permanent private residue of everything it had ever listed. Brien's phone
+ * carried sixteen from an old test run; Wen Xuan's carried her own. Neither
+ * list was wrong about the server, and neither matched the other.
+ *
+ * A draft exists to survive a push that has not happened yet. Once the backend
+ * holds the record, the draft has no job left: keeping it means the same
+ * variation is described in two places, and the two can disagree.
+ *
+ * So a pushed draft is deleted as soon as the backend has SPOKEN about it —
+ * either it is in the listing state (confirmed), or the read is newer than the
+ * push and it is absent (removed, which the Removed tab now records instead).
+ * Both are the backend taking ownership. What is NOT pruned is anything still
+ * in flight: queued, uploading, failed, or pushed so recently that no read has
+ * covered it. Those are exactly the drafts the queue exists for.
+ */
+export function draftsTakenOver(
+  drafts: readonly QueuedDraft[],
+  live: ListingState | null,
+): QueuedDraft[] {
+  if (!live) return []
+  return drafts.filter((d) => {
+    if (d.status !== 'pushed') return false
+    if (landed(live, d.identifier)) return true
+    // Absent. Only meaningful once a read has happened since the push — the
+    // same rule isRemoved uses, and for the same reason: a SKU pushed after
+    // the last refresh is legitimately missing from it.
+    const pushedAt = d.pushed_at ?? d.created_at
+    return Boolean(pushedAt) && pushedAt < live.checked_at
+  })
+}
+
+/**
  * One row of the queue as the screen shows it: either a draft on this phone,
  * or a variation the backend or TikTok knows about that this phone has no
  * draft for — pushed from another phone, or added in Seller Center.

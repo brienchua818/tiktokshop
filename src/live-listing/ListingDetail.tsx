@@ -120,9 +120,26 @@ export default function ListingDetail({
    * from adding a SKU because the network is down would be a worse failure
    * than a gap in the numbering.
    */
+  /**
+   * Everything already taken, from every source that knows.
+   *
+   * `listedSkus` is fetched once when the screen opens, so on its own it goes
+   * stale the moment anybody lists anything. That was survivable while this
+   * phone also kept a draft for every SKU it had ever pushed — but those
+   * drafts are now handed to the backend and deleted, so the local list
+   * shrinks as the listing grows. Without the live variations in here, the
+   * fallback would start handing out numbers that are already on TikTok.
+   *
+   * The backend's reservation is still what is used when it answers. This is
+   * what happens when it does not.
+   */
+  const takenIdentifiers = useMemo(
+    () => [...listedSkus, ...draftIdentifiers, ...(live?.variants ?? []).map((v) => v.identifier)],
+    [listedSkus, draftIdentifiers, live],
+  )
   const local = useMemo(
-    () => nextIdentifier(listedSkus, draftIdentifiers, prefix),
-    [listedSkus, draftIdentifiers, prefix],
+    () => nextIdentifier(takenIdentifiers, [], prefix),
+    [takenIdentifiers, prefix],
   )
   const [claimed, setClaimed] = useState<{ prefix: string; seq: number } | null>(null)
   const next = claimed && claimed.prefix === local.prefix ? claimed : local

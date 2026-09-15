@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { ListingState, LiveVariant } from '../lib/api'
 import type { QueuedDraft } from '../offline/queue'
 import {
+  draftsTakenOver,
   driftedDrafts,
   isRemoved,
   landed,
@@ -240,6 +241,71 @@ describe('splitRows', () => {
       const d = draft({ identifier: 'B78', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
       expect(splitRows(mergeRows([d], reviewing), reviewing).removed).toHaveLength(0)
     })
+  })
+})
+
+/**
+ * A draft the backend has taken over must stop being kept on the phone.
+ *
+ * This is what made two phones show different lists. Each phone renders the
+ * server's variations plus its own drafts, and nothing removed a draft once it
+ * had been pushed — so every phone carried a permanent private residue and no
+ * two matched. A draft exists to survive a push that has not happened yet;
+ * once the backend holds the record, keeping it means the same variation is
+ * described twice and the two can disagree.
+ */
+describe('draftsTakenOver', () => {
+  const live = state([
+    variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 }),
+  ])
+
+  it('hands over a pushed draft the backend confirms', () => {
+    const d = draft({ identifier: 'B74', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+    expect(draftsTakenOver([d], live).map((x) => x.identifier)).toEqual(['B74'])
+  })
+
+  it('hands over a pushed draft the backend says is gone', () => {
+    // Absent from a read taken after the push. The Removed tab is the record
+    // now, so the phone has nothing left to hold.
+    const d = draft({ identifier: 'B99', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+    expect(draftsTakenOver([d], live).map((x) => x.identifier)).toEqual(['B99'])
+  })
+
+  // The other half, and the half that matters: a draft still in flight is
+  // exactly what the queue exists for, and losing one loses a SKU.
+  it('keeps a draft pushed after the last read', () => {
+    const d = draft({ identifier: 'B99', status: 'pushed', pushed_at: '2026-09-15T10:30:00.000Z' })
+    expect(draftsTakenOver([d], live)).toHaveLength(0)
+  })
+
+  it('keeps queued, uploading and failed drafts', () => {
+    for (const status of ['queued', 'uploading', 'failed'] as const) {
+      const d = draft({ identifier: 'B99', status, pushed_at: undefined })
+      expect(draftsTakenOver([d], live)).toHaveLength(0)
+    }
+  })
+
+  it('keeps everything while the backend has not answered', () => {
+    const d = draft({ identifier: 'B74', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+    expect(draftsTakenOver([d], null)).toHaveLength(0)
+  })
+
+  it('leaves the two phones with the same list', () => {
+    // The whole point, stated as a test. Two phones, different drafts, one
+    // backend: after each hands over what the backend holds, both render the
+    // same rows from the same source.
+    const mine = draft({ draft_id: 'a', identifier: 'B74', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+    const hers = draft({ draft_id: 'b', identifier: 'B75', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+    const shared = state([
+      variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 }),
+      variant({ identifier: 'B75', on_tiktok: true, under_review: false, stock_available: 3 }),
+    ])
+    expect(draftsTakenOver([mine], shared)).toHaveLength(1)
+    expect(draftsTakenOver([hers], shared)).toHaveLength(1)
+    const afterMine = mergeRows([], shared).map((r) => (r.kind === 'remote' ? r.live.identifier : ''))
+    const afterHers = mergeRows([], shared).map((r) => (r.kind === 'remote' ? r.live.identifier : ''))
+    expect(afterMine).toEqual(afterHers)
+    expect(afterMine.sort()).toEqual(['B74', 'B75'])
   })
 })
 

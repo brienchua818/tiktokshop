@@ -118,6 +118,48 @@ export async function updateDraft(
   return merged
 }
 
+/**
+ * How much unpushed work this device is holding.
+ *
+ * Asked before a reset, because a reset that silently discards a SKU somebody
+ * spoke on air is worse than any problem it could fix.
+ */
+export async function unpushedCount(): Promise<number> {
+  const all = await allDrafts()
+  return all.filter((d) => d.status !== 'pushed').length
+}
+
+/**
+ * Throw away this device's local state and start again from the backend.
+ *
+ * A last resort, not a routine. Drafts are now handed to the backend as soon
+ * as it has the record, so a phone should not accumulate anything to clear —
+ * this exists for the case where one has anyway, and the alternative is
+ * reinstalling the app on a factory floor.
+ *
+ * It refuses while anything is unpushed. Those drafts are the only copy: the
+ * backend has never seen them, and clearing them loses the SKU.
+ */
+export async function resetDevice(): Promise<{ cleared: number }> {
+  const unpushed = await unpushedCount()
+  if (unpushed > 0) {
+    throw new Error(
+      `${unpushed} SKU${unpushed === 1 ? '' : 's'} on this phone ${unpushed === 1 ? 'has' : 'have'} not reached ` +
+        'TikTok yet. Let them finish first \u2014 clearing now is the only copy gone.',
+    )
+  }
+  const all = await allDrafts()
+  const db = await openDb()
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction([STORE, PHOTOS], 'readwrite')
+    transaction.objectStore(STORE).clear()
+    transaction.objectStore(PHOTOS).clear()
+    transaction.oncomplete = () => resolve()
+    transaction.onerror = () => reject(transaction.error ?? new Error('Could not clear the local database.'))
+  })
+  return { cleared: all.length }
+}
+
 export async function removeDraft(draftId: string): Promise<void> {
   await tx(STORE, 'readwrite', (store) => store.delete(draftId))
   await tx(PHOTOS, 'readwrite', (store) => store.delete(draftId))

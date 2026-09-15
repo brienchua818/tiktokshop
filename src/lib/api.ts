@@ -265,8 +265,43 @@ export interface SyncResult {
   to: string
 }
 
+/**
+ * The six figures a purchase order shows, plus the four that explain them.
+ *
+ * `units` and `revenue` are the NET figures — what was kept. They keep their
+ * old names because every screen already reads them, and they are assigned
+ * from the same tally the export is built from rather than counted separately.
+ *
+ * Net is total minus EVERY other bucket, not just cancelled. A refunded or
+ * held unit that appeared in neither column is a unit that vanished off the
+ * screen, which is how "6 sold of 5" happened in the first place.
+ */
+export interface Tally {
+  /** Everything a buyer put in a basket. */
+  ordered_units: number
+  ordered_value: number
+  /** Kept. `units` and `revenue` are these two under their old names. */
+  sold_units: number
+  sold_value: number
+  /** Cancelled or never paid for. TikTok returns these to stock. */
+  cancelled_units: number
+  cancelled_value: number
+  /** Bought, then given back. No order status can show this. */
+  refunded_units: number
+  refunded_value: number
+  /** A return request is open and undecided. */
+  at_risk_units: number
+  at_risk_value: number
+  /** Paid, inside the buyer's remorse window, cancellable by them alone. */
+  held_units: number
+  held_value: number
+  /** A status this app does not recognise. Never counted as sold. */
+  unknown_units: number
+  unknown_value: number
+}
+
 /** One listing's takings inside the window. */
-export interface ListingTotals {
+export interface ListingTotals extends Partial<Tally> {
   listing_id: string
   product_name: string
   order_count: number
@@ -285,9 +320,16 @@ export interface OrderSummary {
   total_orders: number
   total_units: number
   total_revenue: number
+  /**
+   * The window's figures summed, so a screen never re-adds them itself.
+   *
+   * Optional because a backend pasted later than the app was deployed does not
+   * send it. Read through `tallyOf` rather than dereferenced.
+   */
+  totals?: Partial<Tally>
 }
 
-export interface VariationTotals {
+export interface VariationTotals extends Partial<Tally> {
   seller_sku: string
   variation: string
   units: number
@@ -304,6 +346,8 @@ export interface ListingOrders {
   order_count: number
   total_units: number
   total_revenue: number
+  /** The listing's figures summed. Optional for the same reason as above. */
+  totals?: Partial<Tally>
 }
 
 export interface ExportRequest extends DateWindow {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { bucketText, tallyOf } from './tally'
 import {
   api,
   ApiError,
@@ -372,6 +373,13 @@ export default function Orders({ shop }: { shop: Shop }) {
                         · {l.unsold_units} cancelled or unpaid
                       </span>
                     )}
+                    {/* Refunded, returning, on hold, unrecognised. A unit in
+                        one of these left the sold figure without entering the
+                        cancelled one, so without this line it is simply not on
+                        the page — which is how a count stops reconciling. */}
+                    {bucketText(tallyOf(l)) && (
+                      <span className="text-warn/80"> · {bucketText(tallyOf(l))}</span>
+                    )}
                     {l.latest_order_sgt && (
                       <span className="text-ghost"> · last {l.latest_order_sgt}</span>
                     )}
@@ -627,6 +635,9 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
                   {v.unsold_units > 0 && (
                     <span className="text-warn/70"> · {v.unsold_units} cancelled</span>
                   )}
+                  {bucketText(tallyOf(v)) && (
+                    <span className="text-warn/70"> · {bucketText(tallyOf(v))}</span>
+                  )}
                 </td>
                 <td className="py-1.5 text-right text-fg2">${v.revenue.toFixed(2)}</td>
               </tr>
@@ -637,10 +648,16 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
       <p className="text-xs text-faint">
         {detail.total_units} units across {detail.order_count} orders · $
         {detail.total_revenue.toFixed(2)}
-        {detail.variations.some((v) => v.unsold_units > 0) && (
+        {tallyOf(detail.totals).ordered_units > tallyOf(detail.totals).sold_units && (
           // No longer explaining a notation — the cells say it themselves. This
-          // says the one thing the cells cannot: that the two never overlap.
-          <span className="text-ghost"> · cancelled and unpaid units are not in the sold figure</span>
+          // says the one thing the cells cannot: that the buckets never overlap,
+          // and that the sold figure is what is left after all of them.
+          <span className="text-ghost">
+            {' '}
+            · {tallyOf(detail.totals).ordered_units} ordered, of which{' '}
+            {tallyOf(detail.totals).ordered_units - tallyOf(detail.totals).sold_units} did not
+            stick
+          </span>
         )}
       </p>
     </div>

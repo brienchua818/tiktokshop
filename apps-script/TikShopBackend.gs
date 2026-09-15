@@ -4464,7 +4464,26 @@ function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
     return t >= fromEpoch && t < toEpoch;
   });
 
-  var out = summariseItems_(items);
+  /**
+   * Refunds, read before anything is counted.
+   *
+   * The orders screen and the export used to count a refunded unit as sold,
+   * because the order status cannot see a refund — see SOLD_IS_BEFORE_REFUNDS.
+   * The listing screen stopped doing that on 15 Sep; this side had not.
+   */
+  var refunds = refundIndex_(readAll_(TAB_RETURNS).filter(function (r) {
+    return !shopId || String(r.shop_id) === String(shopId);
+  }));
+
+  var out = summariseItems_(items, refunds);
+
+  var unknown = Object.keys(out.totals.unknown_statuses);
+  if (unknown.length) {
+    warn_('TS-ORD-33', 'Order line statuses this app does not recognise in this window: ' +
+      unknown.join(', ') + '. They are NOT counted as sold, so the orders screen ' +
+      'and the export short by their units rather than overpaying. Add them to ' +
+      'LINE_STATUS_MEANING once their meaning is confirmed.');
+  }
   out.from = fromDate + ' ' + (fromTime || '00:00');
   out.to = toDate + ' ' + (toTime || '23:59');
   return out;
@@ -4476,37 +4495,30 @@ function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
  * Separated from the Sheet read so it can be tested: these numbers become a
  * purchase order sent to a factory, and an arithmetic mistake here is money.
  */
-function summariseItems_(items) {
+function summariseItems_(items, refunds) {
   var byListing = {};
   items.forEach(function (r) {
     var key = String(r.listing_id || 'unknown');
     if (!byListing[key]) {
-      byListing[key] = {
-        listing_id: key,
-        product_name: String(r.product_name || ''),
-        orders: {},
-        units: 0,
-        revenue: 0,
-        unsold_units: 0,
-        latest_epoch: 0
-      };
+      var fresh = emptyTally_();
+      fresh.listing_id = key;
+      fresh.product_name = String(r.product_name || '');
+      fresh.orders = {};
+      fresh.latest_epoch = 0;
+      byListing[key] = fresh;
     }
     var g = byListing[key];
     g.orders[String(r.order_id)] = 1;
 
-    var qty = Number(r.quantity || 0);
-    var line = Number(r.sale_price || 0) * qty;
-    var status = String(r.status || '').toUpperCase();
+    /**
+     * The same function the listing screen counts with.
+     *
+     * This was its own loop over a three-status denylist, so a refunded unit
+     * was sold here and not sold there, and the export — built from this side
+     * — was the one paying for it. Two aggregators, two rules, one payout.
+     */
+    addLine_(g, r, refunds);
 
-    // Cancelled and unpaid lines are counted separately rather than dropped.
-    // A factory asking "why is this less than we called out" deserves the
-    // number, and dropping them silently makes the export unexplainable.
-    if (UNSOLD_STATUSES[status]) {
-      g.unsold_units += qty;
-    } else {
-      g.units += qty;
-      g.revenue += line;
-    }
     if (Number(r.created_epoch || 0) > g.latest_epoch) {
       g.latest_epoch = Number(r.created_epoch || 0);
     }
@@ -4514,33 +4526,31 @@ function summariseItems_(items) {
   });
 
   var listings = Object.keys(byListing).map(function (k) {
-    var g = byListing[k];
-    return {
-      listing_id: g.listing_id,
-      product_name: g.product_name,
-      order_count: Object.keys(g.orders).length,
-      units: g.units,
-      unsold_units: g.unsold_units,
-      revenue: Math.round(g.revenue * 100) / 100,
-      latest_order_sgt: g.latest_epoch ? sgtStampFromEpoch_(g.latest_epoch) : ''
-    };
-  }).sort(function (a, b) { return b.revenue - a.revenue; });
+    var g = roundTally_(byListing[k]);
+    g.order_count = Object.keys(g.orders).length;
+    g.latest_order_sgt = g.latest_epoch ? sgtStampFromEpoch_(g.latest_epoch) : '';
+    delete g.orders;
+    return g;
+  }).sort(function (a, b) { return b.sold_value - a.sold_value; });
 
   var orderIds = {};
   items.forEach(function (r) { orderIds[String(r.order_id)] = 1; });
 
-  return {
+  var totals = listings.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
+  roundTally_(totals);
+
+  var out = {
     listings: listings,
     // Distinct orders, not the sum of the per-listing counts: a basket holding
     // two listings is ONE order, and summing would report it as two.
     total_orders: Object.keys(orderIds).length,
     // Summed from line items, so a basket holding two listings contributes to
     // both without being counted twice here.
-    total_units: listings.reduce(function (n, l) { return n + l.units; }, 0),
-    total_revenue: Math.round(
-      listings.reduce(function (n, l) { return n + l.revenue; }, 0) * 100
-    ) / 100
+    total_units: totals.sold_units,
+    total_revenue: totals.sold_value,
+    totals: totals
   };
+  return out;
 }
 
 /**
@@ -4799,8 +4809,109 @@ function variationSales_(listingId, fromEpoch, toEpoch, known_) {
  * and wrong sold figure: the correct arithmetic was not reachable from
  * anywhere else.
  */
+/**
+ * One tally shape, and one place that fills it.
+ *
+ * `groupVariationSales_` and `summariseItems_` counted the same line items by
+ * two different rules: the first got the refund model and the four-way status
+ * table on 15 Sep, the second was still on the old three-status denylist. So
+ * the listing screen and the ORDERS screen — and the export built from it —
+ * disagreed about the same units, with the export on the wrong side. That is
+ * the second time the two ends of this app have drifted apart on a payout
+ * figure, so they now share a function rather than a convention.
+ *
+ * Every bucket carries units AND value, because "why is the money less than
+ * the units suggest" is the question a factory actually asks, and answering it
+ * needs both halves of every row.
+ */
+function emptyTally_() {
+  return {
+    /** Everything a buyer put in a basket. sold + cancelled + refunded + at risk + held + unknown. */
+    ordered_units: 0, ordered_value: 0,
+    /** Kept. The number a factory is paid on. */
+    sold_units: 0, sold_value: 0,
+    /** Cancelled or never paid for. TikTok returns these to stock. */
+    cancelled_units: 0, cancelled_value: 0,
+    /** Bought, then given back. Invisible in any order status — see RETURN_STATUS_MEANING. */
+    refunded_units: 0, refunded_value: 0,
+    /** A return request is open and undecided. */
+    at_risk_units: 0, at_risk_value: 0,
+    /** Paid, inside the buyer's remorse window, cancellable by them alone. */
+    held_units: 0, held_value: 0,
+    /** A status this app does not recognise. Never counted as sold. */
+    unknown_units: 0, unknown_value: 0,
+    unknown_statuses: {}
+  };
+}
+
+/** Add one order line to a tally, by the one rule. */
+function addLine_(tally, row, refunds) {
+  // One line item is one unit; a blank quantity is one, not none. See the note
+  // in groupVariationSales_ — zero made a legacy row vanish from every column.
+  var qty = Number(row.quantity);
+  if (!isFinite(qty) || qty <= 0) qty = 1;
+  var value = Number(row.sale_price || 0) * qty;
+
+  var meaning = lineStatusMeaning_(row.status);
+  var refund = (refunds || {})[String(row.line_item_id || '')];
+  if (refund === 'refunded') meaning = 'refunded';
+  else if (refund === 'at_risk' && meaning === 'sold') meaning = 'at_risk';
+
+  tally.ordered_units += qty;
+  tally.ordered_value += value;
+
+  if (meaning === 'sold') { tally.sold_units += qty; tally.sold_value += value; }
+  else if (meaning === 'unsold') { tally.cancelled_units += qty; tally.cancelled_value += value; }
+  else if (meaning === 'refunded') { tally.refunded_units += qty; tally.refunded_value += value; }
+  else if (meaning === 'at_risk') { tally.at_risk_units += qty; tally.at_risk_value += value; }
+  else if (meaning === 'held') { tally.held_units += qty; tally.held_value += value; }
+  else {
+    tally.unknown_units += qty;
+    tally.unknown_value += value;
+    tally.unknown_statuses[String(row.status || '(blank)')] = true;
+  }
+  return meaning;
+}
+
+/**
+ * The names the rest of the app already reads, kept in step with the tally.
+ *
+ * `units`, `revenue` and `unsold_units` predate the tally and are read by the
+ * listing screen, the orders screen and the export. They are assigned FROM the
+ * tally rather than counted alongside it, so there is exactly one place a unit
+ * can be put in the wrong bucket.
+ */
+function withLegacyNames_(t) {
+  t.units = t.sold_units;
+  t.revenue = t.sold_value;
+  t.unsold_units = t.cancelled_units;
+  return t;
+}
+
+/** Round every money figure on a tally, so the aliases cannot drift from it. */
+function roundTally_(t) {
+  ['ordered_value', 'sold_value', 'cancelled_value', 'refunded_value',
+   'at_risk_value', 'held_value', 'unknown_value'].forEach(function (f) {
+    t[f] = Math.round(t[f] * 100) / 100;
+  });
+  return withLegacyNames_(t);
+}
+
+/** Add one tally into another. Used for the per-listing and export totals. */
+function addTally_(into, from) {
+  ['ordered_units', 'ordered_value', 'sold_units', 'sold_value',
+   'cancelled_units', 'cancelled_value', 'refunded_units', 'refunded_value',
+   'at_risk_units', 'at_risk_value', 'held_units', 'held_value',
+   'unknown_units', 'unknown_value'].forEach(function (f) {
+    into[f] += from[f] || 0;
+  });
+  Object.keys(from.unknown_statuses || {}).forEach(function (st) {
+    into.unknown_statuses[st] = true;
+  });
+  return into;
+}
+
 function groupVariationSales_(items, refunds) {
-  var refunded = refunds || {};
   var byVariation = {};
   items.forEach(function (r) {
     // sku_id first: seller_sku is empty on anything this app did not list,
@@ -4809,79 +4920,23 @@ function groupVariationSales_(items, refunds) {
     // purchase order.
     var key = String(r.sku_id || r.seller_sku || r.variation || '?');
     if (!byVariation[key]) {
-      byVariation[key] = {
-        sku_id: String(r.sku_id || ''),
-        seller_sku: String(r.seller_sku || ''),
-        variation: String(r.variation || ''),
-        sku_image: String(r.sku_image || ''),
-        units: 0,
-        unsold_units: 0,
-        /** Paid but still cancellable by the buyer alone. ON_HOLD. */
-        held_units: 0,
-        /** A status this app does not recognise. Never counted as sold. */
-        unknown_units: 0,
-        /** The buyer has the money back. Was counted as sold until 15 Sep. */
-        refunded_units: 0,
-        /** A return or refund request is open and undecided. */
-        at_risk_units: 0,
-        unknown_statuses: {},
-        revenue: 0,
-        price: String(r.sale_price || '')
-      };
+      var fresh = emptyTally_();
+      fresh.sku_id = String(r.sku_id || '');
+      fresh.seller_sku = String(r.seller_sku || '');
+      fresh.variation = String(r.variation || '');
+      fresh.sku_image = String(r.sku_image || '');
+      fresh.price = String(r.sale_price || '');
+      byVariation[key] = fresh;
     }
     var g = byVariation[key];
     if (!g.sku_image && r.sku_image) g.sku_image = String(r.sku_image);
     if (!g.seller_sku && r.seller_sku) g.seller_sku = String(r.seller_sku);
-
-    /**
-     * One line item is one unit, so a blank quantity is one, not none.
-     *
-     * This read `Number(r.quantity || 0)`, which turned a row written before
-     * the column existed — padded with '' when the headers were migrated —
-     * into zero. Such a row then contributed nothing to sold, nothing to
-     * cancelled and nothing to revenue: it disappeared from the purchase order
-     * entirely rather than appearing in either column. Vanishing is the one
-     * outcome a number a factory is paid on must never have.
-     */
-    var qty = Number(r.quantity);
-    if (!isFinite(qty) || qty <= 0) qty = 1;
-
-    var meaning = lineStatusMeaning_(r.status);
-
-    /**
-     * A refund overrides the order status, because the order status cannot see
-     * it.
-     *
-     * A refunded line still reads DELIVERED or COMPLETED — TikTok has no
-     * status for "refunded" at all. So the refund is looked up separately and
-     * applied here, and a unit the buyer has been given the money back for
-     * stops counting as sold however healthy the order looks.
-     *
-     * An open request is neither: it is not yet lost, and calling it sold
-     * would put money in a payout that may be handed back next week.
-     */
-    var refund = refunded[String(r.line_item_id || '')];
-    if (refund === 'refunded') meaning = 'refunded';
-    else if (refund === 'at_risk' && meaning === 'sold') meaning = 'at_risk';
-
-    if (meaning === 'sold') {
-      g.units += qty;
-      g.revenue += Number(r.sale_price || 0) * qty;
-    } else if (meaning === 'unsold') {
-      g.unsold_units += qty;
-    } else if (meaning === 'held') {
-      // Paid, inside the buyer's remorse window, cancellable without the
-      // seller's agreement. Committed stock; not yet money.
-      g.held_units += qty;
-    } else if (meaning === 'refunded') {
-      g.refunded_units += qty;
-    } else if (meaning === 'at_risk') {
-      g.at_risk_units += qty;
-    } else {
-      g.unknown_units += qty;
-      g.unknown_statuses[String(r.status || '(blank)')] = true;
-    }
+    // One rule, one place. Quantity handling, the four-way status table and
+    // the refund override all live in addLine_ — see the note on emptyTally_
+    // for why this is no longer a loop with its own arithmetic.
+    addLine_(g, r, refunds);
   });
+  Object.keys(byVariation).forEach(function (k) { withLegacyNames_(byVariation[k]); });
   return byVariation;
 }
 
@@ -4988,13 +5043,22 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
   var items = grouped.items;
   var byVariation = grouped.byVariation;
   var rows = Object.keys(byVariation).map(function (k) {
-    var g = byVariation[k];
-    g.revenue = Math.round(g.revenue * 100) / 100;
-    return g;
+    return roundTally_(byVariation[k]);
   }).sort(function (a, b) {
     // Identifier order, so the export reads in the order the stream ran.
     return String(a.seller_sku).localeCompare(String(b.seller_sku), 'en', { numeric: true });
   });
+
+  /**
+   * Totals summed from the rows, not counted again.
+   *
+   * Every figure on the TOTAL line of a factory's sheet is the sum of the
+   * column above it, by construction. The old code summed `units` and
+   * `revenue` by hand and left every other column to the export to total for
+   * itself — which is how a sheet ends up with a TOTAL that does not match.
+   */
+  var totals = rows.reduce(function (t, r) { return addTally_(t, r); }, emptyTally_());
+  roundTally_(totals);
 
   return {
     listing_id: String(listingId),
@@ -5004,8 +5068,9 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     order_count: Object.keys(items.reduce(function (m, r) {
       m[String(r.order_id)] = 1; return m;
     }, {})).length,
-    total_units: rows.reduce(function (n, r) { return n + r.units; }, 0),
-    total_revenue: Math.round(rows.reduce(function (n, r) { return n + r.revenue; }, 0) * 100) / 100
+    total_units: totals.sold_units,
+    total_revenue: totals.sold_value,
+    totals: totals
   };
 }
 
@@ -6170,6 +6235,78 @@ function exportListing_(listingId, actor) {
  * > reason — a purchase order that cannot be reproduced from its own contents
  * > is not one anyone should sign.
  */
+/**
+ * The columns a purchase order shows for one tally, and the values under them.
+ *
+ * Brien, 15 Sep: *"It should show on each variation or listing: total sold,
+ * total cancelled, net sold, total sales, cancelled sales, net sales."* Those
+ * six are always here, under his names.
+ *
+ * The other four buckets — refunded, awaiting return, on hold, unrecognised —
+ * appear ONLY when something in this export is in one of them. They have to be
+ * able to appear, because the six alone stop adding up the moment one is not
+ * empty: net sold is total sold minus EVERY bucket, not just cancelled. A
+ * sheet where the subtraction visibly fails and no column explains why is
+ * worse than a wider sheet, and this one is paid against.
+ *
+ * One spec, used by both the Summary sheet and every factory's sheet, so the
+ * two cannot show different columns for the same figures.
+ */
+var TALLY_COLUMNS = [
+  { key: 'ordered_units', label: 'Total sold', always: true },
+  { key: 'cancelled_units', label: 'Cancelled', always: true },
+  { key: 'refunded_units', label: 'Refunded' },
+  { key: 'at_risk_units', label: 'Awaiting return' },
+  { key: 'held_units', label: 'On hold' },
+  { key: 'unknown_units', label: 'Unrecognised' },
+  { key: 'sold_units', label: 'Net sold', always: true },
+  { key: 'ordered_value', label: 'Total sales (SGD)', always: true, money: true },
+  { key: 'cancelled_value', label: 'Cancelled sales (SGD)', always: true, money: true },
+  { key: 'refunded_value', label: 'Refunded sales (SGD)', money: true, showWith: 'refunded_units' },
+  { key: 'at_risk_value', label: 'Awaiting return (SGD)', money: true, showWith: 'at_risk_units' },
+  { key: 'held_value', label: 'On hold (SGD)', money: true, showWith: 'held_units' },
+  { key: 'unknown_value', label: 'Unrecognised (SGD)', money: true, showWith: 'unknown_units' },
+  { key: 'sold_value', label: 'Net sales (SGD)', always: true, money: true }
+];
+
+/** Which of those columns this export needs. Pure, so it is asserted. */
+function tallyColumns_(tallies) {
+  var live = {};
+  (tallies || []).forEach(function (t) {
+    TALLY_COLUMNS.forEach(function (c) {
+      if (Number((t || {})[c.key] || 0) !== 0) live[c.key] = true;
+    });
+  });
+  return TALLY_COLUMNS.filter(function (c) {
+    return c.always || !!live[c.showWith || c.key];
+  });
+}
+
+function tallyHeader_(cols) {
+  return cols.map(function (c) { return c.label; });
+}
+
+function tallyValues_(cols, t) {
+  return cols.map(function (c) {
+    var n = Number((t || {})[c.key] || 0);
+    return c.money ? round2_(n) : n;
+  });
+}
+
+/**
+ * How net sold was arrived at, in words, for whoever signs the sheet off.
+ *
+ * Written from the columns actually present, so it can never describe a
+ * subtraction the sheet does not show.
+ */
+function netExplainer_(cols) {
+  var taken = cols.filter(function (c) {
+    return !c.money && c.key !== 'ordered_units' && c.key !== 'sold_units';
+  }).map(function (c) { return c.label.toLowerCase(); });
+  return 'Net sold = total sold \u2212 ' + taken.join(' \u2212 ') +
+    '.   Net sales is the same subtraction in money, and is what the factory is paid on.';
+}
+
 function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
                        costDivisor, actor) {
   var shop = shopById_(shopId);
@@ -6219,6 +6356,10 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
   var photosPlaced = 0;
   var photosMissing = 0;
+  // Chosen once, so the line that explains the subtraction and the columns
+  // that perform it can never describe different sheets.
+  var sumCols = tallyColumns_(chosen);
+
   var temp = SpreadsheetApp.create('tikshop-orders-temp');
   try {
     var book = temp;
@@ -6231,6 +6372,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       [window],
       [divisor ? 'Cost = selling price / ' + divisor : 'Selling prices only, no cost column'],
       ['Requested by ' + actor + ' on ' + sgtStamp_()],
+      [netExplainer_(sumCols)],
       ['']
     ];
 
@@ -6274,14 +6416,18 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // The id is a link (HYPERLINK survives the xlsx conversion; a rich-text
     // link may not) and the URL is also written out in plain text, so it can
     // be copied from a phone or a printout where a link cannot be tapped.
-    var sumHeader = ['Listing', 'TikTok listing ID', 'Listing URL', 'Orders', 'Units', 'Revenue (SGD)'];
-    if (divisor) sumHeader.push('Cost (SGD)');
+    var sumHeader = ['Listing', 'TikTok listing ID', 'Listing URL', 'Orders']
+      .concat(tallyHeader_(sumCols));
+    // Cost follows NET sales, not total: the factory is paid for what was
+    // kept. Naming it "Net cost" says so, now that three sales columns sit
+    // beside it and an unqualified "Cost" would not say which one it came from.
+    if (divisor) sumHeader.push('Net cost (SGD)');
     var sumRows = chosen.map(function (l) {
       var row = [
         l.product_name || l.listing_id, listingLinkFormula_(l.listing_id),
-        listingUrl_(l.listing_id), l.order_count, l.units, round2_(l.revenue)
-      ];
-      if (divisor) row.push(round2_(l.revenue / divisor));
+        listingUrl_(l.listing_id), l.order_count
+      ].concat(tallyValues_(sumCols, l));
+      if (divisor) row.push(round2_(l.sold_value / divisor));
       return row;
     });
 
@@ -6291,12 +6437,11 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
     // Totals from the source figures, not from row positions, so adding a
     // column here cannot silently sum the wrong one.
-    var sum = function (f) { return chosen.reduce(function (n, l) { return n + f(l); }, 0); };
+    var sumTotals = chosen.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
     var totalRow = ['TOTAL', '', '',
-      sum(function (l) { return l.order_count; }),
-      sum(function (l) { return l.units; }),
-      round2_(sum(function (l) { return l.revenue; }))];
-    if (divisor) totalRow.push(round2_(sum(function (l) { return l.revenue; }) / divisor));
+      chosen.reduce(function (n, l) { return n + l.order_count; }, 0)
+    ].concat(tallyValues_(sumCols, sumTotals));
+    if (divisor) totalRow.push(round2_(sumTotals.sold_value / divisor));
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -6310,17 +6455,27 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       var name = safeName_(l.product_name || l.listing_id).slice(0, 90) || l.listing_id;
       var s2 = book.insertSheet(uniqueSheetName_(book, name));
 
-      var itemHeader = ['Photo', 'SKU', 'Variation', 'Units', 'Unit price (SGD)', 'Revenue (SGD)'];
-      if (divisor) itemHeader.push('Unit cost (SGD)', 'Cost (SGD)');
-      itemHeader.push('Cancelled / unpaid units');
+      // Columns from the same spec as the Summary sheet, chosen from THIS
+      // listing's rows — a factory with no refunds is not shown a refund
+      // column just because another factory in the same export had one.
+      var itemCols = tallyColumns_(detail.variations);
+      var itemHeader = ['Photo', 'SKU', 'Variation', 'Unit price (SGD)']
+        .concat(tallyHeader_(itemCols));
+      if (divisor) itemHeader.push('Unit cost (SGD)', 'Net cost (SGD)');
+
+      var unitPriceOf_ = function (v) {
+        // Per unit of what was ORDERED, so cancelling a unit cannot move the
+        // price. Dividing net sales by net units gives the same answer while
+        // both are non-zero and a wrong one the moment a line is cancelled at
+        // a different price.
+        return v.ordered_units ? v.ordered_value / v.ordered_units : Number(v.price || 0);
+      };
 
       var itemRows = detail.variations.map(function (v) {
-        var unitPrice = v.units ? v.revenue / v.units : Number(v.price || 0);
-        var row = [
-          '', v.seller_sku || '', v.variation, v.units, round2_(unitPrice), round2_(v.revenue)
-        ];
-        if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.revenue / divisor));
-        row.push(v.unsold_units);
+        var unitPrice = unitPriceOf_(v);
+        var row = ['', v.seller_sku || '', v.variation, round2_(unitPrice)]
+          .concat(tallyValues_(itemCols, v));
+        if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.sold_value / divisor));
         return row;
       });
 
@@ -6328,6 +6483,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         [l.product_name || l.listing_id],
         ['TikTok listing ' + l.listing_id + '   ·   ' + window],
         [listingLinkFormula_(l.listing_id, listingUrl_(l.listing_id))],
+        [netExplainer_(itemCols)],
         ['']
       ];
       s2.getRange(1, 1, top.length, 1).setValues(top);
@@ -6339,9 +6495,11 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
       }
 
-      var tot = ['', 'TOTAL', '', detail.total_units, '', round2_(detail.total_revenue)];
-      if (divisor) tot.push('', round2_(detail.total_revenue / divisor));
-      tot.push(detail.variations.reduce(function (n, v) { return n + v.unsold_units; }, 0));
+      // Every figure on this line is the sum of the column above it, taken
+      // from the same spec that wrote the column. Adding a column can no
+      // longer leave a TOTAL that does not match it.
+      var tot = ['', 'TOTAL', '', ''].concat(tallyValues_(itemCols, detail.totals));
+      if (divisor) tot.push('', round2_(detail.totals.sold_value / divisor));
       s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
         .setValues([tot]).setFontWeight('bold');
 
@@ -6920,4 +7078,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'f2e2fd0 2026-09-15';
+var BACKEND_BUILD = '212a1e9-dirty 2026-09-15';

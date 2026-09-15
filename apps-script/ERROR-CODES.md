@@ -55,9 +55,9 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-API-04` | Api.gs:26 | took s |
 | `TS-API-05` | Api.gs:460 | No email given, so there is nobody to change. |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
-| `TS-EXP-02` | Export.gs:535 | Unknown shop: |
-| `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |
-| `TS-EXP-04` | Export.gs:577 | No orders in that window for those listings. |
+| `TS-EXP-02` | Export.gs:607 | Unknown shop: |
+| `TS-EXP-03` | Export.gs:613 | The cost divisor must be greater than zero. |
+| `TS-EXP-04` | Export.gs:649 | No orders in that window for those listings. |
 | `TS-EXP-10` | Export.gs:148 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-11` | Export.gs:150 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-12` | Export.gs:153 | Non-fatal reason attached to a result (see the line). |
@@ -71,28 +71,29 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
 | `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
 | `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
-| `TS-EXP-23` | Export.gs:565 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
+| `TS-EXP-23` | Export.gs:637 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
 | `TS-ORD-01` | Orders.gs:59 | Could not read orders: |
 | `TS-ORD-02` | Orders.gs:85 | That range has more than orders. Narrow the dates and sync again. |
 | `TS-ORD-03` | Orders.gs:101 | Not a date: |
 | `TS-ORD-04` | Orders.gs:130 | Unknown shop: |
 | `TS-ORD-05` | Orders.gs:134 | The end of the range is before its start. |
 | `TS-ORD-06` | Orders.gs:150 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
-| `TS-ORD-07` | Orders.gs:491 | seller_sku lookup: could not read listing : [ ] |
-| `TS-ORD-08` | Orders.gs:1208 | order line(s) have no identifier from any source ( ) |
-| `TS-ORD-20` | Orders.gs:772 | Sales cache unavailable: |
-| `TS-ORD-21` | Orders.gs:780 | Could not cache sales for : |
+| `TS-ORD-07` | Orders.gs:501 | seller_sku lookup: could not read listing : [ ] |
+| `TS-ORD-08` | Orders.gs:1273 | order line(s) have no identifier from any source ( ) |
+| `TS-ORD-20` | Orders.gs:827 | Sales cache unavailable: |
+| `TS-ORD-21` | Orders.gs:835 | Could not cache sales for : |
 | `TS-ORD-22` | Product.gs:576 | Could not read sales for : |
-| `TS-ORD-23` | Orders.gs:1054 | Background sync could not read its activity marks: |
-| `TS-ORD-24` | Orders.gs:1131 | Background sync failed for : |
-| `TS-ORD-25` | Orders.gs:1090 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
-| `TS-ORD-26` | Orders.gs:600 | Order line statuses this app does not recognise on : , . They are NOT counted as sold. Add them to LINE_STATUS_MEANING once their meaning is confirmed. |
-| `TS-ORD-27` | Orders.gs:562 | order line(s) on carry no creation time, so they are counted in every window rather than none. |
-| `TS-ORD-28` | Orders.gs:1292 | Could not read returns: |
-| `TS-ORD-29` | Orders.gs:1361 | : more than returns changed since ; stopping and keeping what was read. |
-| `TS-ORD-30` | Orders.gs:1126 | : returns sync failed (orders are unaffected): |
-| `TS-ORD-31` | Orders.gs:882 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
-| `TS-ORD-32` | Orders.gs:1444 | : recorded order(s) are not in TikTok\'s list for this window, carrying unit(s) still counted as sold. They may have been cancelled and dropped, or may simply be absent from this response — check before paying on them. O… |
+| `TS-ORD-23` | Orders.gs:1119 | Background sync could not read its activity marks: |
+| `TS-ORD-24` | Orders.gs:1196 | Background sync failed for : |
+| `TS-ORD-25` | Orders.gs:1155 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
+| `TS-ORD-26` | Orders.gs:610 | Order line statuses this app does not recognise on : , . They are NOT counted as sold. Add them to LINE_STATUS_MEANING once their meaning is confirmed. |
+| `TS-ORD-27` | Orders.gs:572 | order line(s) on carry no creation time, so they are counted in every window rather than none. |
+| `TS-ORD-28` | Orders.gs:1357 | Could not read returns: |
+| `TS-ORD-29` | Orders.gs:1426 | : more than returns changed since ; stopping and keeping what was read. |
+| `TS-ORD-30` | Orders.gs:1191 | : returns sync failed (orders are unaffected): |
+| `TS-ORD-31` | Orders.gs:947 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
+| `TS-ORD-32` | Orders.gs:1509 | : recorded order(s) are not in TikTok\'s list for this window, carrying unit(s) still counted as sold. They may have been cancelled and dropped, or may simply be absent from this response — check before paying on them. O… |
+| `TS-ORD-33` | Orders.gs:297 | Order line statuses this app does not recognise in this window: , . They are NOT counted as sold, so the orders screen and the export short by their units rather than overpaying. Add them to LINE_STATUS_MEANING once thei… |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:246 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:507 | Unknown listing: |
@@ -126,15 +127,15 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-31` | Product.gs:733 | : TikTok shows variation(s), the app draws |
 | `TS-PRD-32` | Product.gs:1138 | Identifier is already on this listing, on a different variation. Two phones have reached the same number. Nothing was sent — refresh to pick up the next free identifier and list it again under that. |
 | `TS-PRD-33` | Product.gs:530 | No live version for (nothing buyable yet): |
-| `TS-PRD-34` | Product.gs:2097 | is not a removed variation on this listing. |
-| `TS-PRD-35` | Product.gs:2101 | Unknown shop on : |
-| `TS-PRD-36` | Product.gs:2109 | has no photo on record, and TikTok requires one on every variation. List it again from the app instead. |
-| `TS-PRD-37` | Product.gs:2130 | TikTok refused the restore. |
+| `TS-PRD-34` | Product.gs:2098 | is not a removed variation on this listing. |
+| `TS-PRD-35` | Product.gs:2102 | Unknown shop on : |
+| `TS-PRD-36` | Product.gs:2110 | has no photo on record, and TikTok requires one on every variation. List it again from the app instead. |
+| `TS-PRD-37` | Product.gs:2131 | TikTok refused the restore. |
 | `TS-SEQ-01` | Product.gs:2033 | An identifier has to be reserved against a listing. |
-| `TS-SHT-01` | Sheet.gs:319 | Unknown shop: |
-| `TS-SHT-04` | Sheet.gs:419 | SKU cache unavailable for : |
-| `TS-SHT-05` | Sheet.gs:437 | Could not cache SKUs for : |
-| `TS-SHT-06` | Sheet.gs:475 | No column called on |
+| `TS-SHT-01` | Sheet.gs:349 | Unknown shop: |
+| `TS-SHT-04` | Sheet.gs:449 | SKU cache unavailable for : |
+| `TS-SHT-05` | Sheet.gs:467 | Could not cache SKUs for : |
+| `TS-SHT-06` | Sheet.gs:505 | No column called on |
 | `TS-STK-01` | Product.gs:1958 | Could not read the listing before changing stock, so nothing was sent. |
 | `TS-STK-02` | Product.gs:1729 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
 | `TS-STK-03` | Product.gs:1735 | That variation has no warehouse on TikTok, so its stock cannot be changed. |

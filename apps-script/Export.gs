@@ -529,6 +529,78 @@ function exportListing_(listingId, actor) {
  * > reason — a purchase order that cannot be reproduced from its own contents
  * > is not one anyone should sign.
  */
+/**
+ * The columns a purchase order shows for one tally, and the values under them.
+ *
+ * Brien, 15 Sep: *"It should show on each variation or listing: total sold,
+ * total cancelled, net sold, total sales, cancelled sales, net sales."* Those
+ * six are always here, under his names.
+ *
+ * The other four buckets — refunded, awaiting return, on hold, unrecognised —
+ * appear ONLY when something in this export is in one of them. They have to be
+ * able to appear, because the six alone stop adding up the moment one is not
+ * empty: net sold is total sold minus EVERY bucket, not just cancelled. A
+ * sheet where the subtraction visibly fails and no column explains why is
+ * worse than a wider sheet, and this one is paid against.
+ *
+ * One spec, used by both the Summary sheet and every factory's sheet, so the
+ * two cannot show different columns for the same figures.
+ */
+var TALLY_COLUMNS = [
+  { key: 'ordered_units', label: 'Total sold', always: true },
+  { key: 'cancelled_units', label: 'Cancelled', always: true },
+  { key: 'refunded_units', label: 'Refunded' },
+  { key: 'at_risk_units', label: 'Awaiting return' },
+  { key: 'held_units', label: 'On hold' },
+  { key: 'unknown_units', label: 'Unrecognised' },
+  { key: 'sold_units', label: 'Net sold', always: true },
+  { key: 'ordered_value', label: 'Total sales (SGD)', always: true, money: true },
+  { key: 'cancelled_value', label: 'Cancelled sales (SGD)', always: true, money: true },
+  { key: 'refunded_value', label: 'Refunded sales (SGD)', money: true, showWith: 'refunded_units' },
+  { key: 'at_risk_value', label: 'Awaiting return (SGD)', money: true, showWith: 'at_risk_units' },
+  { key: 'held_value', label: 'On hold (SGD)', money: true, showWith: 'held_units' },
+  { key: 'unknown_value', label: 'Unrecognised (SGD)', money: true, showWith: 'unknown_units' },
+  { key: 'sold_value', label: 'Net sales (SGD)', always: true, money: true }
+];
+
+/** Which of those columns this export needs. Pure, so it is asserted. */
+function tallyColumns_(tallies) {
+  var live = {};
+  (tallies || []).forEach(function (t) {
+    TALLY_COLUMNS.forEach(function (c) {
+      if (Number((t || {})[c.key] || 0) !== 0) live[c.key] = true;
+    });
+  });
+  return TALLY_COLUMNS.filter(function (c) {
+    return c.always || !!live[c.showWith || c.key];
+  });
+}
+
+function tallyHeader_(cols) {
+  return cols.map(function (c) { return c.label; });
+}
+
+function tallyValues_(cols, t) {
+  return cols.map(function (c) {
+    var n = Number((t || {})[c.key] || 0);
+    return c.money ? round2_(n) : n;
+  });
+}
+
+/**
+ * How net sold was arrived at, in words, for whoever signs the sheet off.
+ *
+ * Written from the columns actually present, so it can never describe a
+ * subtraction the sheet does not show.
+ */
+function netExplainer_(cols) {
+  var taken = cols.filter(function (c) {
+    return !c.money && c.key !== 'ordered_units' && c.key !== 'sold_units';
+  }).map(function (c) { return c.label.toLowerCase(); });
+  return 'Net sold = total sold \u2212 ' + taken.join(' \u2212 ') +
+    '.   Net sales is the same subtraction in money, and is what the factory is paid on.';
+}
+
 function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
                        costDivisor, actor) {
   var shop = shopById_(shopId);
@@ -578,6 +650,10 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
   var photosPlaced = 0;
   var photosMissing = 0;
+  // Chosen once, so the line that explains the subtraction and the columns
+  // that perform it can never describe different sheets.
+  var sumCols = tallyColumns_(chosen);
+
   var temp = SpreadsheetApp.create('tikshop-orders-temp');
   try {
     var book = temp;
@@ -590,6 +666,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       [window],
       [divisor ? 'Cost = selling price / ' + divisor : 'Selling prices only, no cost column'],
       ['Requested by ' + actor + ' on ' + sgtStamp_()],
+      [netExplainer_(sumCols)],
       ['']
     ];
 
@@ -633,14 +710,18 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // The id is a link (HYPERLINK survives the xlsx conversion; a rich-text
     // link may not) and the URL is also written out in plain text, so it can
     // be copied from a phone or a printout where a link cannot be tapped.
-    var sumHeader = ['Listing', 'TikTok listing ID', 'Listing URL', 'Orders', 'Units', 'Revenue (SGD)'];
-    if (divisor) sumHeader.push('Cost (SGD)');
+    var sumHeader = ['Listing', 'TikTok listing ID', 'Listing URL', 'Orders']
+      .concat(tallyHeader_(sumCols));
+    // Cost follows NET sales, not total: the factory is paid for what was
+    // kept. Naming it "Net cost" says so, now that three sales columns sit
+    // beside it and an unqualified "Cost" would not say which one it came from.
+    if (divisor) sumHeader.push('Net cost (SGD)');
     var sumRows = chosen.map(function (l) {
       var row = [
         l.product_name || l.listing_id, listingLinkFormula_(l.listing_id),
-        listingUrl_(l.listing_id), l.order_count, l.units, round2_(l.revenue)
-      ];
-      if (divisor) row.push(round2_(l.revenue / divisor));
+        listingUrl_(l.listing_id), l.order_count
+      ].concat(tallyValues_(sumCols, l));
+      if (divisor) row.push(round2_(l.sold_value / divisor));
       return row;
     });
 
@@ -650,12 +731,11 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
 
     // Totals from the source figures, not from row positions, so adding a
     // column here cannot silently sum the wrong one.
-    var sum = function (f) { return chosen.reduce(function (n, l) { return n + f(l); }, 0); };
+    var sumTotals = chosen.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
     var totalRow = ['TOTAL', '', '',
-      sum(function (l) { return l.order_count; }),
-      sum(function (l) { return l.units; }),
-      round2_(sum(function (l) { return l.revenue; }))];
-    if (divisor) totalRow.push(round2_(sum(function (l) { return l.revenue; }) / divisor));
+      chosen.reduce(function (n, l) { return n + l.order_count; }, 0)
+    ].concat(tallyValues_(sumCols, sumTotals));
+    if (divisor) totalRow.push(round2_(sumTotals.sold_value / divisor));
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -669,17 +749,27 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       var name = safeName_(l.product_name || l.listing_id).slice(0, 90) || l.listing_id;
       var s2 = book.insertSheet(uniqueSheetName_(book, name));
 
-      var itemHeader = ['Photo', 'SKU', 'Variation', 'Units', 'Unit price (SGD)', 'Revenue (SGD)'];
-      if (divisor) itemHeader.push('Unit cost (SGD)', 'Cost (SGD)');
-      itemHeader.push('Cancelled / unpaid units');
+      // Columns from the same spec as the Summary sheet, chosen from THIS
+      // listing's rows — a factory with no refunds is not shown a refund
+      // column just because another factory in the same export had one.
+      var itemCols = tallyColumns_(detail.variations);
+      var itemHeader = ['Photo', 'SKU', 'Variation', 'Unit price (SGD)']
+        .concat(tallyHeader_(itemCols));
+      if (divisor) itemHeader.push('Unit cost (SGD)', 'Net cost (SGD)');
+
+      var unitPriceOf_ = function (v) {
+        // Per unit of what was ORDERED, so cancelling a unit cannot move the
+        // price. Dividing net sales by net units gives the same answer while
+        // both are non-zero and a wrong one the moment a line is cancelled at
+        // a different price.
+        return v.ordered_units ? v.ordered_value / v.ordered_units : Number(v.price || 0);
+      };
 
       var itemRows = detail.variations.map(function (v) {
-        var unitPrice = v.units ? v.revenue / v.units : Number(v.price || 0);
-        var row = [
-          '', v.seller_sku || '', v.variation, v.units, round2_(unitPrice), round2_(v.revenue)
-        ];
-        if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.revenue / divisor));
-        row.push(v.unsold_units);
+        var unitPrice = unitPriceOf_(v);
+        var row = ['', v.seller_sku || '', v.variation, round2_(unitPrice)]
+          .concat(tallyValues_(itemCols, v));
+        if (divisor) row.push(round2_(unitPrice / divisor), round2_(v.sold_value / divisor));
         return row;
       });
 
@@ -687,6 +777,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         [l.product_name || l.listing_id],
         ['TikTok listing ' + l.listing_id + '   ·   ' + window],
         [listingLinkFormula_(l.listing_id, listingUrl_(l.listing_id))],
+        [netExplainer_(itemCols)],
         ['']
       ];
       s2.getRange(1, 1, top.length, 1).setValues(top);
@@ -698,9 +789,11 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
       }
 
-      var tot = ['', 'TOTAL', '', detail.total_units, '', round2_(detail.total_revenue)];
-      if (divisor) tot.push('', round2_(detail.total_revenue / divisor));
-      tot.push(detail.variations.reduce(function (n, v) { return n + v.unsold_units; }, 0));
+      // Every figure on this line is the sum of the column above it, taken
+      // from the same spec that wrote the column. Adding a column can no
+      // longer leave a TOTAL that does not match it.
+      var tot = ['', 'TOTAL', '', ''].concat(tallyValues_(itemCols, detail.totals));
+      if (divisor) tot.push('', round2_(detail.totals.sold_value / divisor));
       s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
         .setValues([tot]).setFontWeight('bold');
 

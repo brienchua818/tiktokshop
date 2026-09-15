@@ -133,6 +133,8 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
+    emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
+    tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
     lineStatusMeaning_, LINE_STATUS_MEANING,
     returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
@@ -2688,6 +2690,222 @@ check('ISO strings sort newest-first as text; the old shape inverts days', () =>
     throw new Error('expected the raw form to put the 13th above the 14th, which is the bug')
   }
 })
+
+
+// ---------------------------------------------------------------------------
+// One tally, two aggregators.
+//
+// `groupVariationSales_` feeds the listing screen; `summariseItems_` feeds the
+// orders screen and the export built from it. They counted the same line items
+// by two different rules — the first got the refund model and the four-way
+// status table on 15 Sep, the second was still on a three-status denylist — so
+// the export was paying a factory for units the listing screen had already
+// written off. That is the second time the two ends of this app drifted apart
+// on a payout figure, so the arithmetic is asserted here to be one function.
+// ---------------------------------------------------------------------------
+console.log('\none tally, shared by every aggregator')
+
+/** Every bucket, so a new one cannot be added without this list noticing. */
+const UNIT_BUCKETS = [
+  'sold_units', 'cancelled_units', 'refunded_units',
+  'at_risk_units', 'held_units', 'unknown_units',
+]
+const VALUE_BUCKETS = UNIT_BUCKETS.map((b) => b.replace('_units', '_value'))
+
+function assertDisjoint(t, where) {
+  eq(
+    UNIT_BUCKETS.reduce((n, b) => n + t[b], 0),
+    t.ordered_units,
+    where + ': the unit buckets must sum to what was ordered',
+  )
+  eq(
+    Math.round(VALUE_BUCKETS.reduce((n, b) => n + t[b], 0) * 100) / 100,
+    Math.round(t.ordered_value * 100) / 100,
+    where + ': the money buckets must sum to what was ordered',
+  )
+}
+
+check('every bucket a line can land in is counted, and only one of them', () => {
+  const rows = [
+    line({ status: 'AWAITING_SHIPMENT' }),
+    line({ order_id: 'o2', status: 'CANCELLED' }),
+    line({ order_id: 'o3', status: 'UNPAID' }),
+    line({ order_id: 'o4', status: 'ON_HOLD' }),
+    line({ order_id: 'o5', status: 'WHAT_IS_THIS' }),
+    line({ order_id: 'o6', status: 'DELIVERED', line_item_id: 'li-refund' }),
+    line({ order_id: 'o7', status: 'DELIVERED', line_item_id: 'li-open' }),
+  ]
+  const refunds = { 'li-refund': 'refunded', 'li-open': 'at_risk' }
+  const g = gs.groupVariationSales_(rows, refunds)['9001']
+  assertDisjoint(g, 'groupVariationSales_')
+  eq(g.ordered_units, 7)
+  eq(g.sold_units, 1)
+  eq(g.cancelled_units, 2)
+  eq(g.held_units, 1)
+  eq(g.unknown_units, 1)
+  eq(g.refunded_units, 1)
+  eq(g.at_risk_units, 1)
+})
+
+/**
+ * The assertion that would have caught the divergence.
+ *
+ * Both aggregators are handed identical rows and must produce identical
+ * buckets. Nothing about the shape of a purchase order makes a listing's
+ * figures different from the sum of its variations' figures, and when they
+ * were, the export was the side that was wrong.
+ */
+check('the orders screen and the listing screen bucket identically', () => {
+  const rows = [
+    line({ status: 'COMPLETED', sale_price: '12.50' }),
+    line({ order_id: 'o2', status: 'CANCELLED', sale_price: '12.50' }),
+    line({ order_id: 'o3', status: 'ON_HOLD', sale_price: '12.50' }),
+    line({ order_id: 'o4', status: 'NOT_A_REAL_STATUS', sale_price: '12.50' }),
+    line({ order_id: 'o5', status: 'DELIVERED', sale_price: '12.50', line_item_id: 'r1' }),
+    line({ order_id: 'o6', status: 'DELIVERED', sale_price: '12.50', line_item_id: 'r2' }),
+  ]
+  const refunds = { r1: 'refunded', r2: 'at_risk' }
+
+  const variation = gs.groupVariationSales_(rows, refunds)['9001']
+  const listing = gs.summariseItems_(rows, refunds).listings[0]
+
+  UNIT_BUCKETS.concat(VALUE_BUCKETS, ['ordered_units', 'ordered_value']).forEach((f) => {
+    eq(listing[f], variation[f], 'the two aggregators disagree on ' + f)
+  })
+  assertDisjoint(listing, 'summariseItems_')
+})
+
+check('a refunded unit leaves sold without becoming cancelled', () => {
+  // The whole reason a refund column has to exist. Subtracting only cancelled
+  // from ordered overstates net by exactly the units nobody can see.
+  const rows = [line({ status: 'COMPLETED', line_item_id: 'r1', sale_price: '20.00' })]
+  const l = gs.summariseItems_(rows, { r1: 'refunded' }).listings[0]
+  eq(l.ordered_units, 1)
+  eq(l.cancelled_units, 0)
+  eq(l.refunded_units, 1)
+  eq(l.sold_units, 0, 'a refunded unit is not sold')
+  eq(l.sold_value, 0, 'and the money is not in the payout')
+  eq(l.ordered_units - l.cancelled_units, 1, 'total minus cancelled alone is still 1')
+  assertDisjoint(l, 'a refund')
+})
+
+check('the old names still mean what every screen reads them as', () => {
+  const rows = [
+    line({ status: 'COMPLETED', sale_price: '10.00' }),
+    line({ order_id: 'o2', status: 'CANCELLED', sale_price: '10.00' }),
+  ]
+  const g = gs.groupVariationSales_(rows)['9001']
+  eq(g.units, g.sold_units)
+  eq(g.revenue, g.sold_value)
+  eq(g.unsold_units, g.cancelled_units)
+  const l = gs.summariseItems_(rows).listings[0]
+  eq(l.units, l.sold_units)
+  eq(l.revenue, l.sold_value)
+  eq(l.unsold_units, l.cancelled_units)
+})
+
+check('a blank quantity is one unit in both aggregators, not none', () => {
+  // A row written before the column existed is padded with ''. Reading that as
+  // zero made it contribute to no column at all — it vanished from the
+  // purchase order rather than appearing in either.
+  const rows = [line({ quantity: '', sale_price: '10.00' })]
+  eq(gs.groupVariationSales_(rows)['9001'].sold_units, 1)
+  eq(gs.summariseItems_(rows).listings[0].sold_units, 1)
+})
+
+check('a listing total is the sum of its variations, by construction', () => {
+  const rows = [
+    line({ sku_id: '1', seller_sku: 'A1', status: 'COMPLETED', sale_price: '10.00' }),
+    line({ sku_id: '2', seller_sku: 'A2', order_id: 'o2', status: 'CANCELLED', sale_price: '7.50' }),
+    line({ sku_id: '3', seller_sku: 'A3', order_id: 'o3', status: 'ON_HOLD', sale_price: '2.25' }),
+  ]
+  const byVariation = gs.groupVariationSales_(rows)
+  const summed = Object.keys(byVariation).reduce(
+    (t, k) => gs.addTally_(t, byVariation[k]), gs.emptyTally_(),
+  )
+  const listing = gs.summariseItems_(rows).listings[0]
+  UNIT_BUCKETS.concat(['ordered_units']).forEach((f) => eq(listing[f], summed[f], f))
+  eq(listing.ordered_value, Math.round(summed.ordered_value * 100) / 100)
+})
+
+// ---------------------------------------------------------------------------
+// The columns a purchase order carries.
+//
+// Brien asked for six figures per variation and per listing. Those six are
+// always present; the other four buckets appear only when they are non-zero,
+// because the six stop adding up the moment one is not.
+// ---------------------------------------------------------------------------
+console.log('\nthe purchase order columns')
+
+const SIX = [
+  'Total sold', 'Cancelled', 'Net sold',
+  'Total sales (SGD)', 'Cancelled sales (SGD)', 'Net sales (SGD)',
+]
+
+check('a clean window shows exactly the six figures that were asked for', () => {
+  const cols = gs.tallyColumns_([
+    Object.assign(gs.emptyTally_(), {
+      ordered_units: 3, sold_units: 2, cancelled_units: 1,
+      ordered_value: 30, sold_value: 20, cancelled_value: 10,
+    }),
+  ])
+  eq(gs.tallyHeader_(cols), SIX)
+})
+
+check('a refund adds its own pair of columns, and only when there is one', () => {
+  const clean = Object.assign(gs.emptyTally_(), { ordered_units: 1, sold_units: 1 })
+  const refunded = Object.assign(gs.emptyTally_(), {
+    ordered_units: 1, refunded_units: 1, ordered_value: 9, refunded_value: 9,
+  })
+  eq(gs.tallyHeader_(gs.tallyColumns_([clean])), SIX)
+  eq(gs.tallyHeader_(gs.tallyColumns_([clean, refunded])), [
+    'Total sold', 'Cancelled', 'Refunded', 'Net sold',
+    'Total sales (SGD)', 'Cancelled sales (SGD)', 'Refunded sales (SGD)', 'Net sales (SGD)',
+  ])
+})
+
+check('every column present is subtracted, and no column absent is named', () => {
+  const held = Object.assign(gs.emptyTally_(), { ordered_units: 2, sold_units: 1, held_units: 1 })
+  const cols = gs.tallyColumns_([held])
+  const text = gs.netExplainer_(cols)
+  eq(/refunded/i.test(text), false, 'no refund column, so no refund in the sentence')
+  eq(/on hold/i.test(text), true, 'the on-hold column is present and must be named')
+  eq(/cancelled/i.test(text), true)
+})
+
+check('the values line up with the header, column for column', () => {
+  const t = Object.assign(gs.emptyTally_(), {
+    ordered_units: 4, sold_units: 2, cancelled_units: 1, refunded_units: 1,
+    ordered_value: 40, sold_value: 20, cancelled_value: 10, refunded_value: 10,
+  })
+  const cols = gs.tallyColumns_([t])
+  const head = gs.tallyHeader_(cols)
+  const vals = gs.tallyValues_(cols, t)
+  eq(head.length, vals.length, 'a header without a value under it is a wrong sheet')
+  eq(vals[head.indexOf('Total sold')], 4)
+  eq(vals[head.indexOf('Cancelled')], 1)
+  eq(vals[head.indexOf('Refunded')], 1)
+  eq(vals[head.indexOf('Net sold')], 2)
+  eq(vals[head.indexOf('Net sales (SGD)')], 20)
+  // The subtraction the sheet claims to perform, performed.
+  eq(
+    vals[head.indexOf('Total sold')] - vals[head.indexOf('Cancelled')] -
+      vals[head.indexOf('Refunded')],
+    vals[head.indexOf('Net sold')],
+  )
+})
+
+check('money is rounded to cents in the cells, not left as float drift', () => {
+  const t = Object.assign(gs.emptyTally_(), { ordered_value: 0.1 + 0.2, sold_value: 0.1 + 0.2 })
+  const cols = gs.tallyColumns_([t])
+  const vals = gs.tallyValues_(cols, t)
+  eq(vals[gs.tallyHeader_(cols).indexOf('Total sales (SGD)')], 0.3)
+})
+
+check('an empty export still has the six columns rather than none', () => {
+  eq(gs.tallyHeader_(gs.tallyColumns_([])), SIX)
+})
+
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

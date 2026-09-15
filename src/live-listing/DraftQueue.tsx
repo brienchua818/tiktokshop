@@ -816,7 +816,7 @@ function RemoteRow({
         )
       }
       meta={variantMeta(v)}
-      badge={<span className={`text-[11px] ${badge.cls}`}>{badge.text}</span>}
+      badge={<span className={`text-[12px] ${badge.cls}`}>{badge.text}</span>}
       {...(canAdjust ? { onOpen: () => onAdjust(v) } : {})}
       {...(canRemove
         ? { onDelete: () => onRemove(v), deleteLabel: `Remove ${v.identifier || v.variant} from TikTok` }
@@ -1026,25 +1026,43 @@ function VariantRow({
   /** An error and a retry, below the row rather than crammed inside it. */
   children?: ReactNode
 }) {
+  /**
+   * Read at arm's length, in a factory, holding a phone in one hand.
+   *
+   * Brien, 15 Sep: *"we could try to make some of the texts in the listing tab
+   * bigger as it's all super small now. But don't spoil overall look."* Both
+   * halves matter — an earlier pass at this scale made every row a different
+   * size and he said the layout had stopped looking neat.
+   *
+   * So only the things somebody actually reads mid-broadcast grow, and the
+   * hierarchy between them is preserved rather than flattened:
+   *
+   *   15px  identifier, name, price — what is called out on air
+   *   13px  stock — the number a decision is made on
+   *   12px  sold, refunded, who listed it — wanted, but not at a glance
+   *
+   * Two steps between the top and the bottom, as before. The type got bigger;
+   * the relationships did not change.
+   */
   const inner = (
     <>
       {photo}
       <span className="min-w-0 flex-1">
         <span className="flex items-baseline gap-1.5">
-          <span className="text-[13px] font-mono font-semibold text-identifier shrink-0">
+          <span className="text-[15px] font-mono font-semibold text-identifier shrink-0">
             {identifier || '—'}
           </span>
-          <span className="text-[13px] text-fg truncate">
+          <span className="text-[15px] text-fg truncate">
             {nameWithoutIdentifier(name, identifier)}
           </span>
         </span>
-        <span className="flex items-baseline gap-1 text-[11px] mt-0.5">
+        <span className="flex items-baseline gap-1.5 text-[13px] mt-0.5">
           {stock}
-          {meta && <span className="text-ghost truncate">{meta}</span>}
+          {meta && <span className="text-[12px] text-ghost truncate">{meta}</span>}
         </span>
       </span>
-      <span className="shrink-0 flex flex-col items-end gap-0.5 pl-1">
-        {price && <span className="text-[13px] text-fg2 tabular-nums">${price}</span>}
+      <span className="shrink-0 flex flex-col items-end gap-0.5 pl-1.5">
+        {price && <span className="text-[15px] text-fg2 tabular-nums">${price}</span>}
         {badge}
       </span>
     </>
@@ -1056,13 +1074,13 @@ function VariantRow({
         {onOpen ? (
           <button
             onClick={onOpen}
-            className="flex-1 min-w-0 flex items-center gap-2.5 py-2 text-left active:bg-chip rounded-lg"
+            className="flex-1 min-w-0 flex items-center gap-3 py-2.5 text-left active:bg-chip rounded-lg"
             aria-label={`Change stock for ${identifier || name}`}
           >
             {inner}
           </button>
         ) : (
-          <div className="flex-1 min-w-0 flex items-center gap-2.5 py-2">{inner}</div>
+          <div className="flex-1 min-w-0 flex items-center gap-3 py-2.5">{inner}</div>
         )}
         {onDelete && (
           <button
@@ -1287,35 +1305,35 @@ function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | 
   if (draft.status === 'pushed') {
     if (live) {
       const badge = variantBadge(live)
-      return <span className={`text-xs ${badge.cls}`}>{badge.text}</span>
+      return <span className={`text-[12px] ${badge.cls}`}>{badge.text}</span>
     }
     // Pushed, and the backend has not covered it in a read yet. Accepted, not
     // yet confirmed — and not claimed as anything stronger.
     return (
-      <span className="text-xs text-muted" title="Accepted; waiting for the next check">
+      <span className="text-[12px] text-muted" title="Accepted; waiting for the next check">
         Sent
       </span>
     )
   }
-  if (draft.status === 'uploading') return <span className="text-xs text-info">…</span>
+  if (draft.status === 'uploading') return <span className="text-[12px] text-info">…</span>
   if (draft.status === 'failed') {
     // Still inside its automatic attempts: the queue will push it again by
     // itself (or find it already landed). "Failed" here sent someone to
     // Seller Center for a SKU that was minutes from sorting itself out.
     if (draft.attempts < MAX_AUTO_ATTEMPTS) {
       return (
-        <span className="text-xs text-warn" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
+        <span className="text-[12px] text-warn" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
           Retrying
         </span>
       )
     }
     return (
-      <span className="text-xs text-bad" title={`${draft.attempts} attempts`}>
+      <span className="text-[12px] text-bad" title={`${draft.attempts} attempts`}>
         Failed
       </span>
     )
   }
-  return <span className="text-xs text-faint">Queued</span>
+  return <span className="text-[12px] text-faint">Queued</span>
 }
 
 /**

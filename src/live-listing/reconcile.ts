@@ -106,8 +106,35 @@ export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | n
  * still says "pushed", because it was, and what changed happened on TikTok.
  * So both kinds are asked the same question of the same field.
  */
-export function isRemoved(row: QueueRow): boolean {
-  return row.kind === 'draft' ? Boolean(row.live?.removed) : Boolean(row.live.removed)
+export function isRemoved(row: QueueRow, live: ListingState | null): boolean {
+  if (row.kind === 'remote') return Boolean(row.live.removed)
+  if (row.live) return Boolean(row.live.removed)
+
+  /**
+   * A pushed draft the backend does not return has been removed.
+   *
+   * `listingState` used to send removed variations and the screen read
+   * `row.live.removed`. On 15 Sep they moved to their own tab and stopped
+   * being sent — at which point `row.live` for a removed variation became
+   * null, `row.live?.removed` became undefined, and every one of them counted
+   * as ON the listing. Brien's phone then showed 19 on a listing carrying 3,
+   * because sixteen drafts from an old test run were still in its local queue.
+   *
+   * So the absence has to be read, not the flag. The backend returns every row
+   * it holds for this listing except the removed ones, and drafts here are
+   * already scoped to this listing — so a pushed draft it does not return is
+   * one it has marked removed.
+   *
+   * Guarded on time, because absence means nothing before the backend has
+   * looked: a SKU pushed after the last refresh is legitimately missing from
+   * it, and hiding it would make a variation vanish the moment it was listed.
+   * Only a push the backend's own read happened AFTER can be judged this way.
+   * Drafts pushed before `pushed_at` existed fall back to when they were
+   * created, which is earlier still and so never judges a fresh push.
+   */
+  if (!live || row.draft.status !== 'pushed') return false
+  const pushedAt = row.draft.pushed_at ?? row.draft.created_at
+  return Boolean(pushedAt) && pushedAt < live.checked_at
 }
 
 /**
@@ -122,10 +149,13 @@ export function isRemoved(row: QueueRow): boolean {
  * Order is preserved within each side, so the active list reads exactly as it
  * did before, minus the noise.
  */
-export function splitRows(rows: readonly QueueRow[]): { active: QueueRow[]; removed: QueueRow[] } {
+export function splitRows(
+  rows: readonly QueueRow[],
+  live: ListingState | null,
+): { active: QueueRow[]; removed: QueueRow[] } {
   const active: QueueRow[] = []
   const removed: QueueRow[] = []
-  for (const row of rows) (isRemoved(row) ? removed : active).push(row)
+  for (const row of rows) (isRemoved(row, live) ? removed : active).push(row)
   return { active, removed }
 }
 

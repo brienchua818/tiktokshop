@@ -43,6 +43,9 @@ function state(variants: LiveVariant[]): ListingState {
     sku_count: variants.length,
     max_skus: 100,
     variants,
+    // After every draft fixture's created_at, so "the backend has looked since
+    // this was pushed" is the default and a test that needs the opposite says so.
+    checked_at: '2026-09-15T10:00:00.000Z',
   } as unknown as ListingState
 }
 
@@ -144,7 +147,7 @@ describe('splitRows', () => {
       variant({ identifier: 'B1', on_tiktok: false, under_review: false, removed: true, created_at: '2026-09-07T01:00:00.000Z' }),
       variant({ identifier: 'L1', on_tiktok: true, under_review: false, stock_available: 2, created_at: '2026-09-07T02:00:00.000Z' }),
     ]))
-    const { active, removed } = splitRows(rows)
+    const { active, removed } = splitRows(rows, null)
     expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B1'])
     expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['L1'])
   })
@@ -154,7 +157,7 @@ describe('splitRows', () => {
     // TikTok, so the answer is on the live record and nowhere else.
     const d = draft({ identifier: 'B1', status: 'pushed' })
     const rows = mergeRows([d], state([variant({ identifier: 'B1', removed: true, on_tiktok: false, under_review: false })]))
-    const { active, removed } = splitRows(rows)
+    const { active, removed } = splitRows(rows, null)
     expect(active).toHaveLength(0)
     expect(removed).toHaveLength(1)
     expect(removed[0]!.kind).toBe('draft')
@@ -163,8 +166,8 @@ describe('splitRows', () => {
   it('keeps a draft with no live record on the active side', () => {
     // Nothing has been removed; it simply has not been checked yet.
     const rows = mergeRows([draft({ identifier: 'B13', status: 'queued' })], null)
-    expect(splitRows(rows).removed).toHaveLength(0)
-    expect(splitRows(rows).active).toHaveLength(1)
+    expect(splitRows(rows, null).removed).toHaveLength(0)
+    expect(splitRows(rows, null).active).toHaveLength(1)
   })
 
   it('preserves order within each side', () => {
@@ -173,7 +176,7 @@ describe('splitRows', () => {
       variant({ identifier: 'B', on_tiktok: true, under_review: false, stock_available: 1, created_at: '2026-09-07T01:00:00.000Z' }),
       variant({ identifier: 'C', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T02:00:00.000Z' }),
     ]))
-    const { active, removed } = splitRows(rows)
+    const { active, removed } = splitRows(rows, null)
     // Newest first within each side: A is 03:00, C is 02:00.
     expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['A', 'C'])
     expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B'])
@@ -181,7 +184,62 @@ describe('splitRows', () => {
 
   it('isRemoved answers for both kinds of row', () => {
     const remote = mergeRows([], state([variant({ removed: true, on_tiktok: false, under_review: false })]))[0]!
-    expect(isRemoved(remote)).toBe(true)
+    expect(isRemoved(remote, null)).toBe(true)
+  })
+
+  /**
+   * The regression that showed 19 variations on a listing carrying 3.
+   *
+   * `listingState` stopped sending removed variations on 15 Sep, so the flag
+   * these rows were read from stopped arriving and every one of them counted
+   * as on the listing. The absence has to be read instead — but only once the
+   * backend has actually looked, which is what the time comparison is for.
+   */
+  describe('a pushed draft the backend does not return', () => {
+    const live = state([variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 })])
+
+    it('is removed when the backend looked after it was pushed', () => {
+      const d = draft({ identifier: 'B15', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+      const { active, removed } = splitRows(mergeRows([d], live), live)
+      expect(removed).toHaveLength(1)
+      expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B74'])
+    })
+
+    it('is NOT removed when it was pushed after the backend looked', () => {
+      // The race that would make a SKU vanish the moment it was listed.
+      const d = draft({ identifier: 'B77', status: 'pushed', pushed_at: '2026-09-15T10:30:00.000Z' })
+      expect(splitRows(mergeRows([d], live), live).removed).toHaveLength(0)
+    })
+
+    it('falls back to created_at for a draft pushed before pushed_at existed', () => {
+      // Brien's sixteen. No pushed_at, created days ago, so plainly older than
+      // any read — and the fallback is earlier than the push, never later, so
+      // it can only ever be more cautious about a fresh one.
+      const d = draft({ identifier: 'B13', status: 'pushed', created_at: '2026-09-15T02:00:00.000Z' })
+      expect(splitRows(mergeRows([d], live), live).removed).toHaveLength(1)
+    })
+
+    it('is NOT removed while the backend has not answered', () => {
+      // A failed or pending refresh must not empty the listing.
+      const d = draft({ identifier: 'B15', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+      expect(splitRows(mergeRows([d], null), null).removed).toHaveLength(0)
+    })
+
+    it('leaves a draft that has not been pushed alone', () => {
+      // Queued, retrying and failed drafts are work still to do, not history.
+      for (const status of ['queued', 'uploading', 'failed'] as const) {
+        const d = draft({ identifier: 'B80', status, pushed_at: undefined })
+        expect(splitRows(mergeRows([d], live), live).removed).toHaveLength(0)
+      }
+    })
+
+    it('leaves a pushed draft the backend DOES return alone, under review', () => {
+      // Absence is the signal. A variation TikTok has not published yet is
+      // still returned by the backend, so it is not absent.
+      const reviewing = state([variant({ identifier: 'B78', on_tiktok: false, under_review: true })])
+      const d = draft({ identifier: 'B78', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
+      expect(splitRows(mergeRows([d], reviewing), reviewing).removed).toHaveLength(0)
+    })
   })
 })
 

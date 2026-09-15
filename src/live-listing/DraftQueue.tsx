@@ -158,6 +158,11 @@ export default function DraftQueue({
         status: 'pushed',
         error: null,
         settled: true,
+        // When we LEARNED it was pushed. The backend recorded it earlier, but
+        // this read is the first moment this phone could know, and it is the
+        // honest lower bound: a row present in this read cannot be judged
+        // absent from it.
+        pushed_at: state.checked_at,
         listing_id: d.listing_id ?? state.listing_id,
       })
     }
@@ -192,7 +197,7 @@ export default function DraftQueue({
    * keep their own tab rather than disappearing: a removal is a decision
    * somebody made, and the record of it is worth being able to find.
    */
-  const { active, removed } = useMemo(() => splitRows(rows), [rows])
+  const { active, removed } = useMemo(() => splitRows(rows, live), [rows, live])
   const [tab, setTab] = useState<'active' | 'removed'>('active')
 
   /**

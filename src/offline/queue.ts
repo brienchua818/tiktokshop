@@ -30,6 +30,15 @@ export interface QueuedDraft extends Draft {
   retryAfter: number
   /** True once TikTok has confirmed the product. */
   settled: boolean
+  /**
+   * When the push succeeded, ISO. Absent on drafts pushed before this existed.
+   *
+   * Exists so the screen can tell "the backend has not heard about this yet"
+   * from "the backend knows about it and says it is gone". Both look identical
+   * from a draft alone — the difference is whether the backend's read happened
+   * after the push, which needs a time on both sides.
+   */
+  pushed_at?: string
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -265,6 +274,7 @@ export function afterAttempt(
       ...draft,
       status: 'pushed' satisfies DraftStatus,
       settled: true,
+      pushed_at: new Date(now).toISOString(),
       error: null,
       tiktok_image_uri: draft.tiktok_image_uri,
       // A create returns the listing id the rest of the stream appends to, so

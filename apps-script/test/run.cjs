@@ -32,6 +32,7 @@ const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\
 // Apps Script globals. Stubbed only as far as the loaded functions touch them;
 // a test that needs more should stub more rather than reach for the real thing.
 const lockState = { held: false, refused: false, acquisitions: 0 }
+const cacheState = { store: {} }
 const sandbox = `
   var SpreadsheetApp = { flush: function () {} };
   var PropertiesService = { getScriptProperties: function () {
@@ -81,6 +82,20 @@ const sandbox = `
     }
   };
   var DriveApp = {}, Session = {};
+  // A cache with the shapes the real one has: getAll/putAll, and the ability
+  // for a test to evict a chunk, which is the case that must read as a miss.
+  var CacheService = { getScriptCache: function () {
+    return {
+      get: function (k) { return CACHE_STATE.store[k] === undefined ? null : CACHE_STATE.store[k] },
+      getAll: function (keys) {
+        var out = {};
+        keys.forEach(function (k) { if (CACHE_STATE.store[k] !== undefined) out[k] = CACHE_STATE.store[k] });
+        return out;
+      },
+      put: function (k, v) { CACHE_STATE.store[k] = v },
+      putAll: function (map) { Object.keys(map).forEach(function (k) { CACHE_STATE.store[k] = map[k] }) }
+    }
+  } };
   var UrlFetchApp = { fetch: function () {
     if (AUTH_STATE.throws) throw new Error('network');
     return {
@@ -120,6 +135,7 @@ ${src}
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_,
+    listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -133,11 +149,13 @@ const loaded = path.join(os.tmpdir(), 'tikshop-gs-loaded.cjs')
 const authState = { props: {}, status: 200, bodyText: '{}', throws: false }
 fs.writeFileSync(
   loaded,
-  'const LOCK_STATE = global.__LOCK_STATE__;\nconst AUTH_STATE = global.__AUTH_STATE__;\nconst NODE_CRYPTO = require("crypto");\n' + sandbox,
+  'const LOCK_STATE = global.__LOCK_STATE__;\nconst AUTH_STATE = global.__AUTH_STATE__;\nconst CACHE_STATE = global.__CACHE_STATE__;\nconst NODE_CRYPTO = require("crypto");\n' + sandbox,
 )
 global.__LOCK_STATE__ = lockState
 global.__AUTH_STATE__ = authState
+global.__CACHE_STATE__ = cacheState
 const gs = require(loaded)
+const CACHE = cacheState
 
 let pass = 0, fail = 0
 function check(name, fn) {
@@ -1865,6 +1883,103 @@ check('the exemption is real, not a way to pass', () => {
     throw new Error('pushSku no longer takes the whole body; revisit the exemption')
   }
 })
+
+console.log('\nthe listing SKU cache')
+
+/**
+ * A listing's rows are cached so a refresh stops reading every SKU ever
+ * written — that read is what made a refresh take forty seconds once I12 held
+ * 153 rows, and its cost had nothing to do with the listing being read.
+ *
+ * The safety is in the KEY, not in remembering to clear anything: it carries a
+ * version that every write to the tab bumps, so after a write the old entry is
+ * simply unreachable. That matters more than the speed does. These rows decide
+ * which variations are carried forward on the next push, and TikTok deletes
+ * any SKU absent from a partial edit — so a row read that no longer exists,
+ * or a listing read short, DELETES variations.
+ */
+function describe_skucache() {
+  let sheetReads = 0
+  let rows = []
+
+  const install = () => {
+    gs.__setHeaders('SKUs', ['listing_id', 'identifier'])
+    gs.__setSheetImpl(() => ({
+      getLastRow: () => rows.length + 1,
+      getRange: () => ({
+        getValues: () => { sheetReads++; return rows.map((r) => [r.listing_id, r.identifier]) },
+        setValues: () => {}, setValue: () => {}, clearContent: () => {},
+        setFontWeight() { return this },
+      }),
+    }))
+    gs.invalidateRead_()
+    CACHE.store = {}
+    sheetReads = 0
+  }
+
+  check('reads the Sheet once, then serves the listing from cache', () => {
+    install()
+    rows = [{ listing_id: 'L1', identifier: 'B1' }, { listing_id: 'L2', identifier: 'A1' }]
+    eq(gs.listSkus_('L1').length, 1)
+    gs.invalidateRead_() // a new request; only the cache should save us now
+    eq(gs.listSkus_('L1').length, 1)
+    gs.invalidateRead_()
+    eq(gs.listSkus_('L1').length, 1)
+    eq(sheetReads, 1)
+  })
+
+  check('a write makes the cached slice unreachable', () => {
+    install()
+    rows = [{ listing_id: 'L1', identifier: 'B1' }]
+    eq(gs.listSkus_('L1').length, 1)
+    rows = [{ listing_id: 'L1', identifier: 'B1' }, { listing_id: 'L1', identifier: 'B2' }]
+    gs.appendRows_('SKUs', [['L1', 'B2']])
+    gs.invalidateRead_()
+    // Would still say 1 if the version had not moved. Reading a listing short
+    // is how a partial edit deletes the rows it did not see.
+    eq(gs.listSkus_('L1').length, 2)
+  })
+
+  check('an evicted chunk reads as a miss, never as a short listing', () => {
+    install()
+    rows = [{ listing_id: 'L1', identifier: 'B1' }, { listing_id: 'L1', identifier: 'B2' }]
+    eq(gs.listSkus_('L1').length, 2)
+    // Drop one chunk, as CacheService may at any time.
+    const key = Object.keys(CACHE.store).filter((k) => /:\d+$/.test(k))[0]
+    delete CACHE.store[key]
+    gs.invalidateRead_()
+    const again = gs.listSkus_('L1')
+    eq(again.length, 2)
+    eq(sheetReads, 2) // it went back to the Sheet rather than trusting a fragment
+  })
+
+  check('the version survives across listings', () => {
+    // One counter for the tab, so a write anywhere retires every slice. A
+    // per-listing counter would let a row moved between listings be read twice.
+    install()
+    rows = [{ listing_id: 'L1', identifier: 'B1' }, { listing_id: 'L2', identifier: 'A1' }]
+    gs.listSkus_('L1')
+    gs.listSkus_('L2')
+    const before = gs.skuVersion_()
+    gs.appendRows_('SKUs', [['L2', 'A2']])
+    if (gs.skuVersion_() <= before) throw new Error('version did not move')
+    rows.push({ listing_id: 'L2', identifier: 'A2' })
+    gs.invalidateRead_()
+    eq(gs.listSkus_('L2').length, 2)
+    gs.invalidateRead_()
+    eq(gs.listSkus_('L1').length, 1)
+  })
+
+  check('a listing with no rows is cached as empty, not re-read', () => {
+    install()
+    rows = [{ listing_id: 'L2', identifier: 'A1' }]
+    eq(gs.listSkus_('L1').length, 0)
+    gs.invalidateRead_()
+    eq(gs.listSkus_('L1').length, 0)
+    eq(sheetReads, 1)
+  })
+}
+describe_skucache()
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

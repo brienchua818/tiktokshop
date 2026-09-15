@@ -163,6 +163,7 @@ function ensureHeaders_(name, sh) {
     // The columns themselves moved, so anything read earlier in this request
     // is laid out differently from what is now on the tab.
     invalidateRead_(name);
+    if (name === TAB_SKUS) bumpSkuVersion_();
     logEvent_('system', 'migrate_headers', '',
       name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
   });
@@ -193,6 +194,7 @@ function appendRows_(name, rows) {
     SpreadsheetApp.flush();
   });
   invalidateRead_(name);
+  if (name === TAB_SKUS) bumpSkuVersion_();
 }
 
 /**
@@ -309,7 +311,96 @@ function addListing_(shopId, listingId, actor, productName) {
 }
 
 // ── SKUs ─────────────────────────────────────────────────────────────
+/**
+ * One listing's SKU rows, without reading every SKU ever written.
+ *
+ * `readAll_(TAB_SKUS)` pulls the WHOLE tab — every row, every listing, every
+ * shop — and a listing is reused across streams, so that tab only grows. It
+ * was fast in the first week because there was nothing in it. By 15 Sep I12
+ * alone carried 153 rows and a refresh took forty seconds. Nothing was getting
+ * slower; the Sheet was getting fuller, and the cost of a read had nothing to
+ * do with the listing being read.
+ *
+ * So a listing's rows are cached, and the SAFETY is in the key rather than in
+ * anyone remembering to clear it: the key carries a version number that every
+ * write to the tab bumps. After a write the old key is simply unreachable —
+ * there is no stale entry to read, because nothing looks for it any more. That
+ * matters more here than speed does: these rows decide which variations are
+ * carried forward on the next push, and TikTok deletes any SKU absent from a
+ * partial edit, so reading a row that no longer exists deletes a variation.
+ *
+ * Values are chunked because CacheService caps one value at 100 KB and a busy
+ * listing exceeds that. The chunk count is stored with the key, so a partially
+ * evicted entry reads as a miss rather than as a short listing — which would
+ * be the same deletion bug by another route.
+ */
+var SKU_CACHE_TTL_S = 21600; // Six hours, CacheService's maximum.
+var SKU_CACHE_CHUNK = 90000; // Under the 100 KB per-value cap, with headroom.
+var SKU_TAB_VERSION_KEY = 'SKUS_VERSION';
+
+/** Bumped by every write to the SKUs tab, which retires every cached slice. */
+function bumpSkuVersion_() {
+  var props = PropertiesService.getScriptProperties();
+  var next = Number(props.getProperty(SKU_TAB_VERSION_KEY) || 0) + 1;
+  props.setProperty(SKU_TAB_VERSION_KEY, String(next));
+  return next;
+}
+
+function skuVersion_() {
+  return Number(PropertiesService.getScriptProperties().getProperty(SKU_TAB_VERSION_KEY) || 0);
+}
+
 function listSkus_(listingId) {
+  var key = 'skus:v' + skuVersion_() + ':' + String(listingId);
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var head = cache.get(key);
+    if (head) {
+      var parts = Number(head);
+      if (parts === 0) return [];
+      var keys = [];
+      for (var i = 0; i < parts; i++) keys.push(key + ':' + i);
+      var got = cache.getAll(keys);
+      var joined = '';
+      var whole = true;
+      for (var j = 0; j < parts; j++) {
+        var piece = got[key + ':' + j];
+        // A missing chunk is a MISS, never a short answer. Half a listing read
+        // as the whole listing is how a partial edit deletes the other half.
+        if (piece === null || piece === undefined) { whole = false; break; }
+        joined += piece;
+      }
+      if (whole) {
+        try { return JSON.parse(joined); } catch (e) { /* fall through to a real read */ }
+      }
+    }
+  } catch (e) {
+    warn_('TS-SHT-04', 'SKU cache unavailable for ' + listingId + ': ' + e);
+  }
+
+  var rows = listSkusFromSheet_(listingId);
+
+  try {
+    if (cache) {
+      var text = JSON.stringify(rows);
+      var chunks = [];
+      for (var k = 0; k < text.length; k += SKU_CACHE_CHUNK) {
+        chunks.push(text.substring(k, k + SKU_CACHE_CHUNK));
+      }
+      var payload = {};
+      payload[key] = String(chunks.length);
+      chunks.forEach(function (chunk, index) { payload[key + ':' + index] = chunk; });
+      cache.putAll(payload, SKU_CACHE_TTL_S);
+    }
+  } catch (e) {
+    warn_('TS-SHT-05', 'Could not cache SKUs for ' + listingId + ': ' + e);
+  }
+  return rows;
+}
+
+/** The Sheet itself. Everything goes through listSkus_ instead. */
+function listSkusFromSheet_(listingId) {
   return readAll_(TAB_SKUS).filter(function (r) {
     return String(r.listing_id) === String(listingId);
   });
@@ -372,6 +463,7 @@ function replaceByKey_(tabName, keyField, rows) {
   }
   SpreadsheetApp.flush();
   invalidateRead_(tabName);
+  if (tabName === TAB_SKUS) bumpSkuVersion_();
   return rows.length;
 }
 
@@ -411,6 +503,7 @@ function markSkus_(updates) {
     if (written) {
       SpreadsheetApp.flush();
       invalidateRead_(TAB_SKUS);
+      bumpSkuVersion_();
     }
     return written;
   });

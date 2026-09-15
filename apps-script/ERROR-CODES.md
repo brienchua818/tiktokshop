@@ -115,7 +115,9 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-31` | Product.gs:574 | : TikTok shows variation(s), the app draws |
 | `TS-PRD-32` | Product.gs:947 | Identifier is already on this listing, on a different variation. Two phones have reached the same number. Nothing was sent — refresh to pick up the next free identifier and list it again under that. |
 | `TS-SEQ-01` | Product.gs:1842 | An identifier has to be reserved against a listing. |
-| `TS-SHT-01` | Sheet.gs:277 | Unknown shop: |
+| `TS-SHT-01` | Sheet.gs:279 | Unknown shop: |
+| `TS-SHT-04` | Sheet.gs:379 | SKU cache unavailable for : |
+| `TS-SHT-05` | Sheet.gs:397 | Could not cache SKUs for : |
 | `TS-STK-01` | Product.gs:1767 | Could not read the listing before changing stock, so nothing was sent. |
 | `TS-STK-02` | Product.gs:1538 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
 | `TS-STK-03` | Product.gs:1544 | That variation has no warehouse on TikTok, so its stock cannot be changed. |

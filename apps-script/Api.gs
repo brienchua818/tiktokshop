@@ -85,6 +85,8 @@ var WRITE_ACTIONS = {
   // Read-modify-write on TikTok's stock, so it must not interleave with
   // another phone doing the same thing to the same variation.
   setStock: 1,
+  // Hands out a number two phones must never share. See reserveIdentifier_.
+  reserveIdentifier: 1,
   // Rebuilds the product from a read, exactly as pushSku does; two at once
   // would each write the other's variation out of existence.
   removeVariation: 1
@@ -320,9 +322,16 @@ function route_(action, params, body, user) {
       return json_(setVariationStock_(
         params.listing_id || body.listing_id,
         params.identifier || body.identifier,
+        params.tiktok_sku_id || body.tiktok_sku_id,
         Number(params.delta || body.delta || 0),
         (params.absolute || body.absolute) === undefined ? null : Number(params.absolute || body.absolute),
         user
+      ));
+
+    case 'reserveIdentifier':
+      return json_(reserveIdentifier_(
+        params.listing_id || body.listing_id,
+        params.prefix || body.prefix
       ));
 
     // Asked for only when the Removed tab is opened. See removedVariations_.

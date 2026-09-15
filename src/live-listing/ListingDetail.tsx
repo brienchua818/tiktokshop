@@ -106,13 +106,42 @@ export default function ListingDetail({
     setPrefixSeeded(true)
   }, [prefixSeeded, listedSkus, draftIdentifiers])
 
-  // The next identifier: the prefix is the operator's, the NUMBER considers
-  // both what is live and what is queued — ignoring either is how two SKUs end
-  // up sharing an identifier.
-  const next = useMemo(
+  /**
+   * The next identifier, claimed from the backend rather than guessed here.
+   *
+   * Two phones on one listing each worked this out from what THEY could see,
+   * so both showed B75 and both operators said "B75" on air. TikTok would have
+   * accepted both and the purchase order would have merged two products into
+   * one row. The backend now hands out the number under the same lock every
+   * write takes, so no two phones can be given the same one.
+   *
+   * The local calculation stays as the fallback. With no signal there is no
+   * other phone to collide with until the queue drains, and blocking somebody
+   * from adding a SKU because the network is down would be a worse failure
+   * than a gap in the numbering.
+   */
+  const local = useMemo(
     () => nextIdentifier(listedSkus, draftIdentifiers, prefix),
     [listedSkus, draftIdentifiers, prefix],
   )
+  const [claimed, setClaimed] = useState<{ prefix: string; seq: number } | null>(null)
+  const next = claimed && claimed.prefix === local.prefix ? claimed : local
+
+  const claim = useCallback(async () => {
+    if (!listing.listing_id) return
+    try {
+      const r = await api.reserveIdentifier(listing.listing_id, prefix)
+      setClaimed({ prefix: r.prefix, seq: r.seq })
+    } catch {
+      // Fall back to the local number. See above.
+      setClaimed(null)
+    }
+  }, [listing.listing_id, prefix])
+
+  // One claim per listing and prefix, and a fresh one after each SKU is saved.
+  useEffect(() => {
+    void claim()
+  }, [claim])
 
   const productStatus = live?.product_status ?? null
   const onTikTok = live?.variations_on_tiktok ?? null
@@ -182,7 +211,10 @@ export default function ListingDetail({
             prefix={next.prefix}
             onEditPrefix={() => setEditingPrefix(true)}
             onBulkAdd={() => setBulkOpen(true)}
-            onSaved={refreshDrafts}
+            onSaved={async () => {
+              await refreshDrafts()
+              await claim()
+            }}
           />
         </div>
 
@@ -217,6 +249,7 @@ export default function ListingDetail({
             startIdentifier={formatIdentifier(next.prefix, next.seq)}
             onSaved={async () => {
               await refreshDrafts()
+              await claim()
               setBulkOpen(false)
             }}
           />

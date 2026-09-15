@@ -484,10 +484,32 @@ export const api = {
    * 90 seconds because it is read, write, re-read against TikTok — three
    * round trips, and a timeout leaves the outcome unknown rather than failed.
    */
-  setStock: (body: { listing_id: string; identifier: string; delta?: number; absolute?: number }) =>
+  setStock: (body: {
+    listing_id: string
+    /** Ours. Empty for a variation added in Seller Center. */
+    identifier: string
+    /** TikTok's own id, which is the only handle a Seller Center row has. */
+    tiktok_sku_id?: string
+    delta?: number
+    absolute?: number
+  }) =>
     call<{ identifier: string; before: number; after: number; requested: number }>('setStock', {
       body,
       timeoutMs: 90_000,
+    }),
+
+  /**
+   * Claim the next identifier for a listing, so two phones cannot share one.
+   *
+   * Settled here rather than worked out on the phone, and settled BEFORE the
+   * number is said on air: an identifier that changes after somebody has
+   * called it out and written it on the box is worse than a collision, because
+   * nobody finds out.
+   */
+  reserveIdentifier: (listingId: string, prefix: string) =>
+    call<{ identifier: string; prefix: string; seq: number }>('reserveIdentifier', {
+      body: { listing_id: listingId, prefix },
+      timeoutMs: 30_000,
     }),
 
   /** Remaining product uploads for today, against the shop's daily cap. */

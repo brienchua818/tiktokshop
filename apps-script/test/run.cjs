@@ -117,7 +117,7 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
-    checkStockTotal_, skuForStock_
+    checkStockTotal_, skuForStock_, seqOf_
   };
 `
 
@@ -1519,6 +1519,38 @@ check('a stock change refuses a variation with no warehouse', () => {
   // One warehouse recorded only in the array is still a warehouse.
   var ok = { skus: [{ sellerSku: 'A1', id: '9001', warehouseId: '', inventories: [{ warehouse_id: 'W1', quantity: 3 }] }] }
   eq(gs.skuForStock_(ok, 'A1').id, '9001')
+})
+
+check('seqOf_ reads the number only for a whole-prefix match', () => {
+  // The counter behind identifier reservation. A prefix that claims the wrong
+  // series hands out a number already in use, and two phones say the same SKU
+  // on air — which is the failure the reservation exists to stop.
+  eq(gs.seqOf_('B74', 'B'), 74)
+  eq(gs.seqOf_('b74', 'B'), 74)
+  eq(gs.seqOf_('HZE12', 'HZE'), 12)
+  // "B" must not claim "BX7", or switching prefix mid-stream drags the old
+  // series along with it.
+  eq(gs.seqOf_('BX7', 'B'), 0)
+  eq(gs.seqOf_('L11', 'B'), 0)
+  eq(gs.seqOf_('B', 'B'), 0)
+  eq(gs.seqOf_('', 'B'), 0)
+  eq(gs.seqOf_('B74', ''), 0)
+  eq(gs.seqOf_(null, 'B'), 0)
+})
+
+check('a Seller Center variation can be addressed by TikTok id alone', () => {
+  // It has no seller_sku of ours, which is why its stock used to be
+  // read-only. Most of a long-running listing is these.
+  const live = { skus: [
+    { sellerSku: 'B70', id: '9001', warehouseId: 'W1', quantity: 3 },
+    { sellerSku: '', id: '9002', warehouseId: 'W1', quantity: 5, valueName: 'Miracle Drying Rack' },
+  ] }
+  eq(gs.skuForStock_(live, '', '9002').valueName, 'Miracle Drying Rack')
+  // The id wins when both are given, because it is the unique one.
+  eq(gs.skuForStock_(live, 'B70', '9002').id, '9002')
+  eq(gs.skuForStock_(live, 'B70', '').id, '9001')
+  try { gs.skuForStock_(live, '', '9999'); throw new Error('accepted an unknown id') }
+  catch (e) { eq(gs.codeOf_(e), 'TS-STK-02') }
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

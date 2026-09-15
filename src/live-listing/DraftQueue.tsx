@@ -727,9 +727,16 @@ function RemoteRow({
           ? { text: 'Live', cls: 'text-ok' }
           : { text: 'Sent', cls: 'text-muted' }
 
-  // A Seller Center variation has no row of ours to update, so its stock is
-  // read-only here rather than offered and then refused.
-  const canAdjust = !v.external && v.on_tiktok && !v.removed && v.stock_available !== null
+  /**
+   * A Seller Center variation can have its stock changed too, addressed by
+   * TikTok's own id rather than by an identifier it does not have.
+   *
+   * It was read-only because the backend matched on our seller_sku, which such
+   * a row has none of. On a listing the team has been running for a while most
+   * of the variations are these, so "can we update the qty for items not
+   * created on the app" was really "can we use this at all".
+   */
+  const canAdjust = v.on_tiktok && !v.removed && v.stock_available !== null && Boolean(v.tiktok_sku_id)
   const canRemove = v.on_tiktok && Boolean(v.tiktok_sku_id) && !v.removed
 
   return (
@@ -751,7 +758,7 @@ function RemoteRow({
           soldOut(v) ? (
             <span className="text-bad font-semibold tracking-wide shrink-0">SOLD OUT</span>
           ) : (
-            <span className="text-fg2 shrink-0">{v.stock_available ?? 0} in stock</span>
+            <span className="text-fg2 shrink-0">{v.stock_available ?? 0} left</span>
           )
         ) : (
           <StockState v={v} />
@@ -791,9 +798,14 @@ function StockSheet({
     setBusy(true)
     setError('')
     try {
-      const r = await api.setStock({ listing_id: listingId, identifier: v.identifier, ...body })
+      const r = await api.setStock({
+        listing_id: listingId,
+        identifier: v.identifier,
+        tiktok_sku_id: v.tiktok_sku_id,
+        ...body,
+      })
       // TikTok's number, not ours. "Set to 31" is a promise; "31 left" is a fact.
-      await onDone(`${r.identifier}: ${r.after} left, was ${r.before}.`)
+      await onDone(`${r.identifier || v.variant}: ${r.after} left, was ${r.before}.`)
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.display : String(e))
     } finally {
@@ -807,7 +819,7 @@ function StockSheet({
       <div className="relative w-full sm:max-w-sm bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] space-y-3">
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
-            <p className="text-xs font-mono text-identifier">{v.identifier}</p>
+            <p className="text-xs font-mono text-identifier">{v.identifier || 'Seller Center'}</p>
             <p className="text-sm text-fg truncate">{v.variant}</p>
             <p className="text-xs text-faint mt-0.5">
               {now} left on TikTok

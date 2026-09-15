@@ -130,6 +130,7 @@ const REPLIES = {
   ],
   setRole: { email: 'judy@sheldonglobal.com', role: 'lister' },
   setStock: { identifier: 'A1', before: 48, after: 58, requested: 58 },
+  reserveIdentifier: { identifier: 'A2', prefix: 'A', seq: 2 },
   removedVariations: {
     listing_id: '1734903629786286062',
     variants: [

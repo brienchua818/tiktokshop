@@ -49,11 +49,11 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | Code | Where | Message (as raised) |
 | --- | --- | --- |
 | `TS-UNC-00` | Api.gs | An error without a code reached the API handler. The message is prefixed with the runtime error type (TypeError, Exception). This is a gap in the code: find the line from the execution log stack and give it a code. |
-| `TS-API-01` | Api.gs:400 | Unknown role: . Expected one of , . |
-| `TS-API-02` | Api.gs:407 | The owner account cannot be demoted. |
-| `TS-API-03` | Api.gs:420 | No such user: |
+| `TS-API-01` | Api.gs:409 | Unknown role: . Expected one of , . |
+| `TS-API-02` | Api.gs:416 | The owner account cannot be demoted. |
+| `TS-API-03` | Api.gs:429 | No such user: |
 | `TS-API-04` | Api.gs:26 | took s |
-| `TS-API-05` | Api.gs:403 | No email given, so there is nobody to change. |
+| `TS-API-05` | Api.gs:412 | No email given, so there is nobody to change. |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
 | `TS-EXP-02` | Export.gs:535 | Unknown shop: |
 | `TS-EXP-03` | Export.gs:541 | The cost divisor must be greater than zero. |
@@ -112,18 +112,19 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-28` | Product.gs:1264 |  |
 | `TS-PRD-29` | Product.gs:1288 | Listing check failed. |
 | `TS-PRD-30` | Product.gs:1295 | TikTok returned no product ID. |
+| `TS-SEQ-01` | Product.gs:1736 | An identifier has to be reserved against a listing. |
 | `TS-SHT-01` | Sheet.gs:239 | Unknown shop: |
-| `TS-STK-01` | Product.gs:1652 | Could not read the listing before changing stock, so nothing was sent. |
-| `TS-STK-02` | Product.gs:1426 | is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
-| `TS-STK-03` | Product.gs:1431 | has no warehouse on TikTok, so its stock cannot be changed. |
-| `TS-STK-04` | Product.gs:1445 | Stock has to be a whole number between 1 and 99,999, and is not. TikTok cannot set a variation to zero from here — remove the variation instead. |
-| `TS-STK-05` | Product.gs:1582 | TikTok refused the stock change: |
-| `TS-STK-06` | Product.gs:1602 | The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. Nothing further was sent. |
-| `TS-STK-07` | Product.gs:1669 | TikTok accepted the change for but is now reporting rather than . Nothing further was sent. Check Seller Center before trying again. |
-| `TS-STK-08` | Product.gs:1592 | TikTok reported success but refused this SKU: no reason given ( ) |
-| `TS-STK-09` | Product.gs:1572 | This variation stocks in warehouses, so there is no single total to set. Change it in Seller Center, per warehouse. |
-| `TS-STK-10` | Product.gs:1632 | A stock change needs a listing and a variation. |
-| `TS-STK-11` | Product.gs:1646 | Unknown listing: |
+| `TS-STK-01` | Product.gs:1661 | Could not read the listing before changing stock, so nothing was sent. |
+| `TS-STK-02` | Product.gs:1432 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
+| `TS-STK-03` | Product.gs:1438 | That variation has no warehouse on TikTok, so its stock cannot be changed. |
+| `TS-STK-04` | Product.gs:1454 | Stock has to be a whole number between 1 and 99,999, and is not. TikTok cannot set a variation to zero from here — remove the variation instead. |
+| `TS-STK-05` | Product.gs:1591 | TikTok refused the stock change: |
+| `TS-STK-06` | Product.gs:1611 | The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. Nothing further was sent. |
+| `TS-STK-07` | Product.gs:1678 | TikTok accepted the change for but is now reporting rather than . Nothing further was sent. Check Seller Center before trying again. |
+| `TS-STK-08` | Product.gs:1601 | TikTok reported success but refused this SKU: no reason given ( ) |
+| `TS-STK-09` | Product.gs:1581 | This variation stocks in warehouses, so there is no single total to set. Change it in Seller Center, per warehouse. |
+| `TS-STK-10` | Product.gs:1641 | A stock change needs a listing and a variation. |
+| `TS-STK-11` | Product.gs:1655 | Unknown listing: |
 | `TS-TT-01` | TikTok.gs:20 | No app credentials for . Add _APP_KEY and _APP_SECRET in Script Properties. |
 | `TS-TT-02` | TikTok.gs:67 | Set _SERVICE_ID in Script Properties first.\n\n It comes from THIS project\'s app in TikTok Partner Center — next to the App Key and App Secret, or as the number after "service_id=" in the authorisation link Partner Cent… |
 | `TS-TT-03` | TikTok.gs:195 | token exchange failed |

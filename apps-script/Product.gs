@@ -1417,18 +1417,27 @@ function listedSkusForClient_(listingId) {
  * point: `TS-STK-02` has to mean one thing, or a photographed banner cannot be
  * looked up.
  */
-function skuForStock_(live, identifier) {
+function skuForStock_(live, identifier, tiktokSkuId) {
   var sku = null;
   for (var i = 0; i < live.skus.length; i++) {
-    if (String(live.skus[i].sellerSku) === String(identifier)) { sku = live.skus[i]; break; }
+    var s = live.skus[i];
+    // TikTok's own id first, because a variation added in Seller Center has no
+    // seller_sku of ours to match on — and that is most of what is on a
+    // listing the team has been running for a while. Brien, 15 Sep: "how about
+    // items that were not created on the app? can we update the qty?"
+    if (tiktokSkuId && String(s.id) === String(tiktokSkuId)) { sku = s; break; }
+    if (!tiktokSkuId && String(s.sellerSku) === String(identifier)) { sku = s; break; }
   }
   if (!sku) {
     throw fail_('TS-STK-02',
-      identifier + ' is not one of the variations TikTok is returning for this listing. ' +
+      (identifier || tiktokSkuId || 'That variation') +
+      ' is not one of the variations TikTok is returning for this listing. ' +
       'A variation still under review is not returned, so wait for it to go live before changing its stock.');
   }
   if (!sku.warehouseId && !(sku.inventories && sku.inventories.length)) {
-    throw fail_('TS-STK-03', identifier + ' has no warehouse on TikTok, so its stock cannot be changed.');
+    throw fail_('TS-STK-03',
+      (identifier || tiktokSkuId || 'That variation') +
+      ' has no warehouse on TikTok, so its stock cannot be changed.');
   }
   return sku;
 }
@@ -1500,7 +1509,7 @@ function checkStockSemantics() {
     return;
   }
 
-  var sku = skuForStock_(ttGetProduct_(shopId, listingId), identifier);
+  var sku = skuForStock_(ttGetProduct_(shopId, listingId), identifier, '');
 
   var before = Number(sku.quantity || 0);
   // Distinct from the current level and from double it, so neither reading can
@@ -1627,8 +1636,8 @@ function writeStockOnce_(shopId, listingId, sku, quantity) {
  * What it returns is the RE-READ figure, never the intended one. A write that
  * reports success and does something else is the failure worth catching.
  */
-function setVariationStock_(listingId, identifier, delta, absolute, actor) {
-  if (!listingId || !identifier) {
+function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute, actor) {
+  if (!listingId || (!identifier && !tiktokSkuId)) {
     throw fail_('TS-STK-10', 'A stock change needs a listing and a variation.');
   }
 
@@ -1653,7 +1662,7 @@ function setVariationStock_(listingId, identifier, delta, absolute, actor) {
       'Could not read the listing before changing stock, so nothing was sent. ' + (e && e.message ? e.message : e));
   }
 
-  var sku = skuForStock_(live, identifier);
+  var sku = skuForStock_(live, identifier, tiktokSkuId);
   var before = Number(sku.quantity || 0);
   var want = (absolute === null || absolute === undefined || absolute === '')
     ? before + Number(delta || 0)
@@ -1675,16 +1684,89 @@ function setVariationStock_(listingId, identifier, delta, absolute, actor) {
   // it in step is what lets the app show "N left of M" honestly again after an
   // in-app change. An edit made in Seller Center still leaves it stale, which
   // is why the screen hides the denominator when it cannot be true.
+  // Only if we have a row for it. A variation added in Seller Center has none,
+  // and its stock still changes on TikTok — there is simply nothing of ours to
+  // keep in step.
   rows = listSkus_(listingId);
   for (var j = 0; j < rows.length; j++) {
-    if (String(rows[j].identifier) === String(identifier)) {
+    if (identifier && String(rows[j].identifier) === String(identifier)) {
       markSkus_([{ sku_id: String(rows[j].sku_id), stock: after }]);
       break;
     }
   }
 
   logEvent_(actor && actor.name, 'set_stock', String(listingId),
-    identifier + ': ' + before + ' -> ' + after, 'ok');
+    (identifier || sku.valueName || tiktokSkuId) + ': ' + before + ' -> ' + after, 'ok');
 
-  return { identifier: String(identifier), before: before, after: after, requested: want };
+  return {
+    identifier: String(identifier || sku.valueName || ''),
+    before: before,
+    after: after,
+    requested: want
+  };
+}
+
+/**
+ * Hand out the next identifier for a listing, so two phones cannot pick the same one.
+ *
+ * Brien, 15 Sep: "how can we ensure that at least 2 phones can use the app
+ * consecutively on one listing during an actual livestream?"
+ *
+ * Pushes were already safe — every write takes the script lock, so they
+ * serialise and cannot corrupt each other. The gap was earlier and quieter:
+ * each phone worked out the next number from what IT could see, so two phones
+ * looking at a listing ending at B74 both showed B75, and both operators said
+ * "B75" on air. TikTok would have taken both, and the purchase order would
+ * have merged two different products into one row.
+ *
+ * It has to be settled BEFORE the number is spoken, not at push time. An
+ * identifier that changes after somebody has said it and written it on the box
+ * is worse than a collision, because nobody finds out.
+ *
+ * A Script Property counter rather than a row, because a reservation row would
+ * have to be reconciled with the push path and a half-filled SKU row is its
+ * own kind of mess. Seeded from the Sheet the first time a prefix is used, so
+ * a listing mid-stream carries on from where it is rather than restarting.
+ *
+ * Abandoned reservations leave a gap in the numbering. That is the deliberate
+ * trade: a gap is confusing for a second, a duplicate is wrong forever.
+ */
+function reserveIdentifier_(listingId, prefix) {
+  var want = String(prefix || 'A').trim().toUpperCase() || 'A';
+  if (!listingId) throw fail_('TS-SEQ-01', 'An identifier has to be reserved against a listing.');
+
+  var key = 'SEQ_' + String(listingId) + '_' + want;
+
+  return withScriptLock_(20000, function () {
+    var current = Number(prop_(key) || 0);
+
+    if (!current) {
+      // First use of this prefix on this listing: start from whatever is
+      // already there, so a stream that has done B1 to B74 by hand continues
+      // at B75 rather than colliding all the way back up.
+      listSkus_(listingId).forEach(function (r) {
+        var seq = seqOf_(String(r.identifier || ''), want);
+        if (seq > current) current = seq;
+      });
+    }
+
+    var next = current + 1;
+    PropertiesService.getScriptProperties().setProperty(key, String(next));
+    return { identifier: want + next, prefix: want, seq: next };
+  });
+}
+
+/**
+ * The number part of an identifier, if it belongs to this prefix.
+ *
+ * Whole-prefix match only: "B" must not claim "BX7", or switching prefix
+ * mid-stream would drag the old series along with it.
+ */
+function seqOf_(identifier, prefix) {
+  var id = String(identifier || '').trim().toUpperCase();
+  var want = String(prefix || '').trim().toUpperCase();
+  if (!id || !want || id.indexOf(want) !== 0) return 0;
+  var rest = id.slice(want.length);
+  if (!/^\d+$/.test(rest)) return 0;
+  return Number(rest);
 }

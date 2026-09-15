@@ -2689,6 +2689,34 @@ function buildAppendPayload_(snapshot, addition, alsoKeep) {
       'Identifier ' + addition.identifier + ' looks to have been used twice.');
   }
 
+  /**
+   * The same guard on the identifier itself, which is the one that matters.
+   *
+   * The check above compares VALUE NAMES, and a value name is the identifier
+   * followed by the product name — so "B74 4 tier" and "B74 Set of 10 - Whirl
+   * bowl" are different values and sailed straight through it. TikTok accepted
+   * both, and the listing ended up with two live SKUs both carrying
+   * seller_sku B74 (15 Sep, two phones on I12).
+   *
+   * That breaks the one assumption everything else rests on: seller_sku is the
+   * key this app and TikTok agree on. With two, a stock change cannot say which
+   * one it means, the sold count matches both, and the screen draws two rows
+   * against one number.
+   *
+   * So it is refused, and refused rather than silently renamed: the host said
+   * "B74" out loud on the broadcast, and quietly listing it as something else
+   * would be worse than saying so. The message names the next free number.
+   */
+  var takenSku = {};
+  skus.forEach(function (existing) {
+    if (existing.seller_sku) takenSku[String(existing.seller_sku).toLowerCase()] = true;
+  });
+  if (takenSku[String(addition.identifier).toLowerCase()]) {
+    throw fail_('TS-PRD-32', 'Identifier ' + addition.identifier + ' is already on this listing, on a ' +
+      'different variation. Two phones have reached the same number. Nothing was sent — ' +
+      'refresh to pick up the next free identifier and list it again under that.');
+  }
+
   var added = {
     // No `id`: "To create new SKUs, leave the SKU ID blank and complete the
     // other fields."
@@ -5474,4 +5502,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'c42260d 2026-09-15';
+var BACKEND_BUILD = '44efbc2-dirty 2026-09-15';

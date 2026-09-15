@@ -1739,5 +1739,70 @@ check('without the snapshot the same row is unresolved, not silently wrong', () 
   eq(counts.unresolved, 1)
 })
 
+console.log('\nbuildAppendPayload_ \u2014 one identifier, one variation')
+
+/**
+ * Two phones reached B74 and TikTok took both.
+ *
+ * The duplicate guard compared VALUE NAMES, and a value name is the identifier
+ * followed by the product name \u2014 so "B74 4 tier" and "B74 Set of 10 - Whirl
+ * bowl" are different values and went straight through. The listing ended up
+ * with two live SKUs both carrying seller_sku B74 (15 Sep, I12), which breaks
+ * the one key this app and TikTok agree on: a stock change cannot say which it
+ * means, the sold count matches both, and the screen draws two rows against one
+ * number.
+ */
+check('refuses an identifier already on the listing, whatever it is called', () => {
+  const snap = { productId: 'P', title: 't', skus: [
+    sku({ id: '1', sellerSku: 'B74', valueName: 'B74 4 tier', valueId: 'v74' }),
+  ] }
+  // A different product name, so the value-name guard does NOT fire. This is
+  // exactly the payload that got through.
+  const clash = { identifier: 'B74', variantName: 'Set of 10 - Whirl bowl', price: '25', stock: 8, imageUri: 'i' }
+  try {
+    gs.buildAppendPayload_(snap, clash)
+    throw new Error('accepted a second SKU with seller_sku B74')
+  } catch (e) {
+    eq(gs.codeOf_(e), 'TS-PRD-32')
+  }
+})
+
+check('catches it on a carried-forward variation too', () => {
+  // The under-review case: TikTok is not returning B74, so it is restated from
+  // our own row rather than the snapshot. It still occupies the identifier.
+  const snap = { productId: 'P', title: 't', skus: [sku({ id: '1', sellerSku: 'A1' })] }
+  const alsoKeep = [{ id: '9', sellerSku: 'B74', valueName: 'B74 4 tier', skuImgUri: 'i', priceAmount: '14.88', quantity: 8 }]
+  const clash = { identifier: 'B74', variantName: 'Set of 10 - Whirl bowl', price: '25', stock: 8, imageUri: 'i' }
+  try {
+    gs.buildAppendPayload_(snap, clash, alsoKeep)
+    throw new Error('accepted a second SKU with seller_sku B74')
+  } catch (e) {
+    eq(gs.codeOf_(e), 'TS-PRD-32')
+  }
+})
+
+check('a free identifier is still accepted', () => {
+  // The other half: the guard must not refuse ordinary work. Same listing,
+  // same shape, a number nobody has taken.
+  const snap = { productId: 'P', title: 't', skus: [
+    sku({ id: '1', sellerSku: 'B74', valueName: 'B74 4 tier', valueId: 'v74' }),
+  ] }
+  const fresh = { identifier: 'B76', variantName: 'Set of 10 - Whirl bowl', price: '25', stock: 8, imageUri: 'i' }
+  const p = gs.buildAppendPayload_(snap, fresh)
+  eq(p.skus.length, 2)
+  eq(p.skus.filter((x) => !x.id)[0].seller_sku, 'B76')
+})
+
+check('the comparison ignores case, as TikTok would not', () => {
+  const snap = { productId: 'P', title: 't', skus: [sku({ id: '1', sellerSku: 'B74', valueName: 'B74 4 tier', valueId: 'v' })] }
+  const clash = { identifier: 'b74', variantName: 'Something else', price: '1', stock: 1, imageUri: 'i' }
+  try {
+    gs.buildAppendPayload_(snap, clash)
+    throw new Error('accepted b74 against B74')
+  } catch (e) {
+    eq(gs.codeOf_(e), 'TS-PRD-32')
+  }
+})
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

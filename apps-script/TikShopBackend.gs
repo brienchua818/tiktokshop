@@ -245,7 +245,28 @@ function checkSetup() {
   lines.push('CALLBACK URL — must match Partner Center exactly, for every shop');
   try {
     var execUrl = ScriptApp.getService().getUrl();
-    if (execUrl) {
+    if (execUrl && execUrl.slice(-4) === '/dev') {
+      /**
+       * Run from the editor, this returns the /dev URL, not the /exec one.
+       *
+       * And they are NOT the same string with a different ending: /dev carries
+       * the script id, /exec carries the DEPLOYMENT id, so neither can be
+       * derived from the other. Telling somebody "must match Partner Center
+       * exactly" while printing /dev is how the redirect gets set to a URL
+       * that only works while the developer is signed in — which is the
+       * /dev-vs-/exec failure already recorded in this project's history, and
+       * it fails with a Google Drive error mentioning nothing relevant.
+       *
+       * So this refuses to pretend, rather than printing a plausible URL that
+       * is the wrong one.
+       */
+      bad('this is the /dev URL, which is NOT what Partner Center needs');
+      note('  ' + execUrl);
+      note('  You ran checkSetup from the editor, so Apps Script returned the head');
+      note('  URL. Partner Center needs the /exec one, and it carries a different');
+      note('  id, so it cannot be worked out from this.');
+      note('  Get it from Deploy > Manage deployments > the active deployment.');
+    } else if (execUrl) {
       ok(execUrl);
       note('  Partner Center > your app > Redirect URL. One character off and');
       note('  authorising fails with a Google Drive error that mentions none of this.');
@@ -320,8 +341,16 @@ function checkSetup() {
     ok('authorised');
     if (expiry) {
       var days = Math.floor((expiry * 1000 - Date.now()) / 86400000);
-      days > 14 ? note('re-authorisation due in ' + days + ' days')
-                : bad('re-authorise within ' + days + ' days');
+      if (days > 3650) {
+        // TikTok returns a far-future epoch for a refresh token it does not
+        // intend to expire. "36125 days" is arithmetically right and reads as
+        // a bug, so it is said in words.
+        note('refresh token does not expire (TikTok returns a far-future date)');
+      } else if (days > 14) {
+        note('re-authorisation due in ' + days + ' days');
+      } else {
+        bad('re-authorise within ' + days + ' days');
+      }
     }
 
     // Also worth surfacing: the shop_cipher, which nearly every call needs.

@@ -1998,6 +1998,104 @@ function auditReasons_(data) {
  * in Seller Center. Labelled as derived in the UI rather than presented as
  * TikTok's own number.
  */
+/**
+ * What the screen shows as ours, by identifier.
+ *
+ * The invariant this exists to hold: **every SKU TikTok is showing appears
+ * on the screen exactly once.** A live variation is either rendered from our
+ * own row, or — if we have no row that renders — rendered as an external.
+ * Never neither.
+ *
+ * It used to be built from EVERY row, while only `pushed` rows are actually
+ * rendered. So any row in another state suppressed the external fallback for
+ * an identifier it then did not draw, and the variation vanished from a
+ * listing TikTok was serving. Brien, 15 Sep: Seller Center showed B74, B75
+ * and A2 on I12; the app drew A2 alone and its own header said 3/100 next to
+ * a list of one.
+ *
+ * Keyed on `seller_sku`, which is the identifier this app assigns and the
+ * only field both sides agree on before a push returns.
+ */
+function shownAsOurs_(rows) {
+  var shown = {};
+  rows.forEach(function (r) {
+    if (String(r.status) === 'pushed') shown[String(r.identifier)] = true;
+  });
+  return shown;
+}
+
+/**
+ * Reconcile our rows against what TikTok is showing, and say what to write.
+ *
+ * Pure so it can be tested: the decision it makes can delete a livestream's
+ * back catalogue. A row marked removed is dropped from the carry-forward, and
+ * TikTok deletes any SKU absent from a partial edit, so a wrong mark here does
+ * not merely mis-draw a screen — it really deletes.
+ *
+ * Two directions, and the second one was missing entirely:
+ *
+ *  - **Seen.** The id is stored if it was missing (rows written before that
+ *    field existed repair themselves), and the first sighting is stamped.
+ *
+ *  - **Seen, having been marked removed.** TikTok is showing it, so it is on
+ *    the listing, whatever we concluded before. The mark is lifted. Without
+ *    this, `removed` was a one-way door: the loop skipped any row that was not
+ *    `pushed`, so a variation wrongly marked — by a read taken before
+ *    `return_under_review_version` was set, or inside a grace period that was
+ *    too short for a slow review — could never come back, even with TikTok
+ *    serving it on the live product.
+ *
+ *  - **Gone.** Confirmed once and absent now: deleted, in Seller Center or
+ *    here. Marked only after a grace period, because a variation pushed
+ *    seconds ago can briefly be in neither the live nor the under-review
+ *    version.
+ */
+function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
+  var live = {};
+  (liveSkus || []).forEach(function (s) {
+    if (s && s.sellerSku) live[String(s.sellerSku)] = s;
+  });
+
+  var updates = [];
+  (rows || []).forEach(function (r) {
+    var status = String(r.status);
+    if (status !== 'pushed' && status !== 'removed') return;
+
+    var found = live[String(r.identifier)];
+
+    if (found) {
+      var patch = { sku_id: String(r.sku_id) };
+      var changed = false;
+      // TikTok is showing it. It is not removed, and saying so is the whole
+      // point of this branch accepting a removed row at all.
+      if (status === 'removed') {
+        patch.status = 'pushed';
+        patch.error = '';
+        changed = true;
+      }
+      if (found.id && !String(r.tiktok_sku_id || '')) {
+        patch.tiktok_sku_id = String(found.id);
+        changed = true;
+      }
+      if (!String(r.confirmed_at || '')) {
+        patch.confirmed_at = nowIso;
+        changed = true;
+      }
+      if (changed) updates.push(patch);
+      return;
+    }
+
+    // Already marked and still absent: nothing to say.
+    if (status === 'removed') return;
+
+    var seenAt = Date.parse(String(r.confirmed_at || ''));
+    if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
+      updates.push({ sku_id: String(r.sku_id), status: 'removed', error: 'Removed from TikTok' });
+    }
+  });
+  return updates;
+}
+
 function listingState_(listingId) {
   /**
    * Read once.
@@ -2037,45 +2135,7 @@ function listingState_(listingId) {
    * the problem it solves: a SKU nobody wanted, live, at whatever price it
    * had. So the row is marked removed and takes itself out of consideration.
    */
-  var now = new Date().toISOString();
-  var updates = [];
-  rows.forEach(function (r) {
-    if (String(r.status) !== 'pushed') return;
-    var found = live.skus.filter(function (s) {
-      return String(s.sellerSku) === String(r.identifier);
-    })[0];
-
-    if (found) {
-      var patch = { sku_id: String(r.sku_id) };
-      var changed = false;
-      if (found.id && !String(r.tiktok_sku_id || '')) {
-        patch.tiktok_sku_id = String(found.id);
-        changed = true;
-      }
-      if (!String(r.confirmed_at || '')) {
-        patch.confirmed_at = now;
-        changed = true;
-      }
-      if (changed) updates.push(patch);
-      return;
-    }
-
-    /**
-     * Seen once, gone now. Deleted, not pending — but only after a grace
-     * period, because marking this wrongly destroys the variation.
-     *
-     * A row marked removed is dropped from the carry-forward, and TikTok
-     * deletes any SKU absent from a partial edit, so a mistake here is not
-     * cosmetic: it really deletes. The read now includes the under-review
-     * version, which removes the main cause, but a variation pushed seconds
-     * ago can still be in neither version for a moment. Nothing is judged
-     * gone until it has had time to appear.
-     */
-    var seenAt = Date.parse(String(r.confirmed_at || ''));
-    if (!isNaN(seenAt) && Date.now() - seenAt > REMOVAL_GRACE_MS) {
-      updates.push({ sku_id: String(r.sku_id), status: 'removed', error: 'Removed from TikTok' });
-    }
-  });
+  var updates = skuRowUpdates_(rows, live.skus, new Date().toISOString(), Date.now());
   if (updates.length) markSkus_(updates);
   if (updates.length) rows = listSkus_(listingId);
 
@@ -2180,8 +2240,7 @@ function listingState_(listingId) {
   // Everything TikTok has that this app did not list — added in Seller Center,
   // or on another tool. Shown, or the app claims a listing has four variations
   // while listing three, and offers an identifier that is already taken.
-  var oursByIdentifier = {};
-  rows.forEach(function (r) { oursByIdentifier[String(r.identifier)] = true; });
+  var oursByIdentifier = shownAsOurs_(rows);
   live.skus.forEach(function (s) {
     if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
     var extSale = salesFor_(sales, s.id, s.sellerSku);
@@ -2207,6 +2266,21 @@ function listingState_(listingId) {
       cancelled: extSale ? extSale.unsold : null
     });
   });
+
+  /**
+   * The invariant, checked rather than assumed.
+   *
+   * Every SKU TikTok is showing must be drawn exactly once. Both faults found
+   * on 15 Sep broke this silently — the app's own header read 3/100 above a
+   * list of one and said nothing about the discrepancy. A mismatch now leaves
+   * a line in the log naming the listing, so the next one is found by reading
+   * the log rather than by someone noticing two screens disagree.
+   */
+  var shownLive = variants.filter(function (v) { return !v.removed && v.on_tiktok; }).length;
+  if (shownLive !== live.skus.length) {
+    warn_('TS-PRD-31', listingId + ': TikTok shows ' + live.skus.length +
+      ' variation(s), the app draws ' + shownLive);
+  }
 
   return {
     listing_id: String(listingId),

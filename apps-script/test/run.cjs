@@ -117,7 +117,8 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
-    checkStockTotal_, skuForStock_, seqOf_
+    checkStockTotal_, skuForStock_, seqOf_,
+    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS
   };
 `
 
@@ -1551,6 +1552,91 @@ check('a Seller Center variation can be addressed by TikTok id alone', () => {
   eq(gs.skuForStock_(live, 'B70', '').id, '9001')
   try { gs.skuForStock_(live, '', '9999'); throw new Error('accepted an unknown id') }
   catch (e) { eq(gs.codeOf_(e), 'TS-STK-02') }
+})
+
+/**
+ * Every SKU TikTok shows must reach the screen exactly once.
+ *
+ * Brien, 15 Sep: Seller Centre showed B74, B75 and A2 on listing I12. The app
+ * drew A2 alone — and its own header said 3/100 directly above a list of one,
+ * which is the contradiction that gave the bug away. Two independent faults
+ * had to line up, so both are pinned here.
+ */
+const GRACE = 10 * 60 * 1000
+const HOUR_AGO = new Date(Date.now() - 3600_000).toISOString()
+
+check('a variation TikTok is showing again is no longer removed', () => {
+  // B74 was wrongly marked on an earlier refresh. TikTok is serving it.
+  const rows = [
+    { sku_id: 'r1', identifier: 'B74', status: 'removed', confirmed_at: HOUR_AGO, tiktok_sku_id: '1' },
+    { sku_id: 'r2', identifier: 'A2', status: 'pushed', confirmed_at: HOUR_AGO, tiktok_sku_id: '2' },
+  ]
+  const live = [{ sellerSku: 'B74', id: '1' }, { sellerSku: 'A2', id: '2' }]
+  const updates = gs.skuRowUpdates_(rows, live, 'NOW', Date.now())
+  eq(updates.length, 1)
+  eq(updates[0].sku_id, 'r1')
+  eq(updates[0].status, 'pushed')
+  // The stale reason has to go with it, or the row still reads as deleted.
+  eq(updates[0].error, '')
+})
+
+check('a variation still absent stays removed, and is not re-marked', () => {
+  const rows = [{ sku_id: 'r1', identifier: 'B74', status: 'removed', confirmed_at: HOUR_AGO, tiktok_sku_id: '1' }]
+  eq(gs.skuRowUpdates_(rows, [], 'NOW', Date.now()).length, 0)
+})
+
+check('a confirmed variation that vanishes is marked removed, after the grace period', () => {
+  const rows = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: HOUR_AGO, tiktok_sku_id: '1' }]
+  const updates = gs.skuRowUpdates_(rows, [], 'NOW', Date.now())
+  eq(updates.length, 1)
+  eq(updates[0].status, 'removed')
+})
+
+check('a variation pushed seconds ago is not judged gone', () => {
+  // The grace period. Marking this wrongly really deletes: a removed row is
+  // dropped from the carry-forward, and TikTok deletes any SKU absent from a
+  // partial edit.
+  const justNow = new Date(Date.now() - (GRACE - 5000)).toISOString()
+  const rows = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: justNow, tiktok_sku_id: '1' }]
+  eq(gs.skuRowUpdates_(rows, [], 'NOW', Date.now()).length, 0)
+})
+
+check('a first sighting stamps the id and the time, and only once', () => {
+  const rows = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: '', tiktok_sku_id: '' }]
+  const live = [{ sellerSku: 'B74', id: '77' }]
+  const first = gs.skuRowUpdates_(rows, live, 'NOW', Date.now())
+  eq(first.length, 1)
+  eq(first[0].tiktok_sku_id, '77')
+  eq(first[0].confirmed_at, 'NOW')
+  // Nothing left to write on the next refresh.
+  const settled = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: HOUR_AGO, tiktok_sku_id: '77' }]
+  eq(gs.skuRowUpdates_(settled, live, 'NOW', Date.now()).length, 0)
+})
+
+check('only rows the screen actually draws suppress the external fallback', () => {
+  // The second fault. `variants` renders pushed rows and nothing else, but the
+  // suppression set was built from EVERY row — so a row in any other state
+  // hid a live variation from both paths at once.
+  const rows = [
+    { identifier: 'A2', status: 'pushed' },
+    { identifier: 'B74', status: 'removed' },
+    { identifier: 'B75', status: 'error' },
+    { identifier: 'B76', status: 'queued' },
+  ]
+  const shown = gs.shownAsOurs_(rows)
+  eq(shown['A2'], true)
+  // Each of these is on TikTok. None of them is drawn as ours, so each must
+  // fall through to the external path rather than disappearing.
+  eq(shown['B74'], undefined)
+  eq(shown['B75'], undefined)
+  eq(shown['B76'], undefined)
+})
+
+check('nothing is drawn twice', () => {
+  // The other half of the invariant: a row that IS drawn as ours must not also
+  // appear as an external, or the count doubles and the identifier reads as taken.
+  const shown = gs.shownAsOurs_([{ identifier: 'A2', status: 'pushed' }])
+  eq(shown['A2'], true)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

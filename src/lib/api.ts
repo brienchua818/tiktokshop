@@ -210,6 +210,8 @@ export interface ListingState {
   product_status: string
   audit_reasons: string[]
   variations_on_tiktok: number
+  /** How many have been removed, without carrying them. */
+  removed_count?: number
   max_skus: number
   variants: LiveVariant[]
   checked_at: string
@@ -386,6 +388,19 @@ export const api = {
    */
   listingState: (listingId: string) =>
     call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs: 40_000 }),
+
+  /**
+   * The variations taken off a listing. Asked for only when that tab is opened.
+   *
+   * They used to ride along with every refresh: 116 of them against 12 live on
+   * Brien's 15 Sep stream, which was most of the payload and most of the
+   * phone's work, on a screen that refreshes throughout a broadcast.
+   */
+  removedVariations: (listingId: string) =>
+    call<{ listing_id: string; variants: LiveVariant[]; checked_at: string }>('removedVariations', {
+      body: { listing_id: listingId },
+      timeoutMs: 40_000,
+    }),
 
   /** Pull a window of orders down from TikTok into the Sheet. */
   syncOrders: (body: {

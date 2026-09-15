@@ -325,6 +325,10 @@ function route_(action, params, body, user) {
         user
       ));
 
+    // Asked for only when the Removed tab is opened. See removedVariations_.
+    case 'removedVariations':
+      return json_(removedVariations_(params.listing_id || body.listing_id));
+
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(usersForClient_());

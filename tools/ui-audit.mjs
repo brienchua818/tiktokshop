@@ -88,7 +88,7 @@ const REPLIES = {
   allowance: { used: 88, cap: 1000, remaining: 912, tracked: true },
   listingState: {
     listing_id: '1734903629786286062', title: 'HOUZE x Table Matters - I12 Clearance Sale',
-    product_status: 'ACTIVATE', audit_reasons: [], variations_on_tiktok: 3, max_skus: 100,
+    product_status: 'ACTIVATE', audit_reasons: [], variations_on_tiktok: 3, max_skus: 100, removed_count: 1,
     checked_at: new Date().toISOString(),
     variants: [
       variant(),
@@ -130,6 +130,13 @@ const REPLIES = {
   ],
   setRole: { email: 'judy@sheldonglobal.com', role: 'lister' },
   setStock: { identifier: 'A1', before: 48, after: 58, requested: 58 },
+  removedVariations: {
+    listing_id: '1734903629786286062',
+    variants: [
+      { identifier: 'B1', variant: 'B1 Oval Storage Ottoman', price: '18.90', status: 'removed', external: false, tiktok_sku_id: '9005', image_url: '', created_at: '2026-09-07T00:30:00Z', created_by: 'Liz Liu', on_tiktok: false, under_review: false, unaccounted: false, removed: true, stock_set: 2, stock_available: null, sold: null, cancelled: null },
+    ],
+    checked_at: new Date().toISOString(),
+  },
   tiktokProducts: { products: [{ id: '1734903629786286062', title: 'HOUZE x Table Matters - I12 Clearance Sale', status: 'ACTIVATE', sku_count: 3 }], next_page_token: '' },
   exportOrders: { url: 'https://docs.google.com/x', name: 'HOUZE - Purchase order.xlsx', folder: 'Exports/2026/2026-09/2026-09-07', folder_url: LINKS.exports, listings: 2, units: 59, revenue: 2394.05, cost_divisor: 1.6, photos_placed: 25, photos_missing: 0 },
 }

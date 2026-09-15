@@ -113,8 +113,10 @@ describe('mergeRows — every phone shows the same listing', () => {
 
   it('shows a variation pushed from another phone, which the old list dropped', () => {
     const rows = mergeRows([mine], state([mineLive, fromOtherPhone]))
-    expect(rows.map((r) => (r.kind === 'draft' ? r.draft.identifier : r.live.identifier))).toEqual(['B9', 'L11'])
-    expect(rows[1]!.kind).toBe('remote')
+    // Newest first: L11 was created after B9.
+    expect(rows.map((r) => (r.kind === 'draft' ? r.draft.identifier : r.live.identifier))).toEqual(['L11', 'B9'])
+    // The other phone's variation is the newer one, so it now leads.
+    expect(rows[0]!.kind).toBe('remote')
   })
   it('does not duplicate a variation this phone already has as a draft', () => {
     const rows = mergeRows([mine], state([mineLive]))
@@ -122,11 +124,14 @@ describe('mergeRows — every phone shows the same listing', () => {
     expect(rows[0]!.kind).toBe('draft')
     expect((rows[0] as { live: LiveVariant | null }).live?.on_tiktok).toBe(true)
   })
-  it('orders by creation time across phones, Seller Center last', () => {
+  it('orders newest first across phones, Seller Center last', () => {
     const later = draft({ draft_id: 'd-b12', identifier: 'B12', status: 'queued', created_at: '2026-09-07T14:00:00Z' })
     const rows = mergeRows([later, mine], state([mineLive, fromOtherPhone, sellerCenter]))
     expect(rows.map((r) => (r.kind === 'draft' ? r.draft.identifier : r.live.identifier || r.live.variant)))
-      .toEqual(['B9', 'L11', 'B12', 'Diatomite Absorbent Mat'])
+      // Newest first, and Seller Center last whatever its age: it has no
+      // creation time we know, so guessing one would scatter such rows through
+      // the list instead of keeping them together at the end.
+      .toEqual(['B12', 'L11', 'B9', 'Diatomite Absorbent Mat'])
   })
   it('works with no live state yet: local drafts only', () => {
     expect(mergeRows([mine], null)).toHaveLength(1)
@@ -169,7 +174,8 @@ describe('splitRows', () => {
       variant({ identifier: 'C', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T02:00:00.000Z' }),
     ]))
     const { active, removed } = splitRows(rows)
-    expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['C', 'A'])
+    // Newest first within each side: A is 03:00, C is 02:00.
+    expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['A', 'C'])
     expect(active.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B'])
   })
 

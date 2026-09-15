@@ -78,7 +78,25 @@ export function mergeRows(drafts: readonly QueuedDraft[], live: ListingState | n
       })
     }
   }
-  return rows.sort((a, b) => a.sortKey.localeCompare(b.sortKey))
+  /**
+   * Newest first.
+   *
+   * Brien, 15 Sep: "new listings pushed should appear on the top". Obvious in
+   * hindsight — the thing you just pushed is the thing you want to check, and
+   * on a listing carrying a hundred variations the newest one was a hundred
+   * rows down. It was oldest-first because the queue began life as a to-do
+   * list, where that was right; it is now a record of what is on the listing,
+   * where it is not.
+   *
+   * Variations added outside the app still sort last: they have no creation
+   * time we know, and guessing one would scatter them through the list.
+   */
+  return rows.sort((a, b) => {
+    const external = (r: QueueRow) => (r.kind === 'remote' && r.live.external ? 1 : 0)
+    const side = external(a) - external(b)
+    if (side !== 0) return side
+    return b.sortKey.localeCompare(a.sortKey)
+  })
 }
 
 /**

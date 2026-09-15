@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, ApiError, type ListingState, type LiveVariant } from '../lib/api'
 import { toBase64 } from '../lib/bytes'
 import {
@@ -195,13 +195,46 @@ export default function DraftQueue({
   const { active, removed } = useMemo(() => splitRows(rows), [rows])
   const [tab, setTab] = useState<'active' | 'removed'>('active')
 
+  /**
+   * The removed list, fetched when its tab is opened and not before.
+   *
+   * It used to arrive with every refresh. On Brien's 15 Sep stream that was
+   * 116 rows against 12 live — ninety per cent of the payload, over 4G, then
+   * sorted and rendered by the phone, on the screen that refreshes most. The
+   * record is worth keeping; paying for it every few seconds is not.
+   */
+  const [removedRows, setRemovedRows] = useState<LiveVariant[] | null>(null)
+  const [removedBusy, setRemovedBusy] = useState(false)
+  const [removedError, setRemovedError] = useState('')
+  const removedCount = live?.removed_count ?? removed.length
+
+  const loadRemoved = useCallback(async () => {
+    if (!listingId) return
+    setRemovedBusy(true)
+    setRemovedError('')
+    try {
+      const r = await api.removedVariations(listingId)
+      setRemovedRows(r.variants)
+    } catch (e: unknown) {
+      setRemovedError(e instanceof ApiError ? e.display : String(e))
+    } finally {
+      setRemovedBusy(false)
+    }
+  }, [listingId])
+
+  // Opening the tab is the trigger, and only the first time: it is a record,
+  // so it does not change while somebody is looking at it.
+  useEffect(() => {
+    if (tab === 'removed' && removedRows === null && !removedBusy) void loadRemoved()
+  }, [tab, removedRows, removedBusy, loadRemoved])
+
   // The tab only exists while there is something in it, and the moment it
   // empties the view goes back rather than showing an empty pane.
   useEffect(() => {
-    if (removed.length === 0 && tab === 'removed') setTab('active')
-  }, [removed.length, tab])
+    if (removedCount === 0 && tab === 'removed') setTab('active')
+  }, [removedCount, tab])
 
-  const shown = tab === 'removed' ? removed : active
+  const shown = tab === 'removed' ? [] : active
 
   /** When TikTok was last asked, in Singapore time. Empty until it has been. */
   const checkedAt = live
@@ -333,7 +366,7 @@ export default function DraftQueue({
         it is looking now.
       */}
       <div className="flex items-center gap-2 h-11 pl-3 pr-1 border-b border-line2">
-        {removed.length === 0 ? (
+        {removedCount === 0 ? (
           <>
             <span className="text-xs font-semibold tracking-wide text-muted uppercase whitespace-nowrap">
               On this listing
@@ -358,7 +391,7 @@ export default function DraftQueue({
             />
             <QueueTab
               label="Removed"
-              count={removed.length}
+              count={removedCount}
               on={tab === 'removed'}
               onClick={() => setTab('removed')}
             />
@@ -381,7 +414,7 @@ export default function DraftQueue({
               className="text-xs text-faint whitespace-nowrap shrink-0"
               title={`TikTok last checked at ${checkedAt}`}
             >
-              {removed.length === 0 ? `checked ${checkedAt}` : checkedAt}
+              {removedCount === 0 ? `checked ${checkedAt}` : checkedAt}
             </span>
           )
         )}
@@ -450,7 +483,26 @@ export default function DraftQueue({
         </p>
       )}
 
-      <ul className="space-y-1 max-h-80 overflow-y-auto">
+      {tab === 'removed' && (
+        <ul className="space-y-1 max-h-80 overflow-y-auto">
+          {removedBusy && <li className="text-xs text-faint py-4 text-center">Loading…</li>}
+          {removedError && <li className="text-xs text-bad py-4 text-center">{removedError}</li>}
+          {(removedRows ?? []).map((v) => (
+            <RemoteRow
+              key={`removed:${v.tiktok_sku_id || v.identifier}`}
+              v={v}
+              productStatus={live?.product_status ?? null}
+              onRemove={() => {}}
+              onAdjust={() => {}}
+            />
+          ))}
+          {removedRows !== null && removedRows.length === 0 && !removedBusy && (
+            <li className="text-xs text-faint py-4 text-center">Nothing has been removed.</li>
+          )}
+        </ul>
+      )}
+
+      <ul className={`space-y-1 max-h-80 overflow-y-auto${tab === 'removed' ? ' hidden' : ''}`}>
         {shown.map((row) =>
           row.kind === 'draft' ? (
             renderDraft(row.draft)

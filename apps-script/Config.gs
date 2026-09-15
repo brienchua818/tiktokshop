@@ -106,6 +106,16 @@ var TAB_SKUS = 'SKUs';
  */
 var REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * How long a variation must have been missing before it counts as deleted.
+ *
+ * Getting this wrong deletes: a row marked removed is dropped from the
+ * carry-forward, and TikTok deletes any SKU absent from a partial edit. Ten
+ * minutes is far longer than any read lag and far shorter than a stream, so a
+ * deliberate removal still leaves the list within a refresh or two.
+ */
+var REMOVAL_GRACE_MS = 10 * 60 * 1000;
+
 var TAB_ORDERS = 'Orders';
 var TAB_ORDER_ITEMS = 'Order Items';
 var TAB_LOG = 'Log';

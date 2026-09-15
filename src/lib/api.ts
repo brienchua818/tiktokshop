@@ -332,19 +332,54 @@ export type Me = SignedInUser & {
   session_expires_at?: string
 }
 
+/**
+ * Retry a read that gates the app.
+ *
+ * Apps Script's own request latency is wildly variable, and none of it is ours.
+ * Measured against the live deployment on 15 Sep, six consecutive `ping` calls
+ * — an action that runs one statement and touches no Sheet, no Drive and no
+ * network — came back in 1.1s, 1.2s, 1.9s, 2.3s, 8.0s and 15.6s. `whoami`, on
+ * the path that returns before any Sheet is opened, hit 41s and 43s. So the
+ * 25 second deadline is not too tight for the work; it is too tight for
+ * Google, sometimes, at random.
+ *
+ * A client cannot make Apps Script faster. It can ask again, and the odds are
+ * strongly on the next attempt being one of the fast ones — which is the
+ * difference between Brien staring at a sign-in screen that will not sign him
+ * in and the app simply opening a second later.
+ *
+ * Reads only. A write that times out may still have gone through, so asking
+ * again could duplicate it; those belong to the offline queue and are
+ * protected by an idempotency key instead.
+ */
+export async function retryRead<T>(read: () => Promise<T>, attempts = 3): Promise<T> {
+  for (let n = 1; ; n++) {
+    try {
+      return await read()
+    } catch (e: unknown) {
+      // A timeout or a 5xx is worth asking again. A 401 or a 403 is not, and
+      // retrying only delays saying so.
+      const retryable = e instanceof ScriptError ? e.isRetryable : true
+      if (n >= attempts || !retryable) throw e
+      await new Promise((r) => setTimeout(r, n * 1_000))
+    }
+  }
+}
+
 export const api = {
   /** Who the backend thinks you are, and whether you may act yet. */
   me: async () => {
-    const me = await call<Me>('whoami')
+    const me = await retryRead(() => call<Me>('whoami'))
     // The Google token bought this; the session is what every later call
     // uses, so a phone is not sent back to sign in every hour.
     if (me.session_token) setSessionToken(me.session_token)
     return me
   },
 
-  shops: () => call<Shop[]>('shops'),
+  shops: () => retryRead(() => call<Shop[]>('shops')),
 
-  listings: (shopId: string) => call<Listing[]>('listings', { body: { shop_id: shopId } }),
+  listings: (shopId: string) =>
+    retryRead(() => call<Listing[]>('listings', { body: { shop_id: shopId } })),
 
   /**
    * The shop's live products on TikTok, so a stream can be picked from a list.

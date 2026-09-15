@@ -91,7 +91,7 @@ export default function App() {
     if (!user) return
     setShopsError('')
     /**
-     * Tried three times before giving up, because this one call gates the app.
+     * Retried inside `api.shops`, because this one call gates the app.
      *
      * It ran exactly once at sign-in, so a single blip left the whole app
      * showing no shops until somebody thought to fully reload the page —
@@ -100,22 +100,15 @@ export default function App() {
      * button behind it; this one had neither, on the path that blocks
      * listing, orders and everything else.
      *
-     * Only retryable failures: a timeout or a 5xx is worth asking again, a
-     * 401 or a 403 is not and would only delay saying so.
+     * The retry used to live here, which meant it protected this call and
+     * nothing else — so `whoami` kept the original fault and killed sign-in
+     * on 15 Sep. It is now `retryRead` in api.ts, shared by every read the
+     * app cannot open without.
      */
     let cancelled = false
-    const attempt = async (n: number): Promise<Shop[]> => {
-      try {
-        return await api.shops()
-      } catch (e: unknown) {
-        const retryable = e instanceof ApiError ? e.isRetryable : true
-        if (n >= 3 || !retryable || cancelled) throw e
-        await new Promise((r) => setTimeout(r, n * 1_000))
-        return attempt(n + 1)
-      }
-    }
 
-    attempt(1)
+    api
+      .shops()
       .then((rows) => {
         if (cancelled) return
         setShops(rows)

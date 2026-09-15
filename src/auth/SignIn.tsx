@@ -4,7 +4,6 @@ import { setIdToken } from '../lib/script-api'
 import {
   isConfigured,
   onToken,
-  promptSilently,
   renderSignInButton,
   SignInUnavailable,
 } from './google'
@@ -92,18 +91,22 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
     let cancelled = false
     void (async () => {
       /**
-       * The button and the silent prompt are separate, and only one of them
-       * failing is worth a message.
+       * One route in, and it is the button.
        *
-       * They were one try block, so a declined prompt painted "Could not load
-       * Google sign-in" over a button that was sitting right there working.
-       * And Google declines routinely: One Tap goes into an exponential
-       * cooldown after a few dismissals, which is exactly what a week of
-       * signing in and out during testing produces. Brien, 14 Sep: trouble
-       * logging in.
+       * This screen used to ALSO fire Google's One Tap, which draws its own
+       * sheet at the bottom of the phone — a second "Sign in to
+       * sheldon-tikshop.netlify.app with Google" under our own button. Brien,
+       * 15 Sep, on iPhone Chrome: tapping that one does not let him in.
        *
-       * So the button is what must work, and its failure is the only one that
-       * gets reported. A prompt that declines is silent by design.
+       * Two sign-in affordances on one screen is a bad screen whatever the
+       * second one does, and this one was never load-bearing: One Tap goes
+       * into an exponential cooldown after a few dismissals, so it was already
+       * absent most of the time. Removing it costs nothing anyone relied on
+       * and removes a control that fails.
+       *
+       * The renewal prompt in api.ts stays. It fires an hour into a stream to
+       * refresh the Google token that AI name and Voice need, and for a
+       * signed-in browser it completes without drawing anything.
        */
       try {
         if (buttonRef.current) await renderSignInButton(buttonRef.current)
@@ -111,13 +114,6 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
         if (!cancelled) {
           setError(e instanceof SignInUnavailable ? e.message : 'Could not load Google sign-in.')
         }
-        return
-      }
-      try {
-        if (!cancelled) await promptSilently()
-      } catch {
-        // Google declined to offer the one-tap. The button below is the way in
-        // and is already on screen, so there is nothing to report.
       }
     })()
 

@@ -196,10 +196,26 @@ enough geometry to diagnose it without a second run.
   `Code.gs`** in the Apps Script project — that is Apps Script's default file
   name and the project has only the one file. `TikShopBackend.gs` is the name
   of the build output in this repo and exists nowhere in his editor, so never
-  tell him to open it. Give him the **commit-pinned** raw URL
-  (`https://raw.githubusercontent.com/brienchua818/tiktokshop/<sha>/apps-script/TikShopBackend.gs`;
-  never `/main/`, it caches stale) **and the line count** so he can confirm the
-  paste is whole. Existing behaviour that needs the new backend is not fixed
+  tell him to open it.
+
+  ### Every paste instruction carries BOTH links. No exceptions.
+
+  He cannot paste without somewhere to paste into, and asking him to go and
+  find the project himself is asking him to do the one part of this that is
+  purely my job. I have left the project link out more than once — most
+  recently on 15 Sep, after telling him in the same session that any message
+  sending him somewhere includes the URL.
+
+  1. **The Apps Script project**, to paste into:
+     `https://script.google.com/u/1/home/projects/1wpoSCb_92TeiTllu8C61wAhrVz89L-qINaOYP2u1oWzBw5PFSK-p9PG5/edit`
+  2. **The commit-pinned raw file**, to copy from:
+     `https://raw.githubusercontent.com/brienchua818/tiktokshop/<sha>/apps-script/TikShopBackend.gs`
+     — never `/main/`, which serves a stale cached copy.
+  3. **The line count**, so he can tell a truncated paste from a whole one.
+  4. **The build stamp** the pasted backend will report, so `checkSetup`
+     confirms the paste landed rather than him having to trust it did.
+  5. **Any one-off function to run afterwards** — `setupSheets` when a tab was
+     added, `installOrderSync` when the timer changed — named explicitly. Existing behaviour that needs the new backend is not fixed
   until he has pasted it — say so.
 - Any message that tells him to go somewhere includes the URL.
 

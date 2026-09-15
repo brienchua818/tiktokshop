@@ -434,9 +434,32 @@ function replaceByKey_(tabName, keyField, rows) {
   var incoming = {};
   rows.forEach(function (r) { incoming[String(r[keyField])] = 1; });
 
-  var kept = readAll_(tabName).filter(function (r) {
+  var existing = readAll_(tabName);
+  var kept = existing.filter(function (r) {
     return !incoming[String(r[keyField])];
   });
+
+  /**
+   * Nothing being replaced means this is an append, so append.
+   *
+   * The rewrite below reads the whole tab and writes the whole tab back, and
+   * the cost is the tab's SIZE rather than the size of what arrived. That was
+   * tolerable when a sync was something Brien pressed a few times a day. It is
+   * not tolerable every two minutes for a three-hour broadcast, on a tab that
+   * grows with every order ever taken.
+   *
+   * During a stream almost every order is new, so this is the path almost
+   * every sync takes: cost proportional to what came in, not to everything
+   * that ever has. The rewrite is still there for the case that needs it — an
+   * order whose status changed after the first sync, which must update in
+   * place rather than appear twice.
+   */
+  if (kept.length === existing.length) {
+    appendRows_(tabName, rows.map(function (r) {
+      return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
+    }));
+    return rows.length;
+  }
 
   var all = kept.concat(rows).map(function (r) {
     return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
@@ -519,4 +542,7 @@ function findByIdempotencyKey_(key) {
 function recordSku_(sku) {
   var row = HEADERS[TAB_SKUS].map(function (h) { return sku[h] === undefined ? '' : sku[h]; });
   appendRows_(TAB_SKUS, [row]);
+  // One property write, so the background order sync can decide whether this
+  // shop is worth syncing without reading a whole tab to find out.
+  if (sku.shop_id) noteListed_(String(sku.shop_id));
 }

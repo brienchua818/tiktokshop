@@ -82,6 +82,8 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-ORD-20` | Orders.gs:621 | Sales cache unavailable: |
 | `TS-ORD-21` | Orders.gs:629 | Could not cache sales for : |
 | `TS-ORD-22` | Product.gs:557 | Could not read sales for : |
+| `TS-ORD-23` | Orders.gs:795 | Background sync could not read its activity marks: |
+| `TS-ORD-24` | Orders.gs:818 | Background sync failed for : |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:228 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:488 | Unknown listing: |

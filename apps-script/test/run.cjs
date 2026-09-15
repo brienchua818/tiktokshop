@@ -134,9 +134,9 @@ ${src}
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
-    readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_,
+    readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
-    variationState_, bySellerSku_,
+    variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -2046,6 +2046,139 @@ check('bySellerSku_ skips a SKU with no seller_sku', () => {
   const index = gs.bySellerSku_([{ id: '1', sellerSku: 'B74' }, { id: '2', sellerSku: '' }, null])
   eq(Object.keys(index), ['B74'])
 })
+
+console.log('\nthe background order sync')
+
+/**
+ * The sold count was frozen at whenever somebody last pressed Sync on the
+ * Orders tab — which nobody does during a broadcast. It now runs on Apps
+ * Script's own timer, gated on ACTIVITY rather than on the clock: a "stream
+ * hours" window would need a timezone and a schedule and remembering to change
+ * it, and would still miss a daytime stream while burning quota through a
+ * quiet evening.
+ */
+const HOURS = 3600 * 1000
+const NOW = Date.parse('2026-09-15T14:00:00.000Z')
+
+check('syncs a shop that has listed recently', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS }, NOW, 6), ['HZ'])
+})
+
+check('leaves a shop that has been quiet', () => {
+  // Overnight this must cost three property reads and a return, nothing more.
+  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, 6), [])
+})
+
+check('syncs every active shop, and only those', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS, PM: NOW - 2 * HOURS, TM: NOW - 30 * HOURS }, NOW, 6),
+     ['HZ', 'PM'])
+})
+
+check('a shop that has never listed is not synced', () => {
+  eq(gs.shopsToSync_({ HZ: 0 }, NOW, 6), [])
+  eq(gs.shopsToSync_({ '': NOW }, NOW, 6), [])
+})
+
+check('nothing at all is an empty list, not a crash', () => {
+  // This runs seven hundred times a day inside a timer, and Apps Script
+  // disables a trigger that keeps throwing \u2014 a sync that silently stopped
+  // weeks ago is the worst version of this feature.
+  eq(gs.shopsToSync_({}, NOW, 6), [])
+  eq(gs.shopsToSync_(null, NOW, 6), [])
+})
+
+check('the boundary is inclusive, so a shop on the edge still syncs', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 6 * HOURS }, NOW, 6), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 6 * HOURS - 1 }, NOW, 6), [])
+})
+
+console.log('\nnew orders append; changed orders rewrite')
+
+/**
+ * `replaceByKey_` read the whole tab and wrote the whole tab back, so the cost
+ * of a sync was the size of everything ever synced rather than the size of
+ * what arrived. Fine when a sync was something pressed a few times a day;
+ * not fine every two minutes for a three-hour broadcast.
+ *
+ * During a stream almost every order is new, so appending is the path almost
+ * every sync now takes. The rewrite stays for the case that needs it: an order
+ * whose status changed after the first sync has to update in place rather than
+ * appear twice.
+ */
+function describe_replaceByKey() {
+  let rows = []
+  let writes = { at: [], cleared: 0 }
+
+  const install = () => {
+    gs.__setHeaders('Orders', ['order_id', 'status'])
+    gs.__setSheetImpl(() => ({
+      getLastRow: () => rows.length + 1,
+      getRange: (r) => ({
+        getValues: () => rows.map((x) => [x.order_id, x.status]),
+        // The row a write STARTS at is what tells the two paths apart, and
+        // guessing at it is how the first version of this test reported a
+        // rewrite as an append. A rewrite starts at row 2, under the header;
+        // an append starts below the last row.
+        setValues: (v) => { writes.at.push({ row: r, count: v.length }) },
+        setValue: () => {},
+        clearContent: () => { writes.cleared++ },
+        setFontWeight() { return this },
+      }),
+    }))
+    gs.invalidateRead_()
+    writes = { at: [], cleared: 0 }
+  }
+
+  /** Rows written starting below the last row: an append. */
+  const appended = () => writes.at.filter((w) => w.row > rows.length + 1).reduce((n, w) => n + w.count, 0)
+  /** Rows written starting at row 2: the whole tab, rewritten. */
+  const rewritten = () => writes.at.filter((w) => w.row === 2).reduce((n, w) => n + w.count, 0)
+
+  check('all-new orders are appended, not rewritten', () => {
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
+    gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o3', status: 'PAID' }])
+    eq(appended(), 1)
+    // The two already there were not touched. That is the whole saving.
+    eq(rewritten(), 0)
+  })
+
+  check('a changed order still rewrites, so it cannot appear twice', () => {
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
+    gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o2', status: 'CANCELLED' }])
+    // One kept plus the updated one, written in place.
+    eq(rewritten(), 2)
+    eq(appended(), 0)
+  })
+
+  check('a mix of new and changed rewrites, because one of them must', () => {
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }]
+    gs.replaceByKey_('Orders', 'order_id', [
+      { order_id: 'o1', status: 'CANCELLED' },
+      { order_id: 'o2', status: 'PAID' },
+    ])
+    eq(rewritten(), 2)
+    eq(appended(), 0)
+  })
+
+  check('an empty batch writes nothing at all', () => {
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }]
+    eq(gs.replaceByKey_('Orders', 'order_id', []), 0)
+    eq(writes.at.length, 0)
+  })
+
+  check('appending into an empty tab still works', () => {
+    install()
+    rows = []
+    gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o1', status: 'PAID' }])
+    eq(writes.at.length, 1)
+    eq(writes.at[0].count, 1)
+  })
+}
+describe_replaceByKey()
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

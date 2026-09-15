@@ -667,3 +667,155 @@ function listingOrders_(listingId, fromDate, fromTime, toDate, toTime) {
     total_revenue: Math.round(rows.reduce(function (n, r) { return n + r.revenue; }, 0) * 100) / 100
   };
 }
+
+// ── the background sync ───────────────────────────────────────────────
+
+/**
+ * Keep the sold count current without anyone pressing anything.
+ *
+ * Brien, 15 Sep: *"Isn't orders always synced when I press the sync icon in
+ * listings tab?"* It was not. The listing refresh reads orders from the SHEET;
+ * only the Sync button on the Orders tab pulls new ones from TikTok. Nobody
+ * touches that tab during a broadcast, so the sold figure on every phone was
+ * frozen at whenever somebody last synced — which is why variations showed a
+ * creator and no sold count.
+ *
+ * Fixing it on the phone was the obvious move and the wrong one. Pulling
+ * orders on every listing refresh would add three to eight TikTok calls and
+ * several seconds to the button pressed most during a stream, and compete for
+ * the rate limit with the pushes. A browser timer is worse still: it only runs
+ * while a phone is awake with the app in front.
+ *
+ * So it runs on Apps Script's own schedule. The listing refresh stays a Sheet
+ * read and stays fast; sold is never more than one interval old; and it is
+ * true on every phone at once, including one that has been in a pocket.
+ */
+var SYNC_EVERY_MINUTES = 2;
+var SYNC_WINDOW_MIN = 20;
+var SYNC_ACTIVE_HOURS = 6;
+var SYNC_TRIGGER_FN = 'syncRecentOrders';
+var LAST_LISTED_PREFIX = 'LAST_LISTED_';
+
+/**
+ * Install the timer. Run once, by hand, from the editor.
+ *
+ * Idempotent: it removes any trigger it already installed before adding one,
+ * so running it twice does not sync twice as often.
+ */
+function installOrderSync() {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === SYNC_TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  ScriptApp.newTrigger(SYNC_TRIGGER_FN).timeBased().everyMinutes(SYNC_EVERY_MINUTES).create();
+  var message = 'Order sync installed: every ' + SYNC_EVERY_MINUTES + ' minutes' +
+    (removed ? ' (replaced ' + removed + ' existing)' : '');
+  console.log(message);
+  return message;
+}
+
+/** Take the timer off again. */
+function removeOrderSync() {
+  var removed = 0;
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === SYNC_TRIGGER_FN) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  return 'Removed ' + removed + ' order sync trigger(s)';
+}
+
+/**
+ * Shops worth syncing right now.
+ *
+ * Gated on ACTIVITY rather than on the clock. A "stream hours" window would
+ * need a timezone, a schedule, and remembering to change it — and would miss a
+ * daytime stream while burning quota through a quiet evening. A shop that has
+ * listed something in the last few hours is a shop taking orders; one that has
+ * not is costing nothing.
+ *
+ * Pure so the rule can be asserted without a Sheet or a clock.
+ */
+function shopsToSync_(lastListed, nowMs, activeHours) {
+  var cutoff = nowMs - (activeHours || SYNC_ACTIVE_HOURS) * 3600 * 1000;
+  var out = [];
+  Object.keys(lastListed || {}).forEach(function (shopId) {
+    if (!shopId) return;
+    var at = Number(lastListed[shopId] || 0);
+    if (at && at >= cutoff) out.push(shopId);
+  });
+  return out.sort();
+}
+
+/**
+ * When each shop last listed something, from Script Properties.
+ *
+ * Deliberately NOT from the SKUs tab. The gate runs on every firing of the
+ * timer — seven hundred times a day — and reading a whole tab to decide
+ * whether to do nothing is more expensive than the work it is avoiding.
+ * `noteListed_` writes one property on each push instead; reading three of
+ * them is free.
+ */
+function lastListedAt_() {
+  var props = PropertiesService.getScriptProperties().getProperties();
+  var out = {};
+  SHOPS.forEach(function (shop) {
+    var raw = props[LAST_LISTED_PREFIX + shop.id];
+    if (raw) out[shop.id] = Number(raw);
+  });
+  return out;
+}
+
+/** Stamped on every successful push, so the gate above costs one property read. */
+function noteListed_(shopId) {
+  try {
+    PropertiesService.getScriptProperties()
+      .setProperty(LAST_LISTED_PREFIX + String(shopId), String(Date.now()));
+  } catch (e) {
+    // The gate degrades to "do not sync", which is visible as a stale sold
+    // count rather than as damage. Never worth failing a push over.
+    console.error('could not stamp last listed: ' + e);
+  }
+}
+
+/**
+ * The trigger's target. Never throws: a timer that fails is disabled by Apps
+ * Script after enough errors, and a silent sync that stopped weeks ago is the
+ * worst version of this feature.
+ */
+function syncRecentOrders() {
+  var shops;
+  try {
+    shops = shopsToSync_(lastListedAt_(), Date.now(), SYNC_ACTIVE_HOURS);
+  } catch (e) {
+    warn_('TS-ORD-23', 'Background sync could not read its activity marks: ' + e);
+    return;
+  }
+  // The common case, and it must cost almost nothing: three property reads and
+  // a return. Every two minutes, all day, every day.
+  if (!shops.length) return;
+
+  var to = new Date();
+  var from = new Date(to.getTime() - SYNC_WINDOW_MIN * 60 * 1000);
+  var d = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'yyyy-MM-dd'); };
+  var t = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'HH:mm'); };
+
+  shops.forEach(function (shopId) {
+    try {
+      // A window that crosses midnight would ask for a negative range, so it
+      // is clamped to the start of the day. Half an hour of overlap costs one
+      // page; a refused sync costs the sold count until somebody notices.
+      var fromDate = d(from);
+      var fromTime = d(from) === d(to) ? t(from) : '00:00';
+      syncOrders_(shopId, fromDate, fromTime, d(to), t(to), 'background sync');
+    } catch (e) {
+      // One shop failing must not stop the others, and must not disable the
+      // timer. The log is where a sync that has been failing all week is found.
+      warn_('TS-ORD-24', 'Background sync failed for ' + shopId + ': ' + e);
+    }
+  });
+}

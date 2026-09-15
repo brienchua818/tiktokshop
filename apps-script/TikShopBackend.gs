@@ -5293,14 +5293,25 @@ function route_(action, params, body, user) {
     case 'listings':
       return json_(listListings_(params.shop_id || body.shop_id));
 
-    // Reads its arguments from either place, like the read actions above.
-    //
-    // Not for tidiness: when a browser mishandles the redirect Apps Script
-    // answers through, the client retries the same call as a GET, and an
-    // action that only looks at the body would refuse it. This one is on the
-    // critical path — no listing means no stream to add SKUs to — so it must
-    // survive that retry. pushSku deliberately does not, because a photo does
-    // not fit in a URL; it is protected by its idempotency key instead.
+    /**
+     * EVERY action reads its arguments from the query string as well as the
+     * body. `params.x || body.x`, with one documented exception.
+     *
+     * Not tidiness. Apps Script delivers every reply through a 302 to a
+     * GET-only host, and when a browser preserves the method rather than
+     * downgrading it the client retries the same call as a GET — on which leg
+     * the body is gone. An action that only looks at the body gets undefined
+     * for every argument.
+     *
+     * This has now been found three times, on setRole ("Unknown role:
+     * undefined") and on removeVariation, where Wen Xuan could not delete a
+     * variation on 15 Sep and got "Unknown listing: undefined [TS-PRD-09]"
+     * mid-broadcast. Fixing them one at a time is why it came back, so the
+     * rule is asserted by a test over this function rather than remembered.
+     *
+     * The exception is `pushSku`: a photo does not fit in a URL. It is
+     * protected by its idempotency key instead.
+     */
     case 'addListing':
       return json_(addListing_(
         params.shop_id || body.shop_id,
@@ -5321,7 +5332,11 @@ function route_(action, params, body, user) {
     // client first; this end does not second-guess a person, it does the edit
     // safely or not at all.
     case 'removeVariation':
-      return json_(removeVariation_(body.listing_id, body.tiktok_sku_id, user));
+      return json_(removeVariation_(
+        params.listing_id || body.listing_id,
+        params.tiktok_sku_id || body.tiktok_sku_id,
+        user
+      ));
 
     case 'allowance':
       var shopId = params.shop_id || body.shop_id;
@@ -5335,7 +5350,9 @@ function route_(action, params, body, user) {
     // Pull a window of orders down from TikTok into the Sheet.
     case 'syncOrders':
       return json_(syncOrders_(
-        body.shop_id, body.from_date, body.from_time, body.to_date, body.to_time,
+        params.shop_id || body.shop_id,
+        params.from_date || body.from_date, params.from_time || body.from_time,
+        params.to_date || body.to_date, params.to_time || body.to_time,
         user.name
       ));
 
@@ -5360,9 +5377,15 @@ function route_(action, params, body, user) {
     // scoped to the same window as the screen it was launched from.
     case 'exportOrders':
       return json_(exportOrders_(
-        body.shop_id, body.listing_ids || [],
-        body.from_date, body.from_time, body.to_date, body.to_time,
-        body.cost_divisor, requester_(user)
+        params.shop_id || body.shop_id,
+        // An array cannot ride in a query string as itself, so on the GET leg
+        // it arrives comma-separated. Split rather than dropped, or an export
+        // retried as a GET would quietly cover every listing instead of the
+        // ones asked for.
+        body.listing_ids || (params.listing_ids ? String(params.listing_ids).split(',') : []),
+        params.from_date || body.from_date, params.from_time || body.from_time,
+        params.to_date || body.to_date, params.to_time || body.to_time,
+        params.cost_divisor || body.cost_divisor, requester_(user)
       ));
 
     case 'exportListing':
@@ -5502,4 +5525,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '15cc2d6 2026-09-15';
+var BACKEND_BUILD = '74c858c-dirty 2026-09-15';

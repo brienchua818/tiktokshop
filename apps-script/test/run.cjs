@@ -1804,5 +1804,67 @@ check('the comparison ignores case, as TikTok would not', () => {
   }
 })
 
+console.log('\nevery action survives the GET fallback')
+
+/**
+ * Apps Script answers every request through a 302 to a GET-only host. When a
+ * browser preserves the method instead of downgrading it, the client retries
+ * the same call as a GET — and on that leg the body is gone. An action that
+ * reads only `body.x` gets undefined for every argument.
+ *
+ * Found three times now: setRole ("Unknown role: undefined"), and
+ * removeVariation, where Wen Xuan could not delete a variation mid-broadcast
+ * and got "Unknown listing: undefined [TS-PRD-09]". Fixing them one at a time
+ * is why it kept coming back, so the rule is asserted over the source of
+ * route_ rather than remembered.
+ *
+ * `pushSku` is the one exception, and an intentional one: a photo does not fit
+ * in a URL. It is protected by its idempotency key instead.
+ */
+check('no action reads body.x without params.x first', () => {
+  const src = fs.readFileSync(path.join(DIR, 'Api.gs'), 'utf8')
+  const start = src.indexOf('function route_(')
+  if (start < 0) throw new Error('route_ not found')
+  const body = src
+    .slice(start)
+    // Comments first. The doc on setRole EXPLAINS the bug using the words
+    // "body.role", and a scanner that reads prose reports a fault that is not
+    // there — which is how a check stops being trusted.
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '')
+
+  // Split into cases so a finding can name the action it belongs to.
+  const cases = body.split(/\n    case '/).slice(1)
+  const EXEMPT = { pushSku: 'a photo does not fit in a URL' }
+  const offenders = []
+
+  for (const block of cases) {
+    const action = block.slice(0, block.indexOf("'"))
+    if (EXEMPT[action]) continue
+    // Every body.x that is not already preceded by params.x ||
+    const reads = block.match(/\bbody\.([a-z_]+)/g) || []
+    for (const read of reads) {
+      const field = read.slice('body.'.length)
+      const direct = new RegExp('params\\.' + field + '\\s*\\|\\|\\s*body\\.' + field)
+      // An array cannot ride in a query string as itself, so it is read the
+      // other way round: the body first, then the comma-separated param.
+      const array = new RegExp('body\\.' + field + '\\s*\\|\\|[\\s\\S]{0,120}params\\.' + field)
+      if (!direct.test(block) && !array.test(block)) {
+        offenders.push(action + ' reads ' + read + ' with no params.' + field + ' fallback')
+      }
+    }
+  }
+  if (offenders.length) throw new Error(offenders.join('; '))
+})
+
+check('the exemption is real, not a way to pass', () => {
+  // If pushSku ever stops being body-only the exemption is stale and should be
+  // removed; this fails loudly rather than letting it rot.
+  const src = fs.readFileSync(path.join(DIR, 'Api.gs'), 'utf8')
+  if (!/case 'pushSku':\s*\n\s*return json_\(pushSku_\(body, user\)\)/.test(src)) {
+    throw new Error('pushSku no longer takes the whole body; revisit the exemption')
+  }
+})
+
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

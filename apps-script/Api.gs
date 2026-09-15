@@ -89,7 +89,9 @@ var WRITE_ACTIONS = {
   reserveIdentifier: 1,
   // Rebuilds the product from a read, exactly as pushSku does; two at once
   // would each write the other's variation out of existence.
-  removeVariation: 1
+  removeVariation: 1,
+  // Rebuilds the product from a read, exactly as a push does.
+  restoreVariation: 1
 };
 
 /** Actions callable without an approved role. */
@@ -368,7 +370,21 @@ function route_(action, params, body, user) {
 
     // Asked for only when the Removed tab is opened. See removedVariations_.
     case 'removedVariations':
-      return json_(removedVariations_(params.listing_id || body.listing_id));
+      return json_(removedVariations_(
+        params.listing_id || body.listing_id,
+        params.limit || body.limit
+      ));
+
+    // Put a removed variation back. A write, so it takes the lock like any
+    // other: it rebuilds the product from a read, and two at once would each
+    // write the other's variation out of existence.
+    case 'restoreVariation':
+      return json_(restoreVariation_(
+        params.listing_id || body.listing_id,
+        params.identifier || body.identifier,
+        params.stock || body.stock,
+        user
+      ));
 
     case 'users':
       if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);

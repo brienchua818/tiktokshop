@@ -116,6 +116,15 @@ var REVIEW_WINDOW_MS = 24 * 60 * 60 * 1000;
  */
 var REMOVAL_GRACE_MS = 10 * 60 * 1000;
 
+/**
+ * How many removals the app shows. The rest live in the Sheet.
+ *
+ * Ten because the tab exists to undo a mistake, and a mistake is noticed in
+ * the next minute or not at all. A listing reused across streams accumulates
+ * removals for ever; I12 had 121 against 32 live.
+ */
+var REMOVED_RECENT = 10;
+
 var TAB_ORDERS = 'Orders';
 var TAB_ORDER_ITEMS = 'Order Items';
 var TAB_RETURNS = 'Returns';

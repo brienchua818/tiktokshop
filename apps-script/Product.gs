@@ -67,6 +67,24 @@ function ttUploadImage_(prefix, blob, useCase) {
  * identifier is the shared vocabulary of the whole broadcast. Capped at
  * TikTok's 50 characters, at a word boundary where one is available.
  */
+/**
+ * The stored variant name with its identifier taken back off the front.
+ *
+ * `variantValueName_` puts the identifier on when a variation is listed, and
+ * the Sheet records the result. Feeding that back through it would produce
+ * "B74 B74 4 tier" — a restored variation renamed by the act of restoring it.
+ */
+function strippedVariantName_(stored, identifier) {
+  var name = String(stored || '').trim();
+  var id = String(identifier || '').trim();
+  if (!id) return name;
+  if (name.toUpperCase().indexOf(id.toUpperCase() + ' ') === 0) {
+    return name.slice(id.length + 1).trim();
+  }
+  if (name.toUpperCase() === id.toUpperCase()) return '';
+  return name;
+}
+
 function variantValueName_(identifier, variantName) {
   var name = String(variantName || '').trim().replace(/\s+/g, ' ');
   var combined = name ? identifier + ' ' + name : String(identifier);
@@ -402,7 +420,8 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
 
     var seenAt = Date.parse(String(r.confirmed_at || ''));
     if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
-      updates.push({ sku_id: String(r.sku_id), status: 'removed', error: 'Removed from TikTok' });
+      updates.push({ sku_id: String(r.sku_id), status: 'removed',
+        error: 'Removed from TikTok', removed_at: new Date().toISOString() });
     }
   });
   return updates;
@@ -805,12 +824,37 @@ function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
  * something TikTok will tell us about any more, and this is a record rather
  * than a live state.
  */
-function removedVariations_(listingId) {
-  var rows = listSkus_(listingId).filter(function (r) {
+/**
+ * The last few removals, newest first, and how many there are altogether.
+ *
+ * Brien chose this over the full list: *"Only to undo a mistake."* I12 carried
+ * 121 removed variations against 32 live ones, and sending them all meant the
+ * phone downloading, sorting and drawing four years of a listing's history to
+ * answer a question about the last thing somebody deleted. The record is not
+ * lost — it is in the Sheet, where it can be filtered and searched properly,
+ * which a phone list never could.
+ *
+ * Ordered by when each was REMOVED rather than when it was listed. Rows from
+ * before that was recorded fall back to their creation time, which puts them
+ * last: they are the oldest removals anyway, and the alternative is showing an
+ * undated row at the top of a list that means "most recent".
+ */
+function removedVariations_(listingId, limit) {
+  var want = Number(limit) > 0 ? Number(limit) : REMOVED_RECENT;
+  var all = listSkus_(listingId).filter(function (r) {
     return String(r.status) === 'removed';
   });
+  var rows = all.slice().sort(function (a, b) {
+    var at = String(a.removed_at || a.created_at || '');
+    var bt = String(b.removed_at || b.created_at || '');
+    return bt.localeCompare(at);
+  }).slice(0, want);
+
   return {
     listing_id: String(listingId),
+    /** Every removal on this listing, so the screen can say what it is not showing. */
+    total: all.length,
+    showing: rows.length,
     variants: rows.map(function (r) {
       return {
         identifier: String(r.identifier || ''),
@@ -822,6 +866,9 @@ function removedVariations_(listingId) {
         image_url: '',
         created_at: String(r.created_at || ''),
         created_by: String(r.created_by || ''),
+        removed_at: String(r.removed_at || ''),
+        /** Enough recorded to put it back. See restoreVariation_. */
+        restorable: Boolean(String(r.price || '') && String(r.identifier || '')),
         state: 'removed',
         buyable: false,
         on_tiktok: false,
@@ -956,7 +1003,8 @@ function removeVariation_(listingId, tiktokSkuId, user) {
 
   if (ours) {
     markSkus_([{ sku_id: String(ours.sku_id), status: 'removed',
-                 error: 'Removed from TikTok by ' + user.name }]);
+                 error: 'Removed from TikTok by ' + user.name,
+                 removed_at: new Date().toISOString() }]);
   }
   var label = built.removed.sellerSku || built.removed.valueName || tiktokSkuId;
   logEvent_(user.name, 'remove_variation', shop.brand,
@@ -2018,4 +2066,96 @@ function seqOf_(identifier, prefix) {
   var rest = id.slice(want.length);
   if (!/^\d+$/.test(rest)) return 0;
   return Number(rest);
+}
+
+/**
+ * Put a removed variation back on the listing.
+ *
+ * Brien's undo. The row still holds everything TikTok needs — identifier,
+ * name, price, stock and the image uri it was listed with — so this is an
+ * ordinary append built from a record rather than from a form.
+ *
+ * Deliberately NOT a reversal of the delete. TikTok has no undelete; the SKU
+ * is gone and its id with it. This creates a new variation carrying the same
+ * identifier, which is why it goes through the same duplicate guard as any
+ * push: if somebody has reused that identifier in the meantime, it is refused
+ * rather than making a second B74.
+ *
+ * The stock restored is the stock that was RECORDED, not what was left when it
+ * was removed. Those differ once anything sold, and re-listing with the
+ * original figure would put units back on sale that were already bought. So it
+ * asks for the number, defaulting to what remains sellable, rather than
+ * guessing.
+ */
+function restoreVariation_(listingId, identifier, stock, user) {
+  var rows = listSkus_(listingId).filter(function (r) {
+    return String(r.identifier) === String(identifier) && String(r.status) === 'removed';
+  });
+  var row = rows.sort(function (a, b) {
+    return String(b.removed_at || b.created_at || '').localeCompare(String(a.removed_at || a.created_at || ''));
+  })[0];
+  if (!row) throw fail_('TS-PRD-34', identifier + ' is not a removed variation on this listing.');
+
+  var shopId = String(row.shop_id || '');
+  var shop = shopById_(shopId);
+  if (!shop) throw fail_('TS-PRD-35', 'Unknown shop on ' + identifier + ': ' + shopId);
+
+  var want = Number(stock);
+  if (!isFinite(want) || want <= 0) want = Number(row.stock || 0);
+  checkStockTotal_(want);
+
+  var imageUri = String(row.tiktok_image_uri || '');
+  if (!imageUri) {
+    throw fail_('TS-PRD-36', identifier + ' has no photo on record, and TikTok requires one on ' +
+      'every variation. List it again from the app instead.');
+  }
+
+  var snapshot = ttGetProduct_(shopId, String(listingId));
+  var addition = {
+    identifier: String(row.identifier),
+    // The stored variant name already carries the identifier, which
+    // variantValueName_ would add a second time.
+    variantName: strippedVariantName_(String(row.variant || ''), String(row.identifier)),
+    price: String(row.price),
+    stock: want,
+    imageUri: imageUri
+  };
+
+  var payload = buildAppendPayload_(snapshot, addition,
+    pendingToCarry_(listingId, snapshot, addition.identifier));
+
+  var edited = ttFetch_(shopId, 'post',
+    '/product/202509/products/' + listingId + '/partial_edit', {}, payload);
+  if (edited.code !== 0) {
+    throw fail_('TS-PRD-37', ttReason_(edited) || 'TikTok refused the restore.');
+  }
+
+  var skuId = '';
+  ((edited.data && edited.data.skus) || []).forEach(function (s) {
+    if (s.seller_sku === addition.identifier) skuId = s.id || '';
+  });
+
+  markSkus_([{
+    sku_id: String(row.sku_id),
+    status: 'pushed',
+    error: '',
+    removed_at: '',
+    // A new SKU, so a new id — and the old confirmed_at described a variation
+    // that no longer exists. Cleared, so the removal rule judges this one on
+    // its own sighting rather than on its predecessor's.
+    confirmed_at: '',
+    tiktok_sku_id: String(skuId || ''),
+    stock: want
+  }]);
+
+  logEvent_(user.name, 'restore_variation', shop.brand,
+    identifier + ' back on ' + listingId + ' with ' + want + ' in stock', 'ok');
+
+  return {
+    identifier: identifier,
+    listing_id: String(listingId),
+    stock: want,
+    sku_id: String(skuId || ''),
+    audit: 'pending'
+  };
 }

@@ -26,7 +26,14 @@ HEADERS[TAB_SKUS] = [
   // difference between restoring it and resurrecting something deleted on
   // purpose.
   'confirmed_at',
-  'idempotency_key', 'created_at', 'pushed_at', 'created_by'
+  'idempotency_key', 'created_at', 'pushed_at', 'created_by',
+  /**
+   * When it was taken off, so "recently removed" can mean recently.
+   *
+   * `created_at` is when it was listed, which is a different question and the
+   * wrong order for a list whose whole purpose is undoing the last mistake.
+   */
+  'removed_at'
 ];
 HEADERS[TAB_ORDERS] = [
   'order_id', 'shop_id', 'brand', 'status', 'created_at_sgt', 'created_epoch',

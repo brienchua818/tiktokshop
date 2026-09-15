@@ -141,6 +141,7 @@ ${src}
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
+    strippedVariantName_, REMOVED_RECENT,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -2552,6 +2553,43 @@ check('the sync interval is one Apps Script will actually accept', () => {
   // exactly the kind of thing a constant should not be able to get wrong.
   if (gs.SYNC_ALLOWED_MINUTES.indexOf(gs.SYNC_EVERY_MINUTES) < 0) {
     throw new Error(gs.SYNC_EVERY_MINUTES + ' is not one of ' + gs.SYNC_ALLOWED_MINUTES.join(', '))
+  }
+})
+
+console.log('\nrestoring a removed variation')
+
+check('the identifier is not put on the name twice', () => {
+  // variantValueName_ adds the identifier when a variation is listed, and the
+  // Sheet stores the result. Feeding that back through it would restore
+  // "B74 4 tier" as "B74 B74 4 tier" — a variation renamed by the act of
+  // putting it back.
+  eq(gs.strippedVariantName_('B74 4 tier', 'B74'), '4 tier')
+  eq(gs.variantValueName_('B74', gs.strippedVariantName_('B74 4 tier', 'B74')), 'B74 4 tier')
+})
+
+check('a name that does not start with the identifier is left alone', () => {
+  // Listed outside the app, or renamed in Seller Centre.
+  eq(gs.strippedVariantName_('Whirl bowl set', 'B74'), 'Whirl bowl set')
+  // And a near-miss is not a match: B7 must not eat the 4 of B74.
+  eq(gs.strippedVariantName_('B74 4 tier', 'B7'), 'B74 4 tier')
+})
+
+check('a name that is only the identifier becomes empty, not a repeat', () => {
+  eq(gs.strippedVariantName_('B74', 'B74'), '')
+  eq(gs.variantValueName_('B74', gs.strippedVariantName_('B74', 'B74')), 'B74')
+})
+
+check('case does not defeat it, and neither does a missing identifier', () => {
+  eq(gs.strippedVariantName_('b74 4 tier', 'B74'), '4 tier')
+  eq(gs.strippedVariantName_('4 tier', ''), '4 tier')
+  eq(gs.strippedVariantName_('', 'B74'), '')
+})
+
+check('the removed list is short on purpose', () => {
+  // 121 removed against 32 live on I12. The tab exists to undo a mistake, and
+  // a mistake is noticed in the next minute or not at all.
+  if (!(gs.REMOVED_RECENT > 0 && gs.REMOVED_RECENT <= 20)) {
+    throw new Error('REMOVED_RECENT is ' + gs.REMOVED_RECENT)
   }
 })
 

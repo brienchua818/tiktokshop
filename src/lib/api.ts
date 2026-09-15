@@ -211,6 +211,10 @@ export interface LiveVariant {
   refunded: number | null
   /** A return or refund request is open and undecided. */
   at_risk: number | null
+  /** When it was taken off, ISO. Empty on rows removed before this was kept. */
+  removed_at?: string
+  /** Enough was recorded to put it back. */
+  restorable?: boolean
   /**
    * Units sold, counted from order line items rather than derived from stock.
    *
@@ -469,10 +473,30 @@ export const api = {
    * phone's work, on a screen that refreshes throughout a broadcast.
    */
   removedVariations: (listingId: string) =>
-    call<{ listing_id: string; variants: LiveVariant[]; checked_at: string }>('removedVariations', {
+    call<{
+      listing_id: string
+      /** Every removal on this listing, so the screen can say what it is not showing. */
+      total: number
+      showing: number
+      variants: LiveVariant[]
+      checked_at: string
+    }>('removedVariations', {
       body: { listing_id: listingId },
       timeoutMs: 40_000,
     }),
+
+  /**
+   * Put a removed variation back on the listing.
+   *
+   * Not an undelete — TikTok has none. It creates a new variation carrying the
+   * same identifier, from what was recorded when it was listed, and is refused
+   * if somebody has reused that identifier since.
+   */
+  restoreVariation: (listingId: string, identifier: string, stock: number) =>
+    call<{ identifier: string; listing_id: string; stock: number; sku_id: string }>(
+      'restoreVariation',
+      { body: { listing_id: listingId, identifier, stock }, timeoutMs: 90_000 },
+    ),
 
   /** Pull a window of orders down from TikTok into the Sheet. */
   syncOrders: (body: {

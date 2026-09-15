@@ -228,8 +228,12 @@ export default function DraftQueue({
    * record is worth keeping; paying for it every few seconds is not.
    */
   const [removedRows, setRemovedRows] = useState<LiveVariant[] | null>(null)
+  /** How many removals exist altogether, so the screen can say what it is not showing. */
+  const [removedTotal, setRemovedTotal] = useState(0)
   const [removedBusy, setRemovedBusy] = useState(false)
   const [removedError, setRemovedError] = useState('')
+  /** The variation being put back, and how many to put back with it. */
+  const [restoring, setRestoring] = useState<LiveVariant | null>(null)
   const removedCount = live?.removed_count ?? removed.length
 
   const loadRemoved = useCallback(async () => {
@@ -239,6 +243,7 @@ export default function DraftQueue({
     try {
       const r = await api.removedVariations(listingId)
       setRemovedRows(r.variants)
+      setRemovedTotal(r.total ?? r.variants.length)
     } catch (e: unknown) {
       setRemovedError(e instanceof ApiError ? e.display : String(e))
     } finally {
@@ -507,6 +512,21 @@ export default function DraftQueue({
         </p>
       )}
 
+      {restoring && (
+        <RestoreSheet
+          v={restoring}
+          onClose={() => setRestoring(null)}
+          onDone={async (note) => {
+            setRestoring(null)
+            setRemovedNote(note)
+            setRemovedRows(null)
+            await refresh()
+            await onChanged()
+          }}
+          listingId={listingId}
+        />
+      )}
+
       {tab === 'removed' && (
         <ul className="space-y-1 max-h-80 overflow-y-auto">
           {removedBusy && <li className="text-xs text-faint py-4 text-center">Loading…</li>}
@@ -517,10 +537,20 @@ export default function DraftQueue({
               v={v}
               onRemove={() => {}}
               onAdjust={() => {}}
+              {...(v.restorable ? { onRestore: () => setRestoring(v) } : {})}
             />
           ))}
           {removedRows !== null && removedRows.length === 0 && !removedBusy && (
             <li className="text-xs text-faint py-4 text-center">Nothing has been removed.</li>
+          )}
+          {/* Says what it is NOT showing, rather than letting a short list read
+              as the whole history. The rest are in the Sheet, where they can be
+              filtered properly — which a phone list never could. */}
+          {removedRows !== null && removedTotal > removedRows.length && (
+            <li className="text-[11px] text-ghost py-3 text-center">
+              The {removedRows.length} most recent of {removedTotal}. The rest are in the data
+              sheet.
+            </li>
           )}
         </ul>
       )}
@@ -732,10 +762,13 @@ function RemoteRow({
   v,
   onRemove,
   onAdjust,
+  onRestore,
 }: {
   v: LiveVariant
   onRemove: (v: LiveVariant) => void
   onAdjust: (v: LiveVariant) => void
+  /** Only on a removed row that still has enough recorded to put back. */
+  onRestore?: () => void
 }) {
   // `buyable` is the backend's answer to "can somebody buy this right now",
   // decided from the version TikTok serves to buyers. It is the only thing
@@ -788,7 +821,17 @@ function RemoteRow({
       {...(canRemove
         ? { onDelete: () => onRemove(v), deleteLabel: `Remove ${v.identifier || v.variant} from TikTok` }
         : {})}
-    />
+    >
+      {onRestore && (
+        <button
+          onClick={onRestore}
+          className="mt-1 text-[11px] px-2.5 min-h-8 inline-flex items-center gap-1 rounded-lg bg-chip hover:bg-raised text-fg2"
+        >
+          <Icon name="refresh" size={14} />
+          Put {v.identifier} back
+        </button>
+      )}
+    </VariantRow>
   )
 }
 
@@ -1073,6 +1116,118 @@ function StockState({ v }: { v: LiveVariant }) {
       {v.stock_available} left
       {showsOriginalTotal(v) && <span className="text-faint"> of {v.stock_total}</span>}
     </span>
+  )
+}
+
+/**
+ * Put a removed variation back, asking for the stock rather than assuming it.
+ *
+ * The recorded figure is what it was LISTED with, not what was left when it
+ * was taken off. Those differ the moment anything sells, so restoring with the
+ * original number would put units back on sale that were already bought — and
+ * a livestream oversell is a refund and an apology, not a rounding error.
+ *
+ * So the number is shown, editable, and explained. Defaulting to it and saying
+ * where it came from is honest; using it silently is not.
+ */
+function RestoreSheet({
+  v,
+  listingId,
+  onClose,
+  onDone,
+}: {
+  v: LiveVariant
+  listingId: string | null
+  onClose: () => void
+  onDone: (note: string) => Promise<void>
+}) {
+  useDismiss(onClose)
+  const [stock, setStock] = useState('1')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function run() {
+    const want = Number(stock)
+    if (!Number.isFinite(want) || want < 1) {
+      setError('TikTok needs at least 1 in stock \u2014 there is no way to list a variation with none.')
+      return
+    }
+    if (!listingId) return
+    setBusy(true)
+    setError('')
+    try {
+      const r = await api.restoreVariation(listingId, v.identifier, want)
+      await onDone(
+        `${r.identifier} is back on the listing with ${r.stock} in stock. ` +
+          'It is a new variation, so TikTok reviews it again before anyone can buy it.',
+      )
+    } catch (e: unknown) {
+      setError(e instanceof ApiError ? e.display : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
+      <div className="absolute inset-0 bg-scrim" onClick={busy ? undefined : onClose} />
+      <div className="relative w-full sm:max-w-sm bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] space-y-3">
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-mono text-identifier">{v.identifier}</p>
+            <p className="text-sm text-fg truncate">
+              {nameWithoutIdentifier(v.variant, v.identifier) || v.variant}
+            </p>
+            <p className="text-xs text-faint mt-0.5">${v.price}</p>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={busy}
+            className="min-h-11 min-w-11 -mr-1 -mt-1 inline-flex items-center justify-center text-muted disabled:opacity-40"
+            aria-label="Close"
+          >
+            <Icon name="close" size={18} />
+          </button>
+        </div>
+        <label className="block">
+          <span className="block text-xs text-muted mb-1">How many to put back on sale</span>
+          <input
+            autoFocus
+            inputMode="numeric"
+            value={stock}
+            onChange={(e) => {
+              setStock(e.target.value)
+              setError('')
+            }}
+            className="w-full bg-sunken border border-line rounded-lg px-3 py-2.5 text-base text-fg outline-none focus:border-accent"
+          />
+        </label>
+        <p className="text-[11px] text-ghost">
+          Not the number it was listed with — that one is from before anything sold, and using it
+          would put units back on sale that are already gone.
+        </p>
+        {error && (
+          <p className="text-xs text-bad bg-bad-tint border border-bad-line rounded-lg px-3 py-2">
+            {error}
+          </p>
+        )}
+        <div className="flex gap-2">
+          <button
+            onClick={onClose}
+            className="flex-1 min-h-11 rounded-lg border border-line text-sm text-fg2"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => void run()}
+            disabled={busy}
+            className="flex-1 min-h-11 rounded-lg bg-accent hover:bg-accent-hover disabled:opacity-50 text-sm text-fg"
+          >
+            {busy ? 'Putting back\u2026' : `Put ${v.identifier} back`}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

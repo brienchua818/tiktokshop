@@ -263,6 +263,8 @@ function touchLastSeen_(email) {
     for (var i = 0; i < emails.length; i++) {
       if (String(emails[i][0]).toLowerCase() === target) {
         sh.getRange(i + 2, 5).setValue(new Date().toISOString());
+        // Written outside Sheet.gs, so it clears the request read cache itself.
+        invalidateRead_(TAB_USERS);
         return;
       }
     }

@@ -160,6 +160,9 @@ function ensureHeaders_(name, sh) {
       sh.getRange(2, 1, out.length, want.length).setValues(out);
     }
     SpreadsheetApp.flush();
+    // The columns themselves moved, so anything read earlier in this request
+    // is laid out differently from what is now on the tab.
+    invalidateRead_(name);
     logEvent_('system', 'migrate_headers', '',
       name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
   });
@@ -189,19 +192,54 @@ function appendRows_(name, rows) {
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
     SpreadsheetApp.flush();
   });
+  invalidateRead_(name);
+}
+
+/**
+ * One read of a tab per request.
+ *
+ * `readAll_` pulls EVERY row of a tab — every SKU ever written, across every
+ * listing and every shop — and one `listingState` was paying for that three
+ * times: once for its own rows, once more after writing an update, and a third
+ * time inside the sold-count resolution. Plus the whole Order Items tab. Brien,
+ * 15 Sep 7:13pm, forty seconds into a broadcast: "listingState gave no reply
+ * after 40s".
+ *
+ * An Apps Script execution serves exactly one request and then ends, so this
+ * cache lives and dies with that request. It can never serve one person's data
+ * to another, and it cannot go stale across requests because it does not
+ * survive one.
+ *
+ * Within a request it MUST be invalidated on write, or a read-then-write-then-
+ * read would act on rows that no longer exist — and in this app that pattern
+ * decides which variations are carried forward, where a stale answer deletes
+ * SKUs. So every writer clears it, including the two outside this file
+ * (setRole, and the last_seen stamp on every request).
+ */
+var READ_CACHE_ = {};
+
+/** Drop a tab from the request cache. No argument drops everything. */
+function invalidateRead_(name) {
+  if (name) delete READ_CACHE_[name];
+  else READ_CACHE_ = {};
 }
 
 function readAll_(name) {
+  if (Object.prototype.hasOwnProperty.call(READ_CACHE_, name)) return READ_CACHE_[name];
   var sh = sheet_(name);
   var last = sh.getLastRow();
-  if (last < 2) return [];
+  if (last < 2) {
+    READ_CACHE_[name] = [];
+    return READ_CACHE_[name];
+  }
   var headers = HEADERS[name];
   var values = sh.getRange(2, 1, last - 1, headers.length).getValues();
-  return values.map(function (row) {
+  READ_CACHE_[name] = values.map(function (row) {
     var o = {};
     headers.forEach(function (h, i) { o[h] = row[i]; });
     return o;
   });
+  return READ_CACHE_[name];
 }
 
 /**
@@ -333,6 +371,7 @@ function replaceByKey_(tabName, keyField, rows) {
     sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
   }
   SpreadsheetApp.flush();
+  invalidateRead_(tabName);
   return rows.length;
 }
 
@@ -369,7 +408,10 @@ function markSkus_(updates) {
       });
       written++;
     }
-    if (written) SpreadsheetApp.flush();
+    if (written) {
+      SpreadsheetApp.flush();
+      invalidateRead_(TAB_SKUS);
+    }
     return written;
   });
 }

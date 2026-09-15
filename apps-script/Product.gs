@@ -443,7 +443,11 @@ function listingState_(listingId) {
    */
   var sales = {};
   try {
-    sales = variationSalesCached_(listingId) || {};
+    // The product this screen already read. Without it the sold count reads
+    // the same product from TikTok a second time, every refresh.
+    var knownProducts = {};
+    knownProducts[String(listingId)] = live;
+    sales = variationSalesCached_(listingId, knownProducts) || {};
   } catch (e) {
     warn_('TS-ORD-22', 'Could not read sales for ' + listingId + ': ' + e);
   }

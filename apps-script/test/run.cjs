@@ -118,7 +118,12 @@ ${src}
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     checkStockTotal_, skuForStock_, seqOf_,
-    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS
+    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
+    readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_,
+    // Lets a test swap the Sheets layer for a counter, so "how many times did
+    // this read the tab" is an assertion rather than a belief.
+    __setSheetImpl: function (fn) { sheet_ = fn },
+    __setHeaders: function (name, cols) { HEADERS[name] = cols }
   };
 `
 
@@ -1637,6 +1642,101 @@ check('nothing is drawn twice', () => {
   // appear as an external, or the count doubles and the identifier reads as taken.
   const shown = gs.shownAsOurs_([{ identifier: 'A2', status: 'pushed' }])
   eq(shown['A2'], true)
+})
+
+/**
+ * The request read cache must be a saving, never a stale answer.
+ *
+ * `readAll_` pulls every row of a tab, and one `listingState` paid for that
+ * three times over plus the whole Order Items tab — forty seconds, mid-
+ * broadcast, on 15 Sep. Caching it per request is the fix; the danger is that
+ * a read-then-write-then-read now gets the pre-write rows, and in this app
+ * that pattern decides which variations are carried forward, where a stale
+ * answer DELETES SKUs. So both halves are asserted.
+ */
+describe_readcache()
+function describe_readcache() {
+  const TAB = 'TestTab'
+  let reads = 0
+  let rows = []
+
+  function fakeSheet() {
+    return {
+      getLastRow: () => rows.length + 1,
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => { reads++; return rows.map((x) => [x]) },
+        setValues: () => {},
+        setValue: () => {},
+        clearContent: () => {},
+        setFontWeight() { return this },
+      }),
+    }
+  }
+
+  const install = () => {
+    gs.__setHeaders(TAB, ['v'])
+    gs.__setSheetImpl(fakeSheet)
+    gs.invalidateRead_()
+    reads = 0
+  }
+
+  check('reads the tab once however many times it is asked', () => {
+    install()
+    rows = ['a', 'b']
+    eq(gs.readAll_(TAB).length, 2)
+    eq(gs.readAll_(TAB).length, 2)
+    eq(gs.readAll_(TAB).length, 2)
+    eq(reads, 1)
+  })
+
+  check('an append is visible to the very next read', () => {
+    install()
+    rows = ['a']
+    eq(gs.readAll_(TAB).length, 1)
+    rows = ['a', 'b']
+    gs.appendRows_(TAB, [['b']])
+    // Would still say 1 if the write had not cleared the cache.
+    eq(gs.readAll_(TAB).length, 2)
+    eq(reads, 2)
+  })
+
+  check('invalidate with no argument clears every tab', () => {
+    install()
+    rows = ['a']
+    gs.readAll_(TAB)
+    gs.invalidateRead_()
+    rows = ['a', 'b']
+    eq(gs.readAll_(TAB).length, 2)
+  })
+
+  check('an empty tab is cached too, and not re-read', () => {
+    install()
+    rows = []
+    eq(gs.readAll_(TAB).length, 0)
+    eq(gs.readAll_(TAB).length, 0)
+    eq(reads, 0)
+  })
+}
+
+check('a product the caller already read is not read again', () => {
+  // listingState reads the product for the screen, then reached this through
+  // the sold count and read the SAME product a second time over the network,
+  // on every refresh of a screen used throughout a broadcast.
+  const items = [{ sku_id: '9001', seller_sku: '', listing_id: 'L1', shop_id: 'HZ', variation: 'no identifier here' }]
+  const snapshot = { L1: { skus: [{ id: '9001', sellerSku: 'B74' }] } }
+  const counts = gs.resolveSellerSkus_('HZ', items, snapshot)
+  eq(items[0].seller_sku, 'B74')
+  // Resolved from what was passed in, so nothing was fetched.
+  eq(counts.tiktok, 0)
+})
+
+check('without the snapshot the same row is unresolved, not silently wrong', () => {
+  // Proves the test above is measuring the snapshot and not something else:
+  // with no snapshot and no Sheet row, there is nothing to resolve from.
+  const items = [{ sku_id: '9001', seller_sku: '', listing_id: '', shop_id: 'HZ', variation: 'no identifier here' }]
+  const counts = gs.resolveSellerSkus_('HZ', items, null)
+  eq(items[0].seller_sku, '')
+  eq(counts.unresolved, 1)
 })
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

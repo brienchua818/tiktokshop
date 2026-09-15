@@ -744,6 +744,9 @@ function ensureHeaders_(name, sh) {
       sh.getRange(2, 1, out.length, want.length).setValues(out);
     }
     SpreadsheetApp.flush();
+    // The columns themselves moved, so anything read earlier in this request
+    // is laid out differently from what is now on the tab.
+    invalidateRead_(name);
     logEvent_('system', 'migrate_headers', '',
       name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
   });
@@ -773,19 +776,54 @@ function appendRows_(name, rows) {
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
     SpreadsheetApp.flush();
   });
+  invalidateRead_(name);
+}
+
+/**
+ * One read of a tab per request.
+ *
+ * `readAll_` pulls EVERY row of a tab — every SKU ever written, across every
+ * listing and every shop — and one `listingState` was paying for that three
+ * times: once for its own rows, once more after writing an update, and a third
+ * time inside the sold-count resolution. Plus the whole Order Items tab. Brien,
+ * 15 Sep 7:13pm, forty seconds into a broadcast: "listingState gave no reply
+ * after 40s".
+ *
+ * An Apps Script execution serves exactly one request and then ends, so this
+ * cache lives and dies with that request. It can never serve one person's data
+ * to another, and it cannot go stale across requests because it does not
+ * survive one.
+ *
+ * Within a request it MUST be invalidated on write, or a read-then-write-then-
+ * read would act on rows that no longer exist — and in this app that pattern
+ * decides which variations are carried forward, where a stale answer deletes
+ * SKUs. So every writer clears it, including the two outside this file
+ * (setRole, and the last_seen stamp on every request).
+ */
+var READ_CACHE_ = {};
+
+/** Drop a tab from the request cache. No argument drops everything. */
+function invalidateRead_(name) {
+  if (name) delete READ_CACHE_[name];
+  else READ_CACHE_ = {};
 }
 
 function readAll_(name) {
+  if (Object.prototype.hasOwnProperty.call(READ_CACHE_, name)) return READ_CACHE_[name];
   var sh = sheet_(name);
   var last = sh.getLastRow();
-  if (last < 2) return [];
+  if (last < 2) {
+    READ_CACHE_[name] = [];
+    return READ_CACHE_[name];
+  }
   var headers = HEADERS[name];
   var values = sh.getRange(2, 1, last - 1, headers.length).getValues();
-  return values.map(function (row) {
+  READ_CACHE_[name] = values.map(function (row) {
     var o = {};
     headers.forEach(function (h, i) { o[h] = row[i]; });
     return o;
   });
+  return READ_CACHE_[name];
 }
 
 /**
@@ -917,6 +955,7 @@ function replaceByKey_(tabName, keyField, rows) {
     sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
   }
   SpreadsheetApp.flush();
+  invalidateRead_(tabName);
   return rows.length;
 }
 
@@ -953,7 +992,10 @@ function markSkus_(updates) {
       });
       written++;
     }
-    if (written) SpreadsheetApp.flush();
+    if (written) {
+      SpreadsheetApp.flush();
+      invalidateRead_(TAB_SKUS);
+    }
     return written;
   });
 }
@@ -1238,6 +1280,8 @@ function touchLastSeen_(email) {
     for (var i = 0; i < emails.length; i++) {
       if (String(emails[i][0]).toLowerCase() === target) {
         sh.getRange(i + 2, 5).setValue(new Date().toISOString());
+        // Written outside Sheet.gs, so it clears the request read cache itself.
+        invalidateRead_(TAB_USERS);
         return;
       }
     }
@@ -2167,7 +2211,11 @@ function listingState_(listingId) {
    */
   var sales = {};
   try {
-    sales = variationSalesCached_(listingId) || {};
+    // The product this screen already read. Without it the sold count reads
+    // the same product from TikTok a second time, every refresh.
+    var knownProducts = {};
+    knownProducts[String(listingId)] = live;
+    sales = variationSalesCached_(listingId, knownProducts) || {};
   } catch (e) {
     warn_('TS-ORD-22', 'Could not read sales for ' + listingId + ': ' + e);
   }
@@ -3993,7 +4041,7 @@ function identifierFromVariation_(name) {
  * Mutates the items. Returns counts per source for the log. Never throws: a
  * TikTok read that fails is a warn, and the name pattern still applies.
  */
-function resolveSellerSkus_(shopId, items) {
+function resolveSellerSkus_(shopId, items, known_) {
   var counts = { sibling: 0, sheet: 0, tiktok: 0, name: 0, unresolved: 0 };
   var known = {};
   items.forEach(function (i) {
@@ -4005,6 +4053,24 @@ function resolveSellerSkus_(shopId, items) {
   readAll_(TAB_SKUS).forEach(function (r) {
     var id = String(r.tiktok_sku_id || '');
     if (id && r.identifier && !known[id]) known[id] = { sku: String(r.identifier), src: 'sheet' };
+  });
+
+  /**
+   * Products the caller has already read, so this does not read them again.
+   *
+   * `listingState` reads the product to build the screen, then reached this
+   * through the sold count and read the SAME product a second time over the
+   * network — on a screen that refreshes throughout a broadcast. Passing the
+   * snapshot in removes one TikTok call per refresh, and TikTok calls are the
+   * slow part: signing, the round trip, and the shop's rate limit.
+   */
+  var already = known_ || {};
+  Object.keys(already).forEach(function (listingId) {
+    (already[listingId].skus || []).forEach(function (sk) {
+      if (sk.id && sk.sellerSku && !known[String(sk.id)]) {
+        known[String(sk.id)] = { sku: String(sk.sellerSku), src: 'sheet' };
+      }
+    });
   });
 
   var need = {};
@@ -4068,7 +4134,7 @@ function describeResolution_(c) {
  * `toEpoch` may be null for "everything ever", which is what the listing
  * screen wants: a variation's lifetime sales, not this window's.
  */
-function variationSales_(listingId, fromEpoch, toEpoch) {
+function variationSales_(listingId, fromEpoch, toEpoch, known_) {
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (String(r.listing_id) !== String(listingId)) return false;
     if (fromEpoch === null && toEpoch === null) return true;
@@ -4082,7 +4148,7 @@ function variationSales_(listingId, fromEpoch, toEpoch) {
   // treatment here, so an old sync does not need repeating to read correctly.
   if (items.length) {
     var shopId = String(items[0].shop_id || '');
-    if (shopId) resolveSellerSkus_(shopId, items);
+    if (shopId) resolveSellerSkus_(shopId, items, known_);
   }
 
   return { byVariation: groupVariationSales_(items), items: items };
@@ -4164,7 +4230,7 @@ function salesIndex_(byVariation) {
  */
 var SALES_CACHE_TTL_S = 60;
 
-function variationSalesCached_(listingId) {
+function variationSalesCached_(listingId, known_) {
   var key = 'sales:' + String(listingId);
   var cache = null;
   try {
@@ -4177,7 +4243,7 @@ function variationSalesCached_(listingId) {
     warn_('TS-ORD-20', 'Sales cache unavailable: ' + e);
   }
 
-  var compact = salesIndex_(variationSales_(listingId, null, null).byVariation);
+  var compact = salesIndex_(variationSales_(listingId, null, null, known_).byVariation);
 
   try {
     if (cache) cache.put(key, JSON.stringify(compact), SALES_CACHE_TTL_S);
@@ -5387,6 +5453,8 @@ function setRole_(email, role, actor) {
     if (String(sh.getRange(i, 1).getValue()).toLowerCase() === target) {
       sh.getRange(i, 3).setValue(role);
       sh.getRange(i, 6).setValue(actor.email);
+      // Written outside Sheet.gs, so it clears the request read cache itself.
+      invalidateRead_(TAB_USERS);
       logEvent_(actor.name, 'set_role', '', target + ' -> ' + role, 'ok');
       return { email: target, role: role };
     }
@@ -5406,4 +5474,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'b4a5c9d 2026-09-15';
+var BACKEND_BUILD = 'a688553-dirty 2026-09-15';

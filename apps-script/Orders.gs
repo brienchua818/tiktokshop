@@ -419,7 +419,7 @@ function identifierFromVariation_(name) {
  * Mutates the items. Returns counts per source for the log. Never throws: a
  * TikTok read that fails is a warn, and the name pattern still applies.
  */
-function resolveSellerSkus_(shopId, items) {
+function resolveSellerSkus_(shopId, items, known_) {
   var counts = { sibling: 0, sheet: 0, tiktok: 0, name: 0, unresolved: 0 };
   var known = {};
   items.forEach(function (i) {
@@ -431,6 +431,24 @@ function resolveSellerSkus_(shopId, items) {
   readAll_(TAB_SKUS).forEach(function (r) {
     var id = String(r.tiktok_sku_id || '');
     if (id && r.identifier && !known[id]) known[id] = { sku: String(r.identifier), src: 'sheet' };
+  });
+
+  /**
+   * Products the caller has already read, so this does not read them again.
+   *
+   * `listingState` reads the product to build the screen, then reached this
+   * through the sold count and read the SAME product a second time over the
+   * network — on a screen that refreshes throughout a broadcast. Passing the
+   * snapshot in removes one TikTok call per refresh, and TikTok calls are the
+   * slow part: signing, the round trip, and the shop's rate limit.
+   */
+  var already = known_ || {};
+  Object.keys(already).forEach(function (listingId) {
+    (already[listingId].skus || []).forEach(function (sk) {
+      if (sk.id && sk.sellerSku && !known[String(sk.id)]) {
+        known[String(sk.id)] = { sku: String(sk.sellerSku), src: 'sheet' };
+      }
+    });
   });
 
   var need = {};
@@ -494,7 +512,7 @@ function describeResolution_(c) {
  * `toEpoch` may be null for "everything ever", which is what the listing
  * screen wants: a variation's lifetime sales, not this window's.
  */
-function variationSales_(listingId, fromEpoch, toEpoch) {
+function variationSales_(listingId, fromEpoch, toEpoch, known_) {
   var items = readAll_(TAB_ORDER_ITEMS).filter(function (r) {
     if (String(r.listing_id) !== String(listingId)) return false;
     if (fromEpoch === null && toEpoch === null) return true;
@@ -508,7 +526,7 @@ function variationSales_(listingId, fromEpoch, toEpoch) {
   // treatment here, so an old sync does not need repeating to read correctly.
   if (items.length) {
     var shopId = String(items[0].shop_id || '');
-    if (shopId) resolveSellerSkus_(shopId, items);
+    if (shopId) resolveSellerSkus_(shopId, items, known_);
   }
 
   return { byVariation: groupVariationSales_(items), items: items };
@@ -590,7 +608,7 @@ function salesIndex_(byVariation) {
  */
 var SALES_CACHE_TTL_S = 60;
 
-function variationSalesCached_(listingId) {
+function variationSalesCached_(listingId, known_) {
   var key = 'sales:' + String(listingId);
   var cache = null;
   try {
@@ -603,7 +621,7 @@ function variationSalesCached_(listingId) {
     warn_('TS-ORD-20', 'Sales cache unavailable: ' + e);
   }
 
-  var compact = salesIndex_(variationSales_(listingId, null, null).byVariation);
+  var compact = salesIndex_(variationSales_(listingId, null, null, known_).byVariation);
 
   try {
     if (cache) cache.put(key, JSON.stringify(compact), SALES_CACHE_TTL_S);

@@ -136,6 +136,7 @@ ${src}
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
+    variationState_, bySellerSku_,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -1980,6 +1981,71 @@ function describe_skucache() {
   })
 }
 describe_skucache()
+
+console.log('\nLive means a buyer can buy it')
+
+/**
+ * Brien's #1, and the one he called most important: *"app shows listing is
+ * LIVE but actually it's still under reviewing"*.
+ *
+ * The cause was one read doing two jobs. `return_under_review_version=true`
+ * returns the PENDING product, and the app treated presence in that as "live".
+ * A product also stays ACTIVATE while an edit adding a variation to it goes
+ * through review, so both signals said live while nobody could buy the thing.
+ *
+ * Two versions now, and four states. The line that matters is between the
+ * first two: `live` means a buyer can buy it, `reviewing` means TikTok has it
+ * and nobody can.
+ */
+const liveSku = { id: '1', sellerSku: 'B74', quantity: 8 }
+const pendingSku = { id: '1', sellerSku: 'B74', quantity: 8 }
+
+check('in the version buyers see, it is live', () => {
+  const st = gs.variationState_('B74', '1', liveSku, pendingSku)
+  eq(st.state, 'live')
+  eq(st.buyable, true)
+  eq(st.quantity, 8)
+})
+
+check('in the pending version only, it is reviewing and NOT buyable', () => {
+  const st = gs.variationState_('B74', '1', undefined, pendingSku)
+  eq(st.state, 'reviewing')
+  eq(st.buyable, false)
+  // Deliberately no quantity: the pending version carries one, and reporting
+  // it invites counting on stock that is not for sale.
+  eq(st.quantity, null)
+  // It IS on TikTok though — the removal rule and the carry-forward depend on
+  // that, and treating it as gone is what deletes a variation on the next push.
+  eq(st.on_tiktok, true)
+})
+
+check('in neither version but with an id, it is pending, not lost', () => {
+  const st = gs.variationState_('B74', '9001', undefined, undefined)
+  eq(st.state, 'pending')
+  eq(st.buyable, false)
+  eq(st.on_tiktok, false)
+})
+
+check('in neither version and with no id, it was never listed', () => {
+  const st = gs.variationState_('B74', '', undefined, undefined)
+  eq(st.state, 'not_listed')
+  eq(st.buyable, false)
+})
+
+check('the live version wins when the two disagree', () => {
+  // A price or quantity edit in flight: both versions have the SKU, and the
+  // buyable figure is the one buyers are actually transacting against.
+  const st = gs.variationState_('B74', '1', { id: '1', sellerSku: 'B74', quantity: 3 }, { id: '1', sellerSku: 'B74', quantity: 99 })
+  eq(st.state, 'live')
+  eq(st.quantity, 3)
+})
+
+check('bySellerSku_ skips a SKU with no seller_sku', () => {
+  // A Seller Centre row can have none. Indexing it under '' would make every
+  // other blank one collide with it.
+  const index = gs.bySellerSku_([{ id: '1', sellerSku: 'B74' }, { id: '2', sellerSku: '' }, null])
+  eq(Object.keys(index), ['B74'])
+})
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

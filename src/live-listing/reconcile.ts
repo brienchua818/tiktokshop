@@ -202,40 +202,40 @@ export function splitRows(
 /**
  * Every unit of this variation is gone.
  *
- * Only meaningful once TikTok has confirmed the variation and told us a
- * quantity: a variation still under review reports no stock at all, and
- * reading that absence as "sold out" would put a red label on something that
- * has never been on sale. `stock_set` guards the other end — a variation
- * listed with no stock in the first place was never sold out, it was never
- * stocked.
+ * Buyable and nothing left. Both halves matter: a variation still in review
+ * reports no quantity at all, and reading that absence as "sold out" would put
+ * a red label on something that has never been on sale.
+ *
+ * This used to also consult the stored figure, to avoid calling a variation
+ * sold out when it had never been stocked. It does not need to any more — the
+ * quantity comes from the version buyers see, so zero there means zero for
+ * sale — and that dependency is what made a cancellation need a special case.
+ * TikTok returns the units, `stock_available` rises, and this goes false by
+ * itself.
  */
 export function soldOut(v: LiveVariant): boolean {
-  if (!v.on_tiktok || v.removed) return false
-  if (v.stock_available === null || v.stock_available > 0) return false
-  return v.external ? true : (v.stock_set ?? 0) > 0
+  return v.buyable && v.stock_available === 0
 }
 
 /**
  * Whether "of N" can honestly be shown beside the stock left.
  *
- * `stock_set` is what THIS APP asked for when it listed the variation. It is
- * not what TikTok holds now, and nothing keeps the two in step: raising stock
- * in Seller Center leaves the Sheet untouched.
+ * It always can now, when there is a quantity at all, because the total is
+ * derived rather than remembered: `available + sold`, computed by the backend
+ * from the version buyers see and the order lines. Those two move together, so
+ * the pair cannot contradict each other.
  *
- * Brien, 8 Sep: B15 was listed with 1, he added 10 in Seller Center, and the
- * row read **"11 left of 1"**. The 11 was right, freshly read from TikTok. The
- * "of 1" was a stale record of an old intention presented as a current total,
- * and it read as nonsense — which is worse than reading as nothing.
+ * It could not before. The denominator was the figure the app asked for when
+ * it first listed the variation, and nothing kept it current — which produced
+ * "11 left of 1" on 8 Sep after a top-up in Seller Centre, and "1 left of 5 ·
+ * 6 sold" on 15 Sep, a row that cannot describe anything real. Six sold and
+ * one left means seven were available.
  *
- * So the denominator is shown only while it can still be true. Once TikTok
- * holds more than the app ever listed, the app does not know the real total —
- * `available + sold` does not recover it either, because a cancelled unit may
- * or may not have returned to stock — so it says "11 left" and stops there.
+ * Kept as a function rather than inlined because "can this number be shown"
+ * has been wrong twice, and one place to ask is one place to fix.
  */
 export function showsOriginalTotal(v: LiveVariant): boolean {
-  if (v.stock_set === null || v.stock_set <= 0) return false
-  if (v.stock_available === null) return false
-  return v.stock_available <= v.stock_set
+  return v.stock_total !== null && v.stock_total > 0
 }
 
 /**

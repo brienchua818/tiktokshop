@@ -24,12 +24,12 @@ function variant(over: Partial<LiveVariant>): LiveVariant {
     image_url: '',
     created_at: '',
     created_by: '',
-    on_tiktok: false,
-    under_review: true,
-    unaccounted: false,
+    state: 'reviewing',
+    buyable: false,
+    on_tiktok: true,
     removed: false,
-    stock_set: 1,
     stock_available: null,
+    stock_total: null,
     sold: null,
     cancelled: null,
     ...over,
@@ -75,10 +75,10 @@ function draft(over: Partial<QueuedDraft>): QueuedDraft {
 describe('landed — did the backend record it?', () => {
   it('counts a variation the backend recorded even while TikTok still reviews it', () => {
     // This is B9: recorded 12:14:17, not yet returned by TikTok, reply lost.
-    expect(landed(state([variant({ on_tiktok: false, under_review: true })]), 'B9')).not.toBeNull()
+    expect(landed(state([variant({ state: 'reviewing', buyable: false, on_tiktok: true })]), 'B9')).not.toBeNull()
   })
   it('counts one TikTok already shows', () => {
-    expect(landed(state([variant({ on_tiktok: true, under_review: false })]), 'B9')).not.toBeNull()
+    expect(landed(state([variant({ state: 'live', buyable: true, on_tiktok: true })]), 'B9')).not.toBeNull()
   })
   it('ignores a variation added outside this app, even with the same name', () => {
     expect(landed(state([variant({ external: true })]), 'B9')).toBeNull()
@@ -145,8 +145,8 @@ describe('mergeRows — every phone shows the same listing', () => {
 describe('splitRows', () => {
   it('sends a removed remote variation to the removed side', () => {
     const rows = mergeRows([], state([
-      variant({ identifier: 'B1', on_tiktok: false, under_review: false, removed: true, created_at: '2026-09-07T01:00:00.000Z' }),
-      variant({ identifier: 'L1', on_tiktok: true, under_review: false, stock_available: 2, created_at: '2026-09-07T02:00:00.000Z' }),
+      variant({ identifier: 'B1', state: 'removed', buyable: false, on_tiktok: false, removed: true, created_at: '2026-09-07T01:00:00.000Z' }),
+      variant({ identifier: 'L1', state: 'live', buyable: true, on_tiktok: true, stock_available: 2, created_at: '2026-09-07T02:00:00.000Z' }),
     ]))
     const { active, removed } = splitRows(rows, null)
     expect(removed.map((r) => (r.kind === 'remote' ? r.live.identifier : ''))).toEqual(['B1'])
@@ -157,7 +157,7 @@ describe('splitRows', () => {
     // The draft still reads "pushed", because it was. What changed happened on
     // TikTok, so the answer is on the live record and nowhere else.
     const d = draft({ identifier: 'B1', status: 'pushed' })
-    const rows = mergeRows([d], state([variant({ identifier: 'B1', removed: true, on_tiktok: false, under_review: false })]))
+    const rows = mergeRows([d], state([variant({ identifier: 'B1', removed: true, state: 'removed', buyable: false, on_tiktok: false })]))
     const { active, removed } = splitRows(rows, null)
     expect(active).toHaveLength(0)
     expect(removed).toHaveLength(1)
@@ -173,9 +173,9 @@ describe('splitRows', () => {
 
   it('preserves order within each side', () => {
     const rows = mergeRows([], state([
-      variant({ identifier: 'A', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T03:00:00.000Z' }),
-      variant({ identifier: 'B', on_tiktok: true, under_review: false, stock_available: 1, created_at: '2026-09-07T01:00:00.000Z' }),
-      variant({ identifier: 'C', removed: true, on_tiktok: false, under_review: false, created_at: '2026-09-07T02:00:00.000Z' }),
+      variant({ identifier: 'A', removed: true, state: 'removed', buyable: false, on_tiktok: false, created_at: '2026-09-07T03:00:00.000Z' }),
+      variant({ identifier: 'B', state: 'live', buyable: true, on_tiktok: true, stock_available: 1, created_at: '2026-09-07T01:00:00.000Z' }),
+      variant({ identifier: 'C', removed: true, state: 'removed', buyable: false, on_tiktok: false, created_at: '2026-09-07T02:00:00.000Z' }),
     ]))
     const { active, removed } = splitRows(rows, null)
     // Newest first within each side: A is 03:00, C is 02:00.
@@ -184,7 +184,7 @@ describe('splitRows', () => {
   })
 
   it('isRemoved answers for both kinds of row', () => {
-    const remote = mergeRows([], state([variant({ removed: true, on_tiktok: false, under_review: false })]))[0]!
+    const remote = mergeRows([], state([variant({ removed: true, state: 'removed', buyable: false, on_tiktok: false })]))[0]!
     expect(isRemoved(remote, null)).toBe(true)
   })
 
@@ -197,7 +197,7 @@ describe('splitRows', () => {
    * backend has actually looked, which is what the time comparison is for.
    */
   describe('a pushed draft the backend does not return', () => {
-    const live = state([variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 })])
+    const live = state([variant({ identifier: 'B74', state: 'live', buyable: true, on_tiktok: true, stock_available: 8 })])
 
     it('is removed when the backend looked after it was pushed', () => {
       const d = draft({ identifier: 'B15', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
@@ -237,7 +237,7 @@ describe('splitRows', () => {
     it('leaves a pushed draft the backend DOES return alone, under review', () => {
       // Absence is the signal. A variation TikTok has not published yet is
       // still returned by the backend, so it is not absent.
-      const reviewing = state([variant({ identifier: 'B78', on_tiktok: false, under_review: true })])
+      const reviewing = state([variant({ identifier: 'B78', state: 'reviewing', buyable: false, on_tiktok: true })])
       const d = draft({ identifier: 'B78', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
       expect(splitRows(mergeRows([d], reviewing), reviewing).removed).toHaveLength(0)
     })
@@ -256,7 +256,7 @@ describe('splitRows', () => {
  */
 describe('draftsTakenOver', () => {
   const live = state([
-    variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 }),
+    variant({ identifier: 'B74', state: 'live', buyable: true, on_tiktok: true, stock_available: 8 }),
   ])
 
   it('hands over a pushed draft the backend confirms', () => {
@@ -297,8 +297,8 @@ describe('draftsTakenOver', () => {
     const mine = draft({ draft_id: 'a', identifier: 'B74', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
     const hers = draft({ draft_id: 'b', identifier: 'B75', status: 'pushed', pushed_at: '2026-09-15T09:00:00.000Z' })
     const shared = state([
-      variant({ identifier: 'B74', on_tiktok: true, under_review: false, stock_available: 8 }),
-      variant({ identifier: 'B75', on_tiktok: true, under_review: false, stock_available: 3 }),
+      variant({ identifier: 'B74', state: 'live', buyable: true, on_tiktok: true, stock_available: 8 }),
+      variant({ identifier: 'B75', state: 'live', buyable: true, on_tiktok: true, stock_available: 3 }),
     ])
     expect(draftsTakenOver([mine], shared)).toHaveLength(1)
     expect(draftsTakenOver([hers], shared)).toHaveLength(1)
@@ -310,55 +310,63 @@ describe('draftsTakenOver', () => {
 })
 
 describe('soldOut', () => {
-  it('is true when a confirmed variation has nothing left', () => {
-    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 2, stock_available: 0 }))).toBe(true)
+  it('is true when a buyable variation has nothing left', () => {
+    expect(soldOut(variant({ state: 'live', buyable: true, stock_available: 0 }))).toBe(true)
   })
 
   it('is false while stock remains', () => {
-    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 2, stock_available: 1 }))).toBe(false)
+    expect(soldOut(variant({ state: 'live', buyable: true, stock_available: 1 }))).toBe(false)
   })
 
-  it('is false for a variation under review, which reports no stock at all', () => {
+  it('is false for a variation in review, which reports no quantity at all', () => {
     // Absence of a quantity is not a quantity of zero. Reading it as sold out
     // would put a red label on something that has never been on sale.
-    expect(soldOut(variant({ on_tiktok: false, under_review: true, stock_available: null }))).toBe(false)
+    expect(soldOut(variant({ state: 'reviewing', buyable: false, stock_available: null }))).toBe(false)
   })
 
   it('is false for a removed variation', () => {
-    // It has its own tab and its own label; "sold out" would be a second,
-    // contradictory explanation of the same row.
-    expect(soldOut(variant({ removed: true, on_tiktok: false, under_review: false, stock_available: 0 }))).toBe(false)
+    // It has its own label; "sold out" would be a second, contradictory
+    // explanation of the same row.
+    expect(soldOut(variant({ state: 'removed', buyable: false, stock_available: 0 }))).toBe(false)
   })
 
-  it('is false for a variation that was never stocked', () => {
-    expect(soldOut(variant({ on_tiktok: true, under_review: false, stock_set: 0, stock_available: 0 }))).toBe(false)
-  })
-
-  it('is true for an external variation at zero, which has no stock_set to check', () => {
-    expect(soldOut(variant({ external: true, on_tiktok: true, under_review: false, stock_set: null, stock_available: 0 }))).toBe(true)
+  it('clears itself when a cancelled order returns the stock', () => {
+    // Brien's #5, and the reason this is now two fields instead of four.
+    // TikTok puts the units back on a cancellation — cancel an order of 2 and 2
+    // return — so the next read carries a quantity again and sold out goes
+    // false on its own. No cancellation case anywhere in the code.
+    const soldOutRow = variant({ state: 'live', buyable: true, stock_available: 0, sold: 6 })
+    expect(soldOut(soldOutRow)).toBe(true)
+    const afterCancel = { ...soldOutRow, stock_available: 2, sold: 4, cancelled: 2 }
+    expect(soldOut(afterCancel)).toBe(false)
   })
 })
 
 describe('showsOriginalTotal', () => {
-  it("hides the total once TikTok holds more than the app ever listed", () => {
-    // Brien's B15 on 8 Sep: listed with 1, ten added in Seller Center, and the
-    // row read "11 left of 1". The 11 was correct and current; the "of 1" was
-    // a stale intention shown as a total.
-    expect(showsOriginalTotal(variant({ stock_set: 1, stock_available: 11 }))).toBe(false)
+  /**
+   * The total is now derived by the backend as available + sold, so the pair
+   * cannot contradict each other. These assert that the display believes it.
+   */
+  it('shows the derived total', () => {
+    // B137 read "1 left of 5 · 6 sold" on 15 Sep, which cannot describe
+    // anything real: six sold and one left means seven were available.
+    const b137 = variant({ state: 'live', buyable: true, stock_available: 1, sold: 6, stock_total: 7 })
+    expect(showsOriginalTotal(b137)).toBe(true)
+    expect(b137.stock_total).toBe(7)
   })
 
-  it('shows it while it can still be true', () => {
-    expect(showsOriginalTotal(variant({ stock_set: 50, stock_available: 48 }))).toBe(true)
-    // Equal is fine: nothing has sold and nothing has been added.
-    expect(showsOriginalTotal(variant({ stock_set: 2, stock_available: 2 }))).toBe(true)
+  it('survives a top-up, which is what broke the stored figure', () => {
+    // B15 on 8 Sep: listed with 1, ten added in Seller Centre, and the row read
+    // "11 left of 1". Derived, it reads 11 left of 11 — and of 17 once six
+    // have sold.
+    expect(showsOriginalTotal(variant({ stock_available: 11, sold: 0, stock_total: 11 }))).toBe(true)
+    expect(showsOriginalTotal(variant({ stock_available: 11, sold: 6, stock_total: 17 }))).toBe(true)
   })
 
-  it('hides it when there is nothing to compare', () => {
-    // A Seller Center variation has no stock_set at all, and a variation under
-    // review has no available figure yet.
-    expect(showsOriginalTotal(variant({ external: true, stock_set: null, stock_available: 4 }))).toBe(false)
-    expect(showsOriginalTotal(variant({ stock_set: 5, stock_available: null }))).toBe(false)
-    expect(showsOriginalTotal(variant({ stock_set: 0, stock_available: 0 }))).toBe(false)
+  it('hides it when there is nothing to show', () => {
+    // A variation in review has no quantity, so it has no total either.
+    expect(showsOriginalTotal(variant({ state: 'reviewing', stock_available: null, stock_total: null }))).toBe(false)
+    expect(showsOriginalTotal(variant({ stock_available: 0, sold: 0, stock_total: 0 }))).toBe(false)
   })
 })
 

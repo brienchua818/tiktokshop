@@ -199,8 +199,31 @@ function ttGetProduct_(prefix, productId) {
    * a partial edit. So a variation that was merely pending could be marked
    * gone and then actually deleted on the next push.
    */
+  return ttGetProductVersion_(prefix, productId, true);
+}
+
+/**
+ * One version of the product. `underReview` decides WHICH.
+ *
+ * TikTok's reference, verbatim: true returns "the latest version of the
+ * product information that is currently under review"; false returns "a
+ * snapshot of the product information that is live and online (before the
+ * edit)".
+ *
+ * They answer different questions and the app needs both. "Is this variation
+ * still there, and what must I carry forward so a partial edit does not delete
+ * it?" is the under-review version. "Can a buyer buy this right now, and how
+ * many are left?" is the live one — and reading the under-review version for
+ * that is why the app told Brien a variation was Live while TikTok was still
+ * reviewing it (15 Sep).
+ *
+ * Writes keep using the under-review version, which is the latest state and
+ * what partial_edit rebuilds from.
+ */
+function ttGetProductVersion_(prefix, productId, underReview) {
   var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
-    { category_version: CATEGORY_VERSION, return_under_review_version: 'true' }, null);
+    { category_version: CATEGORY_VERSION,
+      return_under_review_version: underReview ? 'true' : 'false' }, null);
   if (r.code !== 0 || !r.data) {
     throw fail_('TS-PRD-02', 'Could not read the listing: ' + ttReason_(r));
   }
@@ -385,6 +408,64 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
   return updates;
 }
 
+/**
+ * What a variation actually IS, from both versions of the product.
+ *
+ * Pure, because this is the fact the whole screen is built on and Brien named
+ * it the one that must be right: *"the pending, reviewing and live
+ * confirmation is very impt for us during the livestream"*.
+ *
+ * Four states, and the difference between the first two is the difference
+ * between a buyer being able to buy it and not:
+ *
+ *   live       — in the version TikTok serves to buyers. Buyable now.
+ *   reviewing  — in the pending version only. TikTok has it, nobody can buy it.
+ *   pending    — in neither, but TikTok issued us a sku id when we created it.
+ *                Genuinely in flight; not lost.
+ *   not_listed — in neither, and no id. We have no evidence TikTok ever took it.
+ *
+ * The old code had one version and one flag, so "in the pending version"
+ * and "buyable" were the same thing — which is why the app said Live while
+ * TikTok was still reviewing.
+ *
+ * `quantity` comes from the LIVE version only. A pending variation has no
+ * meaningful "left": nothing can be sold from it yet, and reporting the
+ * pending number as stock invites someone to count on it.
+ */
+function variationState_(identifier, tiktokSkuId, liveSku, pendingSku) {
+  if (liveSku) {
+    return {
+      state: 'live',
+      on_tiktok: true,
+      buyable: true,
+      sku: liveSku,
+      quantity: Number(liveSku.quantity || 0)
+    };
+  }
+  if (pendingSku) {
+    return {
+      state: 'reviewing',
+      on_tiktok: true,
+      buyable: false,
+      sku: pendingSku,
+      quantity: null
+    };
+  }
+  if (String(tiktokSkuId || '')) {
+    return { state: 'pending', on_tiktok: false, buyable: false, sku: null, quantity: null };
+  }
+  return { state: 'not_listed', on_tiktok: false, buyable: false, sku: null, quantity: null };
+}
+
+/** Index a version's SKUs by seller_sku, the only key both sides agree on. */
+function bySellerSku_(skus) {
+  var out = {};
+  (skus || []).forEach(function (sku) {
+    if (sku && sku.sellerSku) out[String(sku.sellerSku)] = sku;
+  });
+  return out;
+}
+
 function listingState_(listingId) {
   /**
    * Read once.
@@ -406,7 +487,31 @@ function listingState_(listingId) {
   }
   if (!shopId) throw fail_('TS-PRD-03', 'Unknown listing: ' + listingId);
 
-  var live = ttGetProduct_(shopId, String(listingId));
+  /**
+   * Both versions, because they answer different questions.
+   *
+   * `pending` is the latest state — what exists, including anything still in
+   * review — and is what the removal rule and the carry-forward must use, or a
+   * variation waiting for approval reads as gone and the next push deletes it.
+   *
+   * `buyable` is what TikTok serves to buyers, and is the only thing that may
+   * be called Live. Reading one version for both is why the app told Brien a
+   * variation was Live while TikTok was still reviewing it.
+   *
+   * The live read is allowed to fail on its own: a product that has never been
+   * approved has no live version at all, and that is a legitimate answer
+   * ("nothing is buyable yet"), not an error worth failing the whole screen
+   * over.
+   */
+  var live = ttGetProductVersion_(shopId, String(listingId), true);
+  var buyable = null;
+  try {
+    buyable = ttGetProductVersion_(shopId, String(listingId), false);
+  } catch (e) {
+    warn_('TS-PRD-33', 'No live version for ' + listingId + ' (nothing buyable yet): ' + e);
+  }
+  var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
+  var pendingSkus = bySellerSku_(live.skus);
 
   /**
    * Record what TikTok is showing, and what it has stopped showing.
@@ -452,21 +557,16 @@ function listingState_(listingId) {
     warn_('TS-ORD-22', 'Could not read sales for ' + listingId + ': ' + e);
   }
 
-  // Keyed by seller_sku, which is the identifier the app assigns and the only
-  // field both sides agree on — a TikTok sku id is not known until after the
-  // push, and a row pushed from another device would not have it locally.
-  var bySellerSku = {};
-  live.skus.forEach(function (s) {
-    if (s.sellerSku) bySellerSku[String(s.sellerSku)] = s;
-  });
-
   var variants = rows.filter(function (r) {
     return String(r.status) === 'pushed' || String(r.status) === 'removed';
   }).map(function (r) {
-    var match = bySellerSku[String(r.identifier)];
-    var set = Number(r.stock || 0);
-    var available = match ? Number(match.quantity || 0) : null;
+    var st = variationState_(
+      r.identifier, r.tiktok_sku_id,
+      liveSkus[String(r.identifier)], pendingSkus[String(r.identifier)]
+    );
+    var match = st.sku;
     var sale = salesFor_(sales, (match && match.id) || r.tiktok_sku_id, r.identifier);
+    var sold = sale ? sale.units : null;
     return {
       identifier: String(r.identifier || ''),
       variant: String(r.variant || ''),
@@ -477,54 +577,50 @@ function listingState_(listingId) {
       image_url: String((match && match.skuImgUrl) || ''),
       created_at: String(r.created_at || ''),
       created_by: String(r.created_by || ''),
-      on_tiktok: Boolean(match),
+
       /**
-       * TikTok acknowledged this variation, but is not returning it.
+       * One word for what this variation is. See variationState_.
        *
-       * Get Product omits a variation still under review, so absence alone
-       * does not mean gone — B5 read as missing and went live shortly after.
-       * Having TikTok's own sku id is the difference: it was issued when the
-       * variation was created, so it proves TikTok took it. Without one, the
-       * variation really is unaccounted for.
+       * live | reviewing | pending | not_listed. The screen reads this and
+       * nothing else, so "Live" can no longer mean "TikTok has heard of it".
        */
-      under_review: !match && Boolean(String(r.tiktok_sku_id || '')),
-      /**
-       * Not returned, and we have no id to prove TikTok ever took it.
-       *
-       * Genuinely ambiguous: under review and never created look identical
-       * from here. It must not be reported as lost, because telling someone to
-       * retry a variation that is merely pending adds a second copy — and it
-       * must not be reported as fine either. Rows written before the id was
-       * kept all land here, which is why this state exists at all.
-       */
-      unaccounted: !match && !String(r.tiktok_sku_id || '') &&
-        String(r.status) !== 'removed',
-      /**
-       * Seen live once, and gone now. Deleted, not pending.
-       *
-       * Reported rather than hidden: a variation removed in Seller Center is a
-       * decision someone made, and the app agreeing quietly with reality is
-       * more use than the app pretending it never happened.
-       */
+      state: st.state,
+      /** Can a buyer buy it right now. The only thing "Live" may mean. */
+      buyable: st.buyable,
+      /** TikTok has it in some version. Not the same as buyable. */
+      on_tiktok: st.on_tiktok,
+
       removed: String(r.status) === 'removed',
-      stock_set: set,
-      stock_available: available,
+
+      /**
+       * What is left, and what was ever available.
+       *
+       * `stock_total` is DERIVED: available plus sold. It is not stored, and
+       * that is the whole point. The stored figure was what the app asked for
+       * when the variation was first listed, and nothing kept it current — so
+       * B137 read "1 left of 5 · 6 sold", which cannot be true. One left and
+       * six sold means seven were available; somebody topped it up.
+       *
+       * Deriving it also makes a cancellation self-correcting. TikTok puts the
+       * units back (Brien, confirmed: cancel an order of 2 and 2 return), so
+       * `stock_available` rises, the total rises with it, and a variation
+       * stops being sold out without any special case for cancellations.
+       *
+       * Null when there is nothing to add up: a variation nobody can buy yet
+       * has no "left", and orders that have never been synced are not zero.
+       */
+      stock_available: st.quantity,
+      stock_total: st.quantity === null ? null : st.quantity + (sold || 0),
+
       /**
        * Sold, from the order line items. Not from stock arithmetic.
-       *
-       * This was `Math.max(0, set - available)`, with a comment explaining
-       * that the clamp existed because raising stock in Seller Center made it
-       * read as negative sales. The clamp was treating the symptom: the whole
-       * derivation is wrong the moment anybody changes stock, which is exactly
-       * what Brien asked to be able to do. Topping a variation up by five made
-       * three genuine sales read as zero.
        *
        * Order lines are append-only, so no stock write by anybody can move
        * this number. `null` means orders have not been synced for this listing
        * yet, which is a different thing from zero and must stay
        * distinguishable.
        */
-      sold: sale ? sale.units : null,
+      sold: sold,
       /** Ordered then cancelled or unpaid. Shown separately, never netted. */
       cancelled: sale ? sale.unsold : null
     };
@@ -537,6 +633,7 @@ function listingState_(listingId) {
   live.skus.forEach(function (s) {
     if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
     var extSale = salesFor_(sales, s.id, s.sellerSku);
+    var extState = variationState_(s.sellerSku, s.id, liveSkus[String(s.sellerSku)], s);
     variants.push({
       identifier: String(s.sellerSku || ''),
       variant: String(s.valueName || ''),
@@ -547,14 +644,20 @@ function listingState_(listingId) {
       image_url: String(s.skuImgUrl || ''),
       created_at: '',
       created_by: '',
-      on_tiktok: true,
-      under_review: false, unaccounted: false, removed: false,
-      stock_set: null,
-      stock_available: Number(s.quantity || 0),
+      // Seller Centre rows are read from the pending version, like ours, and
+      // get the same four-state treatment: buyable only if the live version
+      // has them too.
+      state: extState.state,
+      buyable: extState.buyable,
+      on_tiktok: extState.on_tiktok,
+      removed: false,
+      stock_available: extState.quantity,
+      stock_total: extState.quantity === null
+        ? null
+        : extState.quantity + (extSale ? extSale.units : 0),
       // A variation added in Seller Center still sells, and its line items
       // carry TikTok's sku id, so it can be matched and counted like any
-      // other. Previously it was hardcoded to null purely because the stock
-      // arithmetic had no `set` figure to subtract from.
+      // other.
       sold: extSale ? extSale.units : null,
       cancelled: extSale ? extSale.unsold : null
     });
@@ -682,12 +785,12 @@ function removedVariations_(listingId) {
         image_url: '',
         created_at: String(r.created_at || ''),
         created_by: String(r.created_by || ''),
+        state: 'removed',
+        buyable: false,
         on_tiktok: false,
-        under_review: false,
-        unaccounted: false,
         removed: true,
-        stock_set: Number(r.stock || 0),
         stock_available: null,
+        stock_total: null,
         sold: null,
         cancelled: null
       };

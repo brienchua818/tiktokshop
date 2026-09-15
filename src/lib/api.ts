@@ -165,29 +165,40 @@ export interface LiveVariant {
   created_at: string
   /** Who pushed it, from the backend's row; empty for external. */
   created_by: string
-  /** False means TikTok is not returning it — see `under_review` before alarming. */
+  /**
+   * What this variation IS, in one word, decided by the backend from BOTH
+   * versions of the product TikTok serves.
+   *
+   *   live       — in the version buyers see. Buyable now.
+   *   reviewing  — in the pending version only. TikTok has it, nobody can buy it.
+   *   pending    — in neither, but TikTok issued an id when it was created.
+   *   not_listed — in neither, and no id. No evidence TikTok ever took it.
+   *   removed    — taken off, here or in Seller Centre.
+   *
+   * The screen reads this and nothing else. It replaces a pile of booleans
+   * that could not tell "TikTok has heard of it" from "somebody can buy it",
+   * which is why the app said Live while TikTok was still reviewing.
+   */
+  state: 'live' | 'reviewing' | 'pending' | 'not_listed' | 'removed'
+  /** Can a buyer buy it right now. The only thing "Live" may be shown for. */
+  buyable: boolean
+  /** TikTok has it in some version. NOT the same as buyable. */
   on_tiktok: boolean
-  /**
-   * TikTok issued an id for it but is not returning it yet.
-   *
-   * Get Product omits a variation under review, so absence is not proof of
-   * loss. Only a variation with no TikTok id is genuinely unaccounted for.
-   */
-  under_review: boolean
-  /**
-   * Not returned, and no TikTok id to prove it was ever taken.
-   *
-   * Ambiguous by nature — pending and never-created are indistinguishable
-   * here. Rows pushed before the id was recorded all land in this state.
-   */
-  unaccounted: boolean
   /** Was live, then deleted — in Seller Center or here. Not a fault. */
   removed: boolean
-  /** Null for a variation this app did not list — we never set its stock. */
-  stock_set: number | null
-  /** Null when TikTok has no such variation. */
+  /** What is left, from the version buyers see. Null when nothing is buyable yet. */
   stock_available: number | null
-  /** Derived as set − available, not a figure TikTok reports. */
+  /**
+   * How many were ever available: `stock_available + sold`, derived by the
+   * backend and never stored.
+   *
+   * The stored figure was what the app asked for when the variation was first
+   * listed, and nothing kept it current — so B137 read "1 left of 5 · 6 sold",
+   * which cannot be true. Deriving it also makes a cancellation
+   * self-correcting: TikTok returns the units, available rises, the total
+   * rises with it, and the variation stops being sold out on its own.
+   */
+  stock_total: number | null
   /**
    * Units sold, counted from order line items rather than derived from stock.
    *

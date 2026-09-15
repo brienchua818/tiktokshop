@@ -355,7 +355,7 @@ export default function DraftQueue({
         price={draft.price}
         stock={v ? <StockState v={v} /> : <span className="text-faint shrink-0">Queued</span>}
         meta={v ? variantMeta(v) : ''}
-        badge={<StatusBadge draft={draft} live={v} productStatus={live?.product_status ?? null} />}
+        badge={<StatusBadge draft={draft} live={v} />}
         {...(canAdjust && v ? { onOpen: () => setAdjusting(v) } : {})}
         {...(remove ? { onDelete: remove.fn, deleteLabel: remove.label } : {})}
       >
@@ -515,7 +515,6 @@ export default function DraftQueue({
             <RemoteRow
               key={`removed:${v.tiktok_sku_id || v.identifier}`}
               v={v}
-              productStatus={live?.product_status ?? null}
               onRemove={() => {}}
               onAdjust={() => {}}
             />
@@ -534,7 +533,6 @@ export default function DraftQueue({
             <RemoteRow
               key={row.key}
               v={row.live}
-              productStatus={live?.product_status ?? null}
               onRemove={setRemoving}
               onAdjust={setAdjusting}
             />
@@ -732,24 +730,20 @@ function liveFor(live: ListingState | null, identifier: string): LiveVariant | n
  */
 function RemoteRow({
   v,
-  productStatus,
   onRemove,
   onAdjust,
 }: {
   v: LiveVariant
-  productStatus: string | null
   onRemove: (v: LiveVariant) => void
   onAdjust: (v: LiveVariant) => void
 }) {
-  const badge = v.external
-    ? { text: 'Live', cls: 'text-ok' }
-    : v.removed
-      ? { text: 'Removed', cls: 'text-faint' }
-      : !v.on_tiktok
-        ? { text: 'Reviewing', cls: 'text-warn' }
-        : productStatus === 'ACTIVATE'
-          ? { text: 'Live', cls: 'text-ok' }
-          : { text: 'Sent', cls: 'text-muted' }
+  // `buyable` is the backend's answer to "can somebody buy this right now",
+  // decided from the version TikTok serves to buyers. It is the only thing
+  // that may be drawn as Live. The product's own review state is no longer
+  // consulted: a product can read ACTIVATE while the variation added to it
+  // three minutes ago is still pending, which is exactly what told Brien a
+  // variation was live when it was not.
+  const badge = variantBadge(v)
 
   /**
    * A Seller Center variation can have its stock changed too, addressed by
@@ -1051,11 +1045,25 @@ function VariantRow({
  * earlier in this build.
  */
 function StockState({ v }: { v: LiveVariant }) {
-  if (v.removed) return <span className="text-faint shrink-0">Removed</span>
-  if (!v.on_tiktok) {
-    // Absence is not loss: TikTok omits a variation still under review, and
-    // telling somebody to retry one that is merely pending adds a second copy.
-    return <span className="text-warn/90 shrink-0">{v.under_review ? 'Under review' : 'Not shown yet'}</span>
+  // One switch on one field. Every case the backend can report has a line
+  // here, so a new state cannot fall through to a stock figure that does not
+  // exist — which is how "SOLD OUT" ended up on variations that had never been
+  // on sale.
+  switch (v.state) {
+    case 'removed':
+      return <span className="text-faint shrink-0">Removed</span>
+    case 'reviewing':
+      // TikTok has it; nobody can buy it. Deliberately not a quantity: the
+      // pending version carries one, and showing it invites counting on stock
+      // that is not for sale.
+      return <span className="text-warn/90 shrink-0">Reviewing</span>
+    case 'pending':
+      // In neither version, but TikTok issued an id when it was created. In
+      // flight, not lost — and telling somebody to retry one that is merely
+      // pending adds a second copy.
+      return <span className="text-warn/90 shrink-0">Pending</span>
+    case 'not_listed':
+      return <span className="text-warn/90 shrink-0">Not shown yet</span>
   }
   if (soldOut(v)) {
     return <span className="text-bad font-semibold tracking-wide shrink-0">SOLD OUT</span>
@@ -1063,9 +1071,31 @@ function StockState({ v }: { v: LiveVariant }) {
   return (
     <span className="text-fg2 shrink-0">
       {v.stock_available} left
-      {showsOriginalTotal(v) && <span className="text-faint"> of {v.stock_set}</span>}
+      {showsOriginalTotal(v) && <span className="text-faint"> of {v.stock_total}</span>}
     </span>
   )
+}
+
+/**
+ * The status word for a variation, from the backend's own state.
+ *
+ * Shared by the two kinds of row so they cannot drift — which they did: a
+ * draft row and a remote row had separate badge logic and disagreed about the
+ * same variation.
+ */
+function variantBadge(v: LiveVariant): { text: string; cls: string } {
+  switch (v.state) {
+    case 'live':
+      return { text: 'Live', cls: 'text-ok' }
+    case 'reviewing':
+      return { text: 'Reviewing', cls: 'text-warn' }
+    case 'pending':
+      return { text: 'Pending', cls: 'text-warn' }
+    case 'removed':
+      return { text: 'Removed', cls: 'text-faint' }
+    default:
+      return { text: 'Not on TikTok', cls: 'text-muted' }
+  }
 }
 
 /** Sold, cancelled and who listed it, as one line that truncates. */
@@ -1078,29 +1108,30 @@ function variantMeta(v: LiveVariant): string {
   return bits.length ? `· ${bits.join(' · ')}` : ''
 }
 
-function StatusBadge({
-  draft,
-  live,
-  productStatus,
-}: {
-  draft: QueuedDraft
-  live: LiveVariant | null
-  /** TikTok's review state for the whole product — what decides "Live". */
-  productStatus: string | null
-}) {
+function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | null }) {
+  /**
+   * Once the backend knows about it, the backend's word is the badge.
+   *
+   * This used to decide Live from two things this screen could see: that the
+   * variation was in the read, and that the PRODUCT's review state was
+   * ACTIVATE. Both can be true while the variation itself is still pending —
+   * a product stays ACTIVATE while an edit adding a variation to it goes
+   * through review — which is how a variation nobody could buy was badged
+   * Live during Brien's 15 Sep broadcast.
+   *
+   * `variantBadge` reads the backend's own state, decided from the version
+   * TikTok actually serves to buyers, and is shared with the remote row so the
+   * two kinds of row cannot disagree about the same variation.
+   */
   if (draft.status === 'pushed') {
-    if (live && !live.on_tiktok) {
-      if (live.removed) return <span className="text-xs text-faint">Removed</span>
-      return <span className="text-xs text-warn">Reviewing</span>
+    if (live) {
+      const badge = variantBadge(live)
+      return <span className={`text-xs ${badge.cls}`}>{badge.text}</span>
     }
-    // Buyable requires two things: TikTok has the variation, and the product
-    // it belongs to has cleared review. A variation can exist while the
-    // product is still PENDING, and it is not purchasable then.
-    if (live?.on_tiktok && productStatus === 'ACTIVATE') {
-      return <span className="text-xs text-ok">Live</span>
-    }
+    // Pushed, and the backend has not covered it in a read yet. Accepted, not
+    // yet confirmed — and not claimed as anything stronger.
     return (
-      <span className="text-xs text-muted" title="Accepted by TikTok; see the listing status above">
+      <span className="text-xs text-muted" title="Accepted; waiting for the next check">
         Sent
       </span>
     )

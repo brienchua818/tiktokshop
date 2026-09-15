@@ -1015,41 +1015,93 @@ function replaceByKey_(tabName, keyField, rows) {
   if (!rows || !rows.length) return 0;
 
   var headers = HEADERS[tabName];
-  var incoming = {};
-  rows.forEach(function (r) { incoming[String(r[keyField])] = 1; });
+  var keyCol = headers.indexOf(keyField) + 1;
+  if (keyCol < 1) throw fail_('TS-SHT-06', 'No column called ' + keyField + ' on ' + tabName);
 
-  var existing = readAll_(tabName);
-  var kept = existing.filter(function (r) {
-    return !incoming[String(r[keyField])];
-  });
+  var sheet = sheet_(tabName);
+  var last = sheet.getLastRow();
 
   /**
-   * Nothing being replaced means this is an append, so append.
+   * Read ONE column, not the whole tab.
    *
-   * The rewrite below reads the whole tab and writes the whole tab back, and
-   * the cost is the tab's SIZE rather than the size of what arrived. That was
-   * tolerable when a sync was something Brien pressed a few times a day. It is
-   * not tolerable every two minutes for a three-hour broadcast, on a tab that
-   * grows with every order ever taken.
+   * Brien, 15 Sep: *"I don't know whether reading the full tab actually makes
+   * sense if it's going to be growing and growing."* It does not. This used to
+   * read every row and every column to work out which keys were already there,
+   * then write every row back — so the cost of a sync was the size of
+   * everything ever synced, on a tab that only grows, every two minutes.
    *
-   * During a stream almost every order is new, so this is the path almost
-   * every sync takes: cost proportional to what came in, not to everything
-   * that ever has. The rewrite is still there for the case that needs it — an
-   * order whose status changed after the first sync, which must update in
-   * place rather than appear twice.
+   * The keys alone answer the only question being asked: which of these rows
+   * are new, and where do the others already sit. One column of a ten-column
+   * tab, with nothing parsed into objects.
    */
-  if (kept.length === existing.length) {
-    appendRows_(tabName, rows.map(function (r) {
-      return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
-    }));
+  var keys = last > 1 ? sheet.getRange(2, keyCol, last - 1, 1).getValues() : [];
+  var whereByKey = {};
+  for (var i = 0; i < keys.length; i++) {
+    var k = String(keys[i][0]);
+    if (!whereByKey[k]) whereByKey[k] = [];
+    whereByKey[k].push(i + 2);
+  }
+
+  // Incoming rows grouped by key. One order carries several line items, so a
+  // key is not a single row.
+  var incomingByKey = {};
+  var order = [];
+  rows.forEach(function (r) {
+    var k = String(r[keyField]);
+    if (!incomingByKey[k]) { incomingByKey[k] = []; order.push(k); }
+    incomingByKey[k].push(r);
+  });
+
+  var asValues = function (r) {
+    return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
+  };
+
+  /**
+   * Can every key that is already here be written back over its own rows?
+   *
+   * Only when the incoming batch has the same NUMBER of rows for it. A count
+   * that changed would need rows inserted or deleted, and doing that one row
+   * at a time is worse than the rewrite it is avoiding. Rare in practice: a
+   * re-synced order has the same line items unless the order itself changed.
+   */
+  var inPlace = true;
+  order.forEach(function (k) {
+    var where = whereByKey[k];
+    if (where && where.length !== incomingByKey[k].length) inPlace = false;
+  });
+
+  if (inPlace) {
+    var appends = [];
+    order.forEach(function (k) {
+      var where = whereByKey[k];
+      if (!where) {
+        incomingByKey[k].forEach(function (r) { appends.push(asValues(r)); });
+        return;
+      }
+      // Its own rows, overwritten where they already sit.
+      incomingByKey[k].forEach(function (r, index) {
+        sheet.getRange(where[index], 1, 1, headers.length).setValues([asValues(r)]);
+      });
+    });
+    if (appends.length) appendRows_(tabName, appends);
+    SpreadsheetApp.flush();
+    invalidateRead_(tabName);
+    if (tabName === TAB_SKUS) bumpSkuVersion_();
     return rows.length;
   }
 
-  var all = kept.concat(rows).map(function (r) {
-    return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
+  /**
+   * The fallback: read it all, write it all.
+   *
+   * Reached only when a key's row count changed, which the fast path cannot
+   * express. Kept because correctness is not negotiable here — an order that
+   * gained or lost a line item must not end up recorded twice.
+   */
+  var kept = readAll_(tabName).filter(function (r) {
+    return !incomingByKey[String(r[keyField])];
   });
 
-  var sheet = sheet_(tabName);
+  var all = kept.concat(rows).map(asValues);
   var before = sheet.getLastRow();
 
   /**
@@ -3901,14 +3953,33 @@ var ORDER_PAGE_SIZE = 50;
  * open on purpose: two adjacent windows then partition the day rather than
  * both claiming an order created exactly on the boundary.
  */
-function ttSearchOrders_(prefix, fromEpoch, toEpoch, pageToken) {
+function ttSearchOrders_(prefix, fromEpoch, toEpoch, pageToken, byUpdateTime) {
   var query = { page_size: String(ORDER_PAGE_SIZE) };
   if (pageToken) query.page_token = pageToken;
 
-  var r = ttFetch_(prefix, 'post', '/order/202309/orders/search', query, {
-    create_time_ge: Number(fromEpoch),
-    create_time_lt: Number(toEpoch)
-  });
+  /**
+   * By CREATION time, or by when the order last CHANGED.
+   *
+   * Creation time answers "what happened during the stream", which is what an
+   * export needs. It is the wrong question for a sync that runs every two
+   * minutes: an order created an hour ago and cancelled a moment ago has not
+   * changed its creation time, so a creation-time window never sees the
+   * cancellation — and a window wide enough to catch it re-fetches every order
+   * in it, over and over.
+   *
+   * Update time asks only what has changed since we last looked, which during
+   * a quiet minute is nothing at all.
+   *
+   * NOT assumed to work. The parameter could not be confirmed against TikTok's
+   * documentation from here, and an ignored filter does not error — it returns
+   * the most recent orders, which would look like a working sync while
+   * silently missing everything. The caller proves it was applied.
+   */
+  var body = byUpdateTime
+    ? { update_time_ge: Number(fromEpoch), update_time_lt: Number(toEpoch) }
+    : { create_time_ge: Number(fromEpoch), create_time_lt: Number(toEpoch) };
+
+  var r = ttFetch_(prefix, 'post', '/order/202309/orders/search', query, body);
   if (r.code !== 0) throw fail_('TS-ORD-01', 'Could not read orders: ' + ttReason_(r));
 
   var data = r.data || {};
@@ -3923,14 +3994,14 @@ function ttSearchOrders_(prefix, fromEpoch, toEpoch, pageToken) {
  * silently on partial data — a purchase order built from half the orders is
  * worse than no purchase order.
  */
-function ttAllOrders_(prefix, fromEpoch, toEpoch) {
+function ttAllOrders_(prefix, fromEpoch, toEpoch, byUpdateTime) {
   var all = [];
   var token = '';
   var pages = 0;
   var MAX_PAGES = 60;
 
   do {
-    var page = ttSearchOrders_(prefix, fromEpoch, toEpoch, token);
+    var page = ttSearchOrders_(prefix, fromEpoch, toEpoch, token, byUpdateTime);
     all = all.concat(page.orders);
     token = page.nextPageToken;
     pages++;
@@ -4007,82 +4078,8 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
     );
   }
 
-  var orderRows = [];
-  var itemRows = [];
-
-  orders.forEach(function (o) {
-    var created = Number(o.create_time || 0);
-    orderRows.push({
-      order_id: String(o.id || ''),
-      shop_id: shopId,
-      brand: shop.brand,
-      status: String(o.status || ''),
-      created_at_sgt: created ? sgtStampFromEpoch_(created) : '',
-      created_epoch: created,
-      total: String((o.payment && o.payment.total_amount) || ''),
-      currency: String((o.payment && o.payment.currency) || 'SGD'),
-      item_count: (o.line_items || []).length,
-      synced_at: new Date().toISOString()
-    });
-
-    // ONE LINE ITEM IS ONE UNIT.
-    //
-    // There is no quantity field on a line item — confirmed against a real
-    // order, whose keys are: buyer_service_fee, currency, display_status,
-    // gift_retail_price, id, is_gift, original_price, package_id,
-    // package_status, platform_discount, product_id, product_name, rts_time,
-    // sale_price, seller_discount, seller_sku, sku_id, sku_image, sku_name,
-    // sku_type, tracking_number. Buying three of a SKU produces three line
-    // items, each with its own id, package and tracking, because TikTok tracks
-    // fulfilment per unit.
-    //
-    // So units are counted, not summed, and sale_price is the price of one
-    // unit. Recorded as quantity 1 per row to keep the arithmetic downstream
-    // uniform, and stated here because reading `Number(li.quantity || 1)`
-    // would look like a defensive default rather than the actual model.
-    (o.line_items || []).forEach(function (li) {
-      itemRows.push({
-        order_id: String(o.id || ''),
-        shop_id: shopId,
-        listing_id: String(li.product_id || ''),
-        product_name: String(li.product_name || ''),
-        sku_id: String(li.sku_id || ''),
-        // Empty on products not created by this app; the identifier is only
-        // there because we put it there. Grouping falls back to sku_id.
-        seller_sku: String(li.seller_sku || ''),
-        variation: String(li.sku_name || ''),
-        sku_image: String(li.sku_image || ''),
-        quantity: 1,
-        sale_price: String(li.sale_price || ''),
-        currency: String(li.currency || 'SGD'),
-        status: String(li.display_status || o.status || ''),
-        created_at_sgt: created ? sgtStampFromEpoch_(created) : '',
-        created_epoch: created
-      });
-    });
-  });
-
-  // Blank seller_sku is filled before the rows are written, so every reader
-  // — the app's order detail, the export — sees the same identifier.
-  var filled = resolveSellerSkus_(shopId, itemRows);
-  var filledNote = describeResolution_(filled);
-  if (filled.unresolved) {
-    warn_('TS-ORD-08', filled.unresolved + ' order line(s) have no identifier from any source ' +
-      '(' + filledNote + ')', shopId);
-  }
-
-  /**
-   * The lock goes here, around the write, and not around the fetch above.
-   *
-   * Fetching a busy window is dozens of TikTok calls and takes minutes. Held
-   * across that, a SKU push during a broadcast would queue behind an order
-   * sync — the one thing in this app that must never wait. The two tabs are
-   * rewritten together so a reader never sees orders without their items.
-   */
-  withScriptLock_(30000, function () {
-    replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
-    replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
-  });
+  var written = writeOrders_(shopId, orders, actor);
+  var filledNote = written.filledNote;
 
   logEvent_(actor, 'sync_orders', shop.brand,
     orders.length + ' orders ' + fromDate + ' to ' + toDate +
@@ -4090,7 +4087,7 @@ function syncOrders_(shopId, fromDate, fromTime, toDate, toTime, actor) {
 
   return {
     orders: orders.length,
-    items: itemRows.length,
+    items: written.items,
     from: fromDate + ' ' + (fromTime || '00:00'),
     to: toDate + ' ' + (toTime || '23:59')
   };
@@ -4567,6 +4564,8 @@ var SYNC_WINDOW_MIN = 20;
 var SYNC_ACTIVE_HOURS = 6;
 var SYNC_TRIGGER_FN = 'syncRecentOrders';
 var LAST_LISTED_PREFIX = 'LAST_LISTED_';
+var LAST_SYNCED_PREFIX = 'LAST_SYNCED_';
+var SYNC_BACKFILL_MIN = 60;
 
 /**
  * Install the timer. Run once, by hand, from the editor.
@@ -4659,6 +4658,41 @@ function noteListed_(shopId) {
  * Script after enough errors, and a silent sync that stopped weeks ago is the
  * worst version of this feature.
  */
+/**
+ * Orders that have CHANGED since we last looked, and nothing else.
+ *
+ * Pure, so the rule can be asserted without TikTok or a clock.
+ *
+ * Two jobs. It proves the filter was applied — TikTok ignoring an unknown
+ * parameter returns the most recent orders instead of erroring, which would
+ * look like a working sync while silently missing everything — and it says
+ * where the next watermark should sit.
+ *
+ * The watermark is the newest change actually SEEN, not "now". A clock-based
+ * one skips anything that changed during the call itself; this one cannot,
+ * and the worst it does is re-fetch a handful next time.
+ */
+function changedSince_(orders, sinceEpoch) {
+  var stale = [];
+  var newest = sinceEpoch;
+  (orders || []).forEach(function (o) {
+    var at = Number(o.update_time || o.create_time || 0);
+    if (at && at < sinceEpoch) stale.push(o);
+    if (at > newest) newest = at;
+  });
+  return {
+    applied: stale.length === 0,
+    stale: stale.length,
+    watermark: newest,
+    count: (orders || []).length
+  };
+}
+
+/**
+ * The trigger's target. Never throws: Apps Script disables a timer that fails
+ * often enough, and a sync that silently stopped weeks ago is the worst
+ * version of this feature.
+ */
 function syncRecentOrders() {
   var shops;
   try {
@@ -4671,25 +4705,150 @@ function syncRecentOrders() {
   // a return. Every two minutes, all day, every day.
   if (!shops.length) return;
 
-  var to = new Date();
-  var from = new Date(to.getTime() - SYNC_WINDOW_MIN * 60 * 1000);
-  var d = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'yyyy-MM-dd'); };
-  var t = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'HH:mm'); };
+  var props = PropertiesService.getScriptProperties();
+  var nowEpoch = Math.floor(Date.now() / 1000);
 
   shops.forEach(function (shopId) {
     try {
-      // A window that crosses midnight would ask for a negative range, so it
-      // is clamped to the start of the day. Half an hour of overlap costs one
-      // page; a refused sync costs the sold count until somebody notices.
-      var fromDate = d(from);
-      var fromTime = d(from) === d(to) ? t(from) : '00:00';
-      syncOrders_(shopId, fromDate, fromTime, d(to), t(to), 'background sync');
+      var markKey = LAST_SYNCED_PREFIX + shopId;
+      var since = Number(props.getProperty(markKey) || 0) ||
+        (nowEpoch - SYNC_BACKFILL_MIN * 60);
+
+      /**
+       * Ask only for what has changed. Usually nothing.
+       *
+       * Brien: *"it should only look at orders that have status change like
+       * cancellation ... It should only recognize when there's a change and
+       * not fire or do more when it doesn't record a change."* Exactly right,
+       * and the reason a creation-time window was wrong at this cadence: it
+       * re-fetched every order in it every two minutes and still could not see
+       * a cancellation, because cancelling does not change when an order was
+       * created.
+       */
+      var orders = ttAllOrders_(shopId, since, nowEpoch + 1, true);
+      var check = changedSince_(orders, since);
+
+      if (!check.applied) {
+        /**
+         * The filter was ignored, so what came back is not what was asked
+         * for. Nothing is written from it, and this shop falls back to the
+         * creation-time window for this run — correct, just more expensive.
+         */
+        warn_('TS-ORD-25', shopId + ': update_time filter not applied (' + check.stale +
+          ' order(s) older than the watermark). Falling back to creation time.');
+        var from = new Date((nowEpoch - SYNC_WINDOW_MIN * 60) * 1000);
+        var to = new Date(nowEpoch * 1000);
+        var d = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'yyyy-MM-dd'); };
+        var t = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'HH:mm'); };
+        syncOrders_(shopId, d(from), d(from) === d(to) ? t(from) : '00:00', d(to), t(to),
+                    'background sync');
+        return;
+      }
+
+      // Nothing changed. No Sheet is opened, nothing is written, and the
+      // watermark does not move — which is the whole point of the question
+      // being "what changed" rather than "what exists".
+      if (!check.count) return;
+
+      writeOrders_(shopId, orders, 'background sync');
+      props.setProperty(markKey, String(check.watermark));
     } catch (e) {
       // One shop failing must not stop the others, and must not disable the
       // timer. The log is where a sync that has been failing all week is found.
       warn_('TS-ORD-24', 'Background sync failed for ' + shopId + ': ' + e);
     }
   });
+}
+
+/**
+ * Turn TikTok's orders into rows and write them.
+ *
+ * Extracted so the manual sync and the two-minute background one share one
+ * path. They fetch differently — a window someone chose, versus whatever has
+ * changed since the last watermark — but what happens to an order afterwards
+ * must not depend on which asked for it.
+ */
+function writeOrders_(shopId, orders, actor) {
+  var shop = shopById_(shopId);
+  var orderRows = [];
+  var itemRows = [];
+
+  orders.forEach(function (o) {
+    var created = Number(o.create_time || 0);
+    orderRows.push({
+      order_id: String(o.id || ''),
+      shop_id: shopId,
+      brand: shop.brand,
+      status: String(o.status || ''),
+      created_at_sgt: created ? sgtStampFromEpoch_(created) : '',
+      created_epoch: created,
+      total: String((o.payment && o.payment.total_amount) || ''),
+      currency: String((o.payment && o.payment.currency) || 'SGD'),
+      item_count: (o.line_items || []).length,
+      synced_at: new Date().toISOString()
+    });
+
+    // ONE LINE ITEM IS ONE UNIT.
+    //
+    // There is no quantity field on a line item — confirmed against a real
+    // order, whose keys are: buyer_service_fee, currency, display_status,
+    // gift_retail_price, id, is_gift, original_price, package_id,
+    // package_status, platform_discount, product_id, product_name, rts_time,
+    // sale_price, seller_discount, seller_sku, sku_id, sku_image, sku_name,
+    // sku_type, tracking_number. Buying three of a SKU produces three line
+    // items, each with its own id, package and tracking, because TikTok tracks
+    // fulfilment per unit.
+    //
+    // So units are counted, not summed, and sale_price is the price of one
+    // unit. Recorded as quantity 1 per row to keep the arithmetic downstream
+    // uniform, and stated here because reading `Number(li.quantity || 1)`
+    // would look like a defensive default rather than the actual model.
+    (o.line_items || []).forEach(function (li) {
+      itemRows.push({
+        order_id: String(o.id || ''),
+        shop_id: shopId,
+        listing_id: String(li.product_id || ''),
+        product_name: String(li.product_name || ''),
+        sku_id: String(li.sku_id || ''),
+        // Empty on products not created by this app; the identifier is only
+        // there because we put it there. Grouping falls back to sku_id.
+        seller_sku: String(li.seller_sku || ''),
+        variation: String(li.sku_name || ''),
+        sku_image: String(li.sku_image || ''),
+        quantity: 1,
+        sale_price: String(li.sale_price || ''),
+        currency: String(li.currency || 'SGD'),
+        status: String(li.display_status || o.status || ''),
+        created_at_sgt: created ? sgtStampFromEpoch_(created) : '',
+        created_epoch: created
+      });
+    });
+  });
+
+  // Blank seller_sku is filled before the rows are written, so every reader
+  // — the app's order detail, the export — sees the same identifier.
+  var filled = resolveSellerSkus_(shopId, itemRows);
+  var filledNote = describeResolution_(filled);
+  if (filled.unresolved) {
+    warn_('TS-ORD-08', filled.unresolved + ' order line(s) have no identifier from any source ' +
+      '(' + filledNote + ')', shopId);
+  }
+
+  /**
+   * The lock goes here, around the write, and not around the fetch above.
+   *
+   * Fetching a busy window is dozens of TikTok calls and takes minutes. Held
+   * across that, a SKU push during a broadcast would queue behind an order
+   * sync — the one thing in this app that must never wait. The two tabs are
+   * written together so a reader never sees orders without their items.
+   */
+  withScriptLock_(30000, function () {
+    replaceByKey_(TAB_ORDERS, 'order_id', orderRows);
+    replaceByKey_(TAB_ORDER_ITEMS, 'order_id', itemRows);
+  });
+
+  return { orders: orders.length, items: itemRows.length, filledNote: filledNote };
+
 }
 
 
@@ -5899,4 +6058,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'c55fb3f 2026-09-15';
+var BACKEND_BUILD = '6568fad-dirty 2026-09-15';

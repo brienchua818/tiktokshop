@@ -71,19 +71,20 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
 | `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
 | `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
-| `TS-ORD-01` | Orders.gs:40 | Could not read orders: |
-| `TS-ORD-02` | Orders.gs:66 | That range has more than orders. Narrow the dates and sync again. |
-| `TS-ORD-03` | Orders.gs:82 | Not a date: |
-| `TS-ORD-04` | Orders.gs:111 | Unknown shop: |
-| `TS-ORD-05` | Orders.gs:115 | The end of the range is before its start. |
-| `TS-ORD-06` | Orders.gs:131 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
-| `TS-ORD-07` | Orders.gs:466 | seller_sku lookup: could not read listing : [ ] |
-| `TS-ORD-08` | Orders.gs:198 | order line(s) have no identifier from any source ( ) |
-| `TS-ORD-20` | Orders.gs:621 | Sales cache unavailable: |
-| `TS-ORD-21` | Orders.gs:629 | Could not cache sales for : |
+| `TS-ORD-01` | Orders.gs:59 | Could not read orders: |
+| `TS-ORD-02` | Orders.gs:85 | That range has more than orders. Narrow the dates and sync again. |
+| `TS-ORD-03` | Orders.gs:101 | Not a date: |
+| `TS-ORD-04` | Orders.gs:130 | Unknown shop: |
+| `TS-ORD-05` | Orders.gs:134 | The end of the range is before its start. |
+| `TS-ORD-06` | Orders.gs:150 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
+| `TS-ORD-07` | Orders.gs:411 | seller_sku lookup: could not read listing : [ ] |
+| `TS-ORD-08` | Orders.gs:909 | order line(s) have no identifier from any source ( ) |
+| `TS-ORD-20` | Orders.gs:566 | Sales cache unavailable: |
+| `TS-ORD-21` | Orders.gs:574 | Could not cache sales for : |
 | `TS-ORD-22` | Product.gs:557 | Could not read sales for : |
-| `TS-ORD-23` | Orders.gs:795 | Background sync could not read its activity marks: |
-| `TS-ORD-24` | Orders.gs:818 | Background sync failed for : |
+| `TS-ORD-23` | Orders.gs:777 | Background sync could not read its activity marks: |
+| `TS-ORD-24` | Orders.gs:834 | Background sync failed for : |
+| `TS-ORD-25` | Orders.gs:813 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:228 | Could not read the listing: |
 | `TS-PRD-03` | Product.gs:488 | Unknown listing: |
@@ -121,6 +122,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-SHT-01` | Sheet.gs:279 | Unknown shop: |
 | `TS-SHT-04` | Sheet.gs:379 | SKU cache unavailable for : |
 | `TS-SHT-05` | Sheet.gs:397 | Could not cache SKUs for : |
+| `TS-SHT-06` | Sheet.gs:435 | No column called on |
 | `TS-STK-01` | Product.gs:1870 | Could not read the listing before changing stock, so nothing was sent. |
 | `TS-STK-02` | Product.gs:1641 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
 | `TS-STK-03` | Product.gs:1647 | That variation has no warehouse on TikTok, so its stock cannot be changed. |

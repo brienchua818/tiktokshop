@@ -431,41 +431,93 @@ function replaceByKey_(tabName, keyField, rows) {
   if (!rows || !rows.length) return 0;
 
   var headers = HEADERS[tabName];
-  var incoming = {};
-  rows.forEach(function (r) { incoming[String(r[keyField])] = 1; });
+  var keyCol = headers.indexOf(keyField) + 1;
+  if (keyCol < 1) throw fail_('TS-SHT-06', 'No column called ' + keyField + ' on ' + tabName);
 
-  var existing = readAll_(tabName);
-  var kept = existing.filter(function (r) {
-    return !incoming[String(r[keyField])];
-  });
+  var sheet = sheet_(tabName);
+  var last = sheet.getLastRow();
 
   /**
-   * Nothing being replaced means this is an append, so append.
+   * Read ONE column, not the whole tab.
    *
-   * The rewrite below reads the whole tab and writes the whole tab back, and
-   * the cost is the tab's SIZE rather than the size of what arrived. That was
-   * tolerable when a sync was something Brien pressed a few times a day. It is
-   * not tolerable every two minutes for a three-hour broadcast, on a tab that
-   * grows with every order ever taken.
+   * Brien, 15 Sep: *"I don't know whether reading the full tab actually makes
+   * sense if it's going to be growing and growing."* It does not. This used to
+   * read every row and every column to work out which keys were already there,
+   * then write every row back — so the cost of a sync was the size of
+   * everything ever synced, on a tab that only grows, every two minutes.
    *
-   * During a stream almost every order is new, so this is the path almost
-   * every sync takes: cost proportional to what came in, not to everything
-   * that ever has. The rewrite is still there for the case that needs it — an
-   * order whose status changed after the first sync, which must update in
-   * place rather than appear twice.
+   * The keys alone answer the only question being asked: which of these rows
+   * are new, and where do the others already sit. One column of a ten-column
+   * tab, with nothing parsed into objects.
    */
-  if (kept.length === existing.length) {
-    appendRows_(tabName, rows.map(function (r) {
-      return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
-    }));
+  var keys = last > 1 ? sheet.getRange(2, keyCol, last - 1, 1).getValues() : [];
+  var whereByKey = {};
+  for (var i = 0; i < keys.length; i++) {
+    var k = String(keys[i][0]);
+    if (!whereByKey[k]) whereByKey[k] = [];
+    whereByKey[k].push(i + 2);
+  }
+
+  // Incoming rows grouped by key. One order carries several line items, so a
+  // key is not a single row.
+  var incomingByKey = {};
+  var order = [];
+  rows.forEach(function (r) {
+    var k = String(r[keyField]);
+    if (!incomingByKey[k]) { incomingByKey[k] = []; order.push(k); }
+    incomingByKey[k].push(r);
+  });
+
+  var asValues = function (r) {
+    return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
+  };
+
+  /**
+   * Can every key that is already here be written back over its own rows?
+   *
+   * Only when the incoming batch has the same NUMBER of rows for it. A count
+   * that changed would need rows inserted or deleted, and doing that one row
+   * at a time is worse than the rewrite it is avoiding. Rare in practice: a
+   * re-synced order has the same line items unless the order itself changed.
+   */
+  var inPlace = true;
+  order.forEach(function (k) {
+    var where = whereByKey[k];
+    if (where && where.length !== incomingByKey[k].length) inPlace = false;
+  });
+
+  if (inPlace) {
+    var appends = [];
+    order.forEach(function (k) {
+      var where = whereByKey[k];
+      if (!where) {
+        incomingByKey[k].forEach(function (r) { appends.push(asValues(r)); });
+        return;
+      }
+      // Its own rows, overwritten where they already sit.
+      incomingByKey[k].forEach(function (r, index) {
+        sheet.getRange(where[index], 1, 1, headers.length).setValues([asValues(r)]);
+      });
+    });
+    if (appends.length) appendRows_(tabName, appends);
+    SpreadsheetApp.flush();
+    invalidateRead_(tabName);
+    if (tabName === TAB_SKUS) bumpSkuVersion_();
     return rows.length;
   }
 
-  var all = kept.concat(rows).map(function (r) {
-    return headers.map(function (h) { return r[h] === undefined ? '' : r[h]; });
+  /**
+   * The fallback: read it all, write it all.
+   *
+   * Reached only when a key's row count changed, which the fast path cannot
+   * express. Kept because correctness is not negotiable here — an order that
+   * gained or lost a line item must not end up recorded twice.
+   */
+  var kept = readAll_(tabName).filter(function (r) {
+    return !incomingByKey[String(r[keyField])];
   });
 
-  var sheet = sheet_(tabName);
+  var all = kept.concat(rows).map(asValues);
   var before = sheet.getLastRow();
 
   /**

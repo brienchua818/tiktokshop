@@ -136,7 +136,7 @@ ${src}
     skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
-    variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS,
+    variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
@@ -2092,33 +2092,40 @@ check('the boundary is inclusive, so a shop on the edge still syncs', () => {
   eq(gs.shopsToSync_({ HZ: NOW - 6 * HOURS - 1 }, NOW, 6), [])
 })
 
-console.log('\nnew orders append; changed orders rewrite')
+console.log('\nsyncing touches only what changed')
 
 /**
- * `replaceByKey_` read the whole tab and wrote the whole tab back, so the cost
- * of a sync was the size of everything ever synced rather than the size of
- * what arrived. Fine when a sync was something pressed a few times a day;
- * not fine every two minutes for a three-hour broadcast.
+ * Brien, 15 Sep: *"I don't know whether reading the full tab actually makes
+ * sense if it's going to be growing and growing and growing. It should only
+ * recognize when there's a change and not fire or do more when it doesn't
+ * record a change."*
  *
- * During a stream almost every order is new, so appending is the path almost
- * every sync now takes. The rewrite stays for the case that needs it: an order
- * whose status changed after the first sync has to update in place rather than
- * appear twice.
+ * He was right. This read every row and every column to work out which keys
+ * were present, then wrote every row back — so the cost of a sync was the size
+ * of everything ever synced, on a tab that only grows, every two minutes.
+ *
+ * It now reads ONE column, appends what is new, and writes a changed row over
+ * itself. The whole-tab path survives for the one case the cheap one cannot
+ * express: a key whose number of rows changed, which would need rows inserted
+ * or deleted.
  */
 function describe_replaceByKey() {
   let rows = []
+  let reads = []
   let writes = { at: [], cleared: 0 }
 
   const install = () => {
     gs.__setHeaders('Orders', ['order_id', 'status'])
     gs.__setSheetImpl(() => ({
       getLastRow: () => rows.length + 1,
-      getRange: (r) => ({
-        getValues: () => rows.map((x) => [x.order_id, x.status]),
-        // The row a write STARTS at is what tells the two paths apart, and
-        // guessing at it is how the first version of this test reported a
-        // rewrite as an append. A rewrite starts at row 2, under the header;
-        // an append starts below the last row.
+      // The width asked for is the point of the change, so it is recorded.
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => {
+          reads.push({ row: r, col: c, width: nc === undefined ? 2 : nc })
+          return nc === 1
+            ? rows.map((x) => [x.order_id])
+            : rows.map((x) => [x.order_id, x.status])
+        },
         setValues: (v) => { writes.at.push({ row: r, count: v.length }) },
         setValue: () => {},
         clearContent: () => { writes.cleared++ },
@@ -2126,6 +2133,7 @@ function describe_replaceByKey() {
       }),
     }))
     gs.invalidateRead_()
+    reads = []
     writes = { at: [], cleared: 0 }
   }
 
@@ -2134,40 +2142,84 @@ function describe_replaceByKey() {
   /** Rows written starting at row 2: the whole tab, rewritten. */
   const rewritten = () => writes.at.filter((w) => w.row === 2).reduce((n, w) => n + w.count, 0)
 
-  check('all-new orders are appended, not rewritten', () => {
+  check('only the key column is read, not the whole tab', () => {
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
+    gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o3', status: 'PAID' }])
+    // One column. This is the whole of Brien's point.
+    eq(reads.every((r) => r.width === 1), true)
+  })
+
+  check('all-new orders are appended, and nothing else is touched', () => {
     install()
     rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
     gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o3', status: 'PAID' }])
     eq(appended(), 1)
-    // The two already there were not touched. That is the whole saving.
     eq(rewritten(), 0)
+    eq(writes.at.length, 1)
   })
 
-  check('a changed order still rewrites, so it cannot appear twice', () => {
+  check('a changed order is written over its own row, and only that row', () => {
     install()
     rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
     gs.replaceByKey_('Orders', 'order_id', [{ order_id: 'o2', status: 'CANCELLED' }])
-    // One kept plus the updated one, written in place.
-    eq(rewritten(), 2)
-    eq(appended(), 0)
+    eq(writes.at.length, 1)
+    // o2 sits at sheet row 3: header, o1, o2.
+    eq(writes.at[0], { row: 3, count: 1 })
+    eq(rewritten(), 0)
   })
 
-  check('a mix of new and changed rewrites, because one of them must', () => {
+  check('new and changed together: one appended, one written in place', () => {
     install()
     rows = [{ order_id: 'o1', status: 'PAID' }]
     gs.replaceByKey_('Orders', 'order_id', [
       { order_id: 'o1', status: 'CANCELLED' },
       { order_id: 'o2', status: 'PAID' },
     ])
-    eq(rewritten(), 2)
-    eq(appended(), 0)
+    eq(writes.at.length, 2)
+    eq(appended(), 1)
+    // o1 over itself at row 2 — which is also where a rewrite would start, so
+    // the count is what tells them apart: one row, not the whole tab.
+    eq(rewritten(), 1)
   })
 
-  check('an empty batch writes nothing at all', () => {
+  check('several rows under one key, all written back in place', () => {
+    // An order carries a line item per unit, so a key is not one row.
+    install()
+    rows = [
+      { order_id: 'o1', status: 'PAID' },
+      { order_id: 'o1', status: 'PAID' },
+      { order_id: 'o2', status: 'PAID' },
+    ]
+    gs.replaceByKey_('Orders', 'order_id', [
+      { order_id: 'o1', status: 'CANCELLED' },
+      { order_id: 'o1', status: 'CANCELLED' },
+    ])
+    eq(writes.at.length, 2)
+    eq(writes.at.map((w) => w.row), [2, 3])
+  })
+
+  check('a key whose row count changed falls back to the full rewrite', () => {
+    // The one case the cheap path cannot express: it would need a row inserted
+    // or deleted. Correctness is not negotiable here — an order that gained a
+    // line item must not end up recorded twice.
+    install()
+    rows = [{ order_id: 'o1', status: 'PAID' }, { order_id: 'o2', status: 'PAID' }]
+    gs.replaceByKey_('Orders', 'order_id', [
+      { order_id: 'o1', status: 'PAID' },
+      { order_id: 'o1', status: 'PAID' },
+    ])
+    // Everything rewritten from row 2: o2 kept, plus the two new o1 rows.
+    eq(rewritten(), 3)
+    eq(reads.some((r) => r.width === 2), true)
+  })
+
+  check('an empty batch writes nothing and reads nothing', () => {
     install()
     rows = [{ order_id: 'o1', status: 'PAID' }]
     eq(gs.replaceByKey_('Orders', 'order_id', []), 0)
     eq(writes.at.length, 0)
+    eq(reads.length, 0)
   })
 
   check('appending into an empty tab still works', () => {
@@ -2179,6 +2231,73 @@ function describe_replaceByKey() {
   })
 }
 describe_replaceByKey()
+
+console.log('\nasking only for what changed')
+
+/**
+ * A creation-time window cannot see a cancellation — cancelling does not
+ * change when an order was created — and at a two-minute cadence it re-fetches
+ * every order in the window ten times over. So the sync asks what has CHANGED
+ * since the last watermark, which during a quiet minute is nothing.
+ *
+ * The filter could not be confirmed against TikTok's documentation from here,
+ * and an ignored filter does not error: it returns the most recent orders,
+ * which would look like a working sync while silently missing everything. So
+ * it is proven on every run rather than assumed once.
+ */
+const SINCE = 1_700_000_000
+
+check('nothing changed is nothing to do', () => {
+  const r = gs.changedSince_([], SINCE)
+  eq(r.applied, true)
+  eq(r.count, 0)
+  // Unmoved, so the next run asks the same question rather than skipping a gap.
+  eq(r.watermark, SINCE)
+})
+
+check('the watermark is the newest change SEEN, not the clock', () => {
+  // A clock-based watermark skips anything that changed during the call
+  // itself. This one cannot; at worst it re-fetches a handful next time.
+  const r = gs.changedSince_([
+    { id: 'a', update_time: SINCE + 10 },
+    { id: 'b', update_time: SINCE + 90 },
+    { id: 'c', update_time: SINCE + 40 },
+  ], SINCE)
+  eq(r.applied, true)
+  eq(r.watermark, SINCE + 90)
+  eq(r.count, 3)
+})
+
+check('an order older than the watermark means the filter was ignored', () => {
+  // TikTok answering with recent orders instead of filtered ones. Nothing is
+  // written from this, and the run falls back to a creation-time window.
+  const r = gs.changedSince_([
+    { id: 'a', update_time: SINCE + 10 },
+    { id: 'old', update_time: SINCE - 5000 },
+  ], SINCE)
+  eq(r.applied, false)
+  eq(r.stale, 1)
+})
+
+check('create_time stands in when an order carries no update_time', () => {
+  const r = gs.changedSince_([{ id: 'a', create_time: SINCE + 30 }], SINCE)
+  eq(r.applied, true)
+  eq(r.watermark, SINCE + 30)
+})
+
+check('an order with no time at all is neither stale nor a watermark', () => {
+  // Refusing it as stale would disable the cheap path for everyone on one odd
+  // row; treating it as newest would skip everything after it.
+  const r = gs.changedSince_([{ id: 'a' }], SINCE)
+  eq(r.applied, true)
+  eq(r.watermark, SINCE)
+})
+
+check('an order exactly on the watermark is not stale', () => {
+  // The bound is inclusive, so the same order may come back once. Harmless,
+  // and the alternative is a one-second hole in the record.
+  eq(gs.changedSince_([{ id: 'a', update_time: SINCE }], SINCE).applied, true)
+})
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

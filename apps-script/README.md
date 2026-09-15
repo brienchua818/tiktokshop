@@ -20,7 +20,8 @@ of dated exports is unusable after a few months of daily streams.
 
 1. Create a **new, separate** Apps Script project. Not the delivery one — see
    the warning below.
-2. Paste in `TikShopBackend.gs` — the single generated file
+2. Paste `TikShopBackend.gs` into the project's `Code.gs` — the single
+   generated file
    (`python3 apps-script/build-single-file.py`) that concatenates all ten
    sources: `Config.gs`, `Errors.gs`, `Lock.gs`, `Sheet.gs`, `Auth.gs`,
    `TikTok.gs`, `Product.gs`, `Orders.gs`, `Export.gs`, `Api.gs` — plus the

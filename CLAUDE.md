@@ -192,8 +192,11 @@ enough geometry to diagnose it without a second run.
   `skipped`, it is credits.
 - Backend: `python3 apps-script/build-error-codes.py`,
   `python3 apps-script/build-single-file.py`, `node apps-script/test/run.cjs`.
-  Brien pastes `apps-script/TikShopBackend.gs` by hand. Give him the
-  **commit-pinned** raw URL
+  Brien pastes `apps-script/TikShopBackend.gs` by hand **into the file named
+  `Code.gs`** in the Apps Script project — that is Apps Script's default file
+  name and the project has only the one file. `TikShopBackend.gs` is the name
+  of the build output in this repo and exists nowhere in his editor, so never
+  tell him to open it. Give him the **commit-pinned** raw URL
   (`https://raw.githubusercontent.com/brienchua818/tiktokshop/<sha>/apps-script/TikShopBackend.gs`;
   never `/main/`, it caches stale) **and the line count** so he can confirm the
   paste is whole. Existing behaviour that needs the new backend is not fixed

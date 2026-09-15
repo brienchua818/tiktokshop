@@ -60,14 +60,14 @@ export default function LiveListing({
         {/* Hidden on a phone: the button matters, the hint does not, and at
             430px the two fight for the same row. */}
         <span className="hidden sm:inline text-xs text-faint flex-1">
-          Pick a factory stream to start listing
+          Pick a listing to add items to
         </span>
         <span className="flex-1 sm:hidden" />
         <button
           onClick={() => setAdding(true)}
           className="text-xs px-3 py-1.5 bg-accent hover:bg-accent-hover text-fg rounded-lg transition-colors"
         >
-          New stream
+          Add Listing
         </button>
       </div>
 
@@ -85,14 +85,27 @@ export default function LiveListing({
 
       {loading ? (
         <p className="text-sm text-faint py-10 text-center">Loading…</p>
+      ) : error && listings.length === 0 ? (
+        /* A failed load is not an empty shop. Saying "No listings yet" here
+           would state as fact something the app does not know — the call never
+           answered — and invite someone to re-add a listing that is already
+           there. Offer the retry instead. */
+        <div className="py-10 text-center">
+          <button
+            onClick={load}
+            className="text-xs px-4 py-2 bg-accent hover:bg-accent-hover text-fg rounded-lg transition-colors"
+          >
+            Try again
+          </button>
+        </div>
       ) : listings.length === 0 ? (
         <div className="py-10 text-center space-y-3">
-          <p className="text-sm text-faint">No streams yet.</p>
+          <p className="text-sm text-faint">No listings yet.</p>
           <button
             onClick={() => setAdding(true)}
             className="text-xs px-4 py-2 bg-accent hover:bg-accent-hover text-fg rounded-lg transition-colors"
           >
-            Pick one from {shop.brand}
+            Add one from {shop.brand}
           </button>
         </div>
       ) : (
@@ -208,7 +221,7 @@ function AddListing({
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2">
-          <p className="text-sm font-semibold text-fg flex-1">Start a stream</p>
+          <p className="text-sm font-semibold text-fg flex-1">Add a listing</p>
           <button
             onClick={onClose}
             className="min-h-11 min-w-11 -mr-1 inline-flex items-center justify-center text-muted hover:text-fg"

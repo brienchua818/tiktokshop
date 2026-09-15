@@ -357,7 +357,12 @@ export default function Orders({ shop }: { shop: Shop }) {
                     <p className="text-sm text-fg shrink-0">${l.revenue.toFixed(2)}</p>
                   </div>
                   <p className="text-xs text-faint mt-0.5">
-                    {l.units} unit{l.units === 1 ? '' : 's'} · {l.order_count} order
+                    {/* "sold" not "units", to match the table below it. The
+                        card said "60 units" and the table said "Units", and
+                        neither said that cancelled ones were excluded from
+                        both — which is the whole question somebody has when
+                        the figure is lower than what was called out on air. */}
+                    {l.units} sold · {l.order_count} order
                     {l.order_count === 1 ? '' : 's'}
                     {/* Shown rather than hidden: a factory asking why the number
                         is lower than what was called out on air deserves this. */}
@@ -590,7 +595,9 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
             <tr className="text-faint text-left">
               <th className="font-normal pb-1.5 pr-3">SKU</th>
               <th className="font-normal pb-1.5 pr-3">Variation</th>
-              <th className="font-normal pb-1.5 pr-3 text-right">Units</th>
+              {/* "Sold" rather than "Units", because the column carries two
+                  figures and only one of them is what a factory is paid. */}
+              <th className="font-normal pb-1.5 pr-3 text-right">Sold</th>
               <th className="font-normal pb-1.5 text-right">Revenue</th>
             </tr>
           </thead>
@@ -601,10 +608,24 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
                   {v.seller_sku || '—'}
                 </td>
                 <td className="py-1.5 pr-3 text-muted">{v.variation}</td>
-                <td className="py-1.5 pr-3 text-right text-fg">
-                  {v.units}
+                {/**
+                  * Each number says what it is, in the cell.
+                  *
+                  * It read "2 (+1)", and Brien asked whether that meant three
+                  * sold with one cancelled netting two, or two sold with one
+                  * cancelled netting one. It is the second — the counters are
+                  * disjoint, a unit lands in one or the other, and `units` was
+                  * never the larger figure. But "+" reads as an addition, and
+                  * on the column a factory is paid from, having to work out
+                  * which reading applies is a defect rather than a nuance.
+                  *
+                  * The table already scrolls sideways on a phone, so the width
+                  * costs almost nothing and buys an unmisreadable number.
+                  */}
+                <td className="py-1.5 pr-3 text-right whitespace-nowrap">
+                  <span className="text-fg">{v.units} sold</span>
                   {v.unsold_units > 0 && (
-                    <span className="text-warn/70"> (+{v.unsold_units})</span>
+                    <span className="text-warn/70"> · {v.unsold_units} cancelled</span>
                   )}
                 </td>
                 <td className="py-1.5 text-right text-fg2">${v.revenue.toFixed(2)}</td>
@@ -617,7 +638,9 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
         {detail.total_units} units across {detail.order_count} orders · $
         {detail.total_revenue.toFixed(2)}
         {detail.variations.some((v) => v.unsold_units > 0) && (
-          <span className="text-ghost"> · (+n) is cancelled or unpaid</span>
+          // No longer explaining a notation — the cells say it themselves. This
+          // says the one thing the cells cannot: that the two never overlap.
+          <span className="text-ghost"> · cancelled and unpaid units are not in the sold figure</span>
         )}
       </p>
     </div>

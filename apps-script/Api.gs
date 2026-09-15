@@ -104,7 +104,16 @@ function handle_(e, method) {
   var params = e && e.parameter ? e.parameter : {};
 
   try {
-    if (action === 'ping') return json_({ ok: true, time: new Date().toISOString() });
+    // `build` is how anyone — Brien, a probe, or the next person debugging a
+    // fix that "did not work" — tells a pasted backend from a stale one. It
+    // names the commit the paste was generated from. Unauthenticated on
+    // purpose: it has to be answerable before sign-in, and the repository is
+    // public, so a commit sha discloses nothing.
+    if (action === 'ping') return json_({
+      ok: true,
+      build: typeof BACKEND_BUILD === 'string' ? BACKEND_BUILD : 'unstamped',
+      time: new Date().toISOString()
+    });
 
     // Identity: a session this backend issued, or failing that a Google ID
     // token verified against Google — never a claim the caller simply asserts.

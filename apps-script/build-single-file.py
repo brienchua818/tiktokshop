@@ -15,6 +15,7 @@ only show up as behaviour that does not match the tests.
 """
 import pathlib
 import datetime
+import subprocess
 
 HERE = pathlib.Path(__file__).parent
 OUT = HERE / 'TikShopBackend.gs'
@@ -60,11 +61,34 @@ parts = [f'''/**
  */
 ''']
 
+# The commit the paste came from, stamped into the file and served by `ping`.
+#
+# Without it there is no way to tell a pasted backend from a stale one — not
+# from the app, not from a probe, not from checkSetup. So "have you pasted it
+# yet" was answered by asking Brien, and a stale backend looked exactly like a
+# bug in the fix that was never deployed. `git describe --always --dirty` so an
+# uncommitted build is labelled as one.
+try:
+    SHA = subprocess.run(
+        ['git', 'describe', '--always', '--dirty', '--abbrev=7'],
+        cwd=HERE, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+except Exception:
+    SHA = 'unknown'
+
 for name in ORDER:
     body = (HERE / name).read_text().rstrip()
     rule = '=' * (72 - len(name))
     parts.append(f'\n// {rule} {name}\n\n{body}\n')
 
 OUT.write_text('\n'.join(parts))
+# Appended last so the line count in the message counts it.
+BUILD = f"{SHA} {datetime.date.today()}"
+with OUT.open('a') as fh:
+    fh.write(
+        '\n// ======================================================= build stamp\n\n'
+        '/** Which paste is running. Served by `ping` and printed by checkSetup. */\n'
+        f"var BACKEND_BUILD = '{BUILD}';\n"
+    )
 lines = OUT.read_text().count('\n')
-print(f'wrote {OUT.name} — {len(ORDER)} files, {lines} lines, {OUT.stat().st_size // 1024} KB')
+print(f'wrote {OUT.name} — {len(ORDER)} files, {lines} lines, {OUT.stat().st_size // 1024} KB, build {BUILD}')

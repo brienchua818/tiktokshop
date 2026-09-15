@@ -202,6 +202,19 @@ function checkSetup() {
   function bad(label) { lines.push('  MISS  ' + label); problems++; }
   function note(label) { lines.push('        ' + label); }
 
+  // First, because every other line is only meaningful once you know WHICH
+  // paste produced them. An unstamped build is one generated before the stamp
+  // existed, which is itself the answer to "is this current".
+  lines.push('BUILD');
+  if (typeof BACKEND_BUILD === 'string' && BACKEND_BUILD) {
+    ok(BACKEND_BUILD);
+    note('compare this against the commit you were told to paste');
+  } else {
+    bad('this paste predates the build stamp, so its version cannot be told');
+    note('paste the current TikShopBackend.gs into Code.gs and redeploy');
+  }
+
+  lines.push('');
   lines.push('SHEET');
   try {
     var ss = ss_();
@@ -5047,7 +5060,16 @@ function handle_(e, method) {
   var params = e && e.parameter ? e.parameter : {};
 
   try {
-    if (action === 'ping') return json_({ ok: true, time: new Date().toISOString() });
+    // `build` is how anyone — Brien, a probe, or the next person debugging a
+    // fix that "did not work" — tells a pasted backend from a stale one. It
+    // names the commit the paste was generated from. Unauthenticated on
+    // purpose: it has to be answerable before sign-in, and the repository is
+    // public, so a commit sha discloses nothing.
+    if (action === 'ping') return json_({
+      ok: true,
+      build: typeof BACKEND_BUILD === 'string' ? BACKEND_BUILD : 'unstamped',
+      time: new Date().toISOString()
+    });
 
     // Identity: a session this backend issued, or failing that a Google ID
     // token verified against Google — never a claim the caller simply asserts.
@@ -5380,3 +5402,8 @@ function json_(obj, status) {
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+// ======================================================= build stamp
+
+/** Which paste is running. Served by `ping` and printed by checkSetup. */
+var BACKEND_BUILD = '48e2fbf 2026-09-15';

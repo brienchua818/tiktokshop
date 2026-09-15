@@ -170,6 +170,19 @@ function checkSetup() {
   function bad(label) { lines.push('  MISS  ' + label); problems++; }
   function note(label) { lines.push('        ' + label); }
 
+  // First, because every other line is only meaningful once you know WHICH
+  // paste produced them. An unstamped build is one generated before the stamp
+  // existed, which is itself the answer to "is this current".
+  lines.push('BUILD');
+  if (typeof BACKEND_BUILD === 'string' && BACKEND_BUILD) {
+    ok(BACKEND_BUILD);
+    note('compare this against the commit you were told to paste');
+  } else {
+    bad('this paste predates the build stamp, so its version cannot be told');
+    note('paste the current TikShopBackend.gs into Code.gs and redeploy');
+  }
+
+  lines.push('');
   lines.push('SHEET');
   try {
     var ss = ss_();

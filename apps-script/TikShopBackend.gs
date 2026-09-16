@@ -414,6 +414,119 @@ function checkSetup() {
   return report;
 }
 
+/**
+ * Time every step a shop's FIRST push has to do, with nothing hidden.
+ *
+ * Anthea, 16 Sep, Painting Matters, first ever use of that shop in this app:
+ * a pushSku came back as a 404 from the content host, which means the
+ * execution produced NO REPLY. That is not an exception — `handle_` catches
+ * every one of those and answers with a code — so it is a run that never
+ * finished: the six-minute limit, a kill, or a quota refusal.
+ *
+ * A first push on a shop that has never been used does strictly more work
+ * than any later one, and all of it is invisible from a phone:
+ *
+ *   - the access token may need refreshing (a network round trip)
+ *   - `{P}_WAREHOUSE_ID` is not cached, so it costs a logistics call
+ *   - `{P}_SHOP_CIPHER` may be unset, and nothing works without it
+ *   - the shop's Drive photo folder does not exist yet and gets created
+ *
+ * Run this in the editor and read the timings. Two things come of it:
+ * anything broken names itself HERE, with a stack, instead of vanishing into
+ * a reply the browser never received; and everything cacheable is cached, so
+ * the next real push from the phone is the cheap path rather than the
+ * expensive one.
+ *
+ * Read-only apart from the caching, which is what the first push would have
+ * written anyway. It creates no product and lists nothing.
+ *
+ *   warmShop('PM')   Painting Matters
+ *   warmShop('HZ')   HOUZE
+ *   warmShop('TM')   Table Matters
+ */
+function warmShop(prefix) {
+  var id = String(prefix || 'PM').toUpperCase();
+  var shop = shopById_(id);
+  var lines = ['WARM ' + id + (shop ? '  (' + shop.brand + ')' : '  — UNKNOWN SHOP ID'), ''];
+  var failed = 0;
+
+  function step(label, fn) {
+    var t0 = Date.now();
+    try {
+      var out = fn();
+      lines.push('  OK    ' + label + '  ' + (Date.now() - t0) + 'ms' +
+        (out ? '  — ' + out : ''));
+      return out;
+    } catch (e) {
+      failed++;
+      lines.push('  FAIL  ' + label + '  ' + (Date.now() - t0) + 'ms');
+      lines.push('        ' + (e && e.message ? e.message : e));
+      // The stack is the whole point of running this here rather than from a
+      // phone, so it is printed rather than summarised.
+      if (e && e.stack) lines.push('        ' + String(e.stack).split('\n').slice(0, 4).join('\n        '));
+      return null;
+    }
+  }
+
+  if (!shop) {
+    lines.push('  Known shops: ' + SHOPS.map(function (s) { return s.id; }).join(', '));
+    Logger.log(lines.join('\n'));
+    return lines.join('\n');
+  }
+
+  step('credentials present', function () {
+    ttCreds_(id);
+    return 'app key and secret found';
+  });
+
+  step('access token', function () {
+    var t = ttToken_(id);
+    var exp = Number(prop_(id + '_ACCESS_EXPIRES') || 0);
+    var days = exp ? Math.round((exp - Date.now() / 1000) / 86400) : 0;
+    return t ? 'valid, ' + days + ' day(s) left' : 'EMPTY';
+  });
+
+  step('shop cipher', function () {
+    var c = prop_(id + '_SHOP_CIPHER');
+    if (!c) throw new Error('No shop cipher stored. Run ' + shop.authorizeFn +
+      '() and complete the consent screen — nothing works without it.');
+    return 'stored';
+  });
+
+  var warehouse = step('sales warehouse', function () {
+    var cached = prop_(id + '_WAREHOUSE_ID');
+    var w = ttWarehouseId_(id);
+    return w + (cached ? ' (was already cached)' : ' (looked up and CACHED — this is the cost a first push pays)');
+  });
+
+  step('Drive photo folder', function () {
+    var f = datedPhotoFolder_(id, sgtDate_(new Date()));
+    return f.getName() + ' — ' + folderPath_(f);
+  });
+
+  step('product search reachable', function () {
+    var r = ttFetch_(id, 'post', '/product/202502/products/search',
+      { page_size: 1 }, { status: 'ALL' });
+    if (r.code !== 0) throw new Error('TikTok refused: ' + ttReason_(r));
+    return 'the Product API answers for this shop';
+  });
+
+  lines.push('');
+  if (failed) {
+    lines.push(failed + ' step(s) failed. The first one that failed is the thing to fix —');
+    lines.push('the later steps depend on the earlier ones.');
+  } else {
+    lines.push('All steps passed, and everything cacheable is now cached.');
+    lines.push('The next push from a phone skips the lookups timed above.');
+    lines.push('');
+    lines.push('Still not checkable from here: the RETURN WAREHOUSE, which has no API.');
+    lines.push('If a push is refused with 12052535, set it in Seller Center for ' + shop.brand + '.');
+  }
+
+  Logger.log(lines.join('\n'));
+  return lines.join('\n');
+}
+
 
 // =============================================================== Errors.gs
 
@@ -7216,4 +7329,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'aa0d8ff 2026-09-16';
+var BACKEND_BUILD = 'ec9466b-dirty 2026-09-16';

@@ -313,10 +313,23 @@ function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
 function summariseItems_(items, refunds) {
   var byListing = {};
   items.forEach(function (r) {
-    var key = String(r.listing_id || 'unknown');
+    /**
+     * A blank listing id is kept blank, not renamed.
+     *
+     * This invented the string 'unknown' as a grouping key, and the export
+     * then fed it back through `listingOrders_('unknown', ...)` as though it
+     * were a real TikTok listing id — which matches no row, so the sheet came
+     * out empty while the Summary line above it showed real units and real
+     * money. A factory sheet with a total and no lines is worse than one that
+     * says what it does not know.
+     *
+     * The blank travels as a blank, and the export names it honestly.
+     */
+    var key = String(r.listing_id || '');
     if (!byListing[key]) {
       var fresh = emptyTally_();
       fresh.listing_id = key;
+      fresh.unattributed = !key;
       fresh.product_name = String(r.product_name || '');
       fresh.orders = {};
       fresh.latest_epoch = 0;
@@ -343,6 +356,15 @@ function summariseItems_(items, refunds) {
   var listings = Object.keys(byListing).map(function (k) {
     var g = roundTally_(byListing[k]);
     g.order_count = Object.keys(g.orders).length;
+    /**
+     * The ids themselves, not just how many.
+     *
+     * The export can be asked for a subset of listings, and the TOTAL line
+     * then has to count the DISTINCT orders across that subset. Summing
+     * `order_count` says two for one basket that touched two listings.
+     * Counting needs the ids, so they travel with the row.
+     */
+    g.order_ids = Object.keys(g.orders);
     g.latest_order_sgt = g.latest_epoch ? sgtStampFromEpoch_(g.latest_epoch) : '';
     delete g.orders;
     return g;

@@ -23,6 +23,17 @@ const PHOTOS = 'photos'
 /** Attempts before an item stops retrying on its own and waits for a person. */
 export const MAX_AUTO_ATTEMPTS = 5
 
+/**
+ * The `retryAfter` of an item that will never retry on its own.
+ *
+ * A rejection TikTok will repeat — a title too short, a missing attribute —
+ * is parked the moment it arrives rather than retried five times, because
+ * every attempt costs the shop's daily listing allowance and none of them can
+ * succeed. Parked means WAITING FOR A PERSON, so anything carrying this must
+ * show up in `needsAttention`.
+ */
+export const PARKED = Number.MAX_SAFE_INTEGER
+
 export interface QueuedDraft extends Draft {
   /** How many push attempts have been made. */
   attempts: number
@@ -103,6 +114,47 @@ export function getPhoto(draftId: string): Promise<Blob | undefined> {
 export async function allDrafts(): Promise<QueuedDraft[]> {
   const rows = await tx<QueuedDraft[]>(STORE, 'readonly', (store) => store.getAll())
   return rows.sort((a, b) => a.created_at.localeCompare(b.created_at))
+}
+
+/**
+ * An upload that no longer has anything watching it.
+ *
+ * `status: 'uploading'` is written by the one function that performs a push,
+ * and every path that clears it lives inside that same promise. So if the app
+ * is closed, reloaded, or killed by iOS during the 120-second push window, the
+ * row stays 'uploading' in IndexedDB with no writer left alive.
+ *
+ * Nothing ever picks it up again: `dueForPush` skips 'uploading' on purpose,
+ * so a reconnect does not double-push something already in flight. That is
+ * right while the app is running and wrong the moment it is not, and there was
+ * no sweep to tell the two apart.
+ *
+ * On a phone held in one hand under studio lights, being closed mid-push is
+ * ordinary. So this runs at startup: a row still 'uploading' when the app
+ * boots cannot be in flight, because nothing survived to be flying it.
+ *
+ * Returned to 'queued', not 'failed'. The outcome is genuinely unknown — it
+ * may have reached TikTok — and that is exactly what `idempotency_key` is for:
+ * a retry with the same key returns the original product instead of a second
+ * one. Retrying is safe; leaving it stuck is not.
+ */
+export function revivable(drafts: readonly QueuedDraft[]): QueuedDraft[] {
+  return drafts.filter((d) => !d.settled && d.status === 'uploading')
+}
+
+/** Put every orphaned upload back in the queue. Call once, at startup. */
+export async function reviveOrphanedUploads(): Promise<number> {
+  const orphans = revivable(await allDrafts())
+  for (const d of orphans) {
+    await updateDraft(d.draft_id, {
+      status: 'queued' satisfies DraftStatus,
+      // Its backoff is whatever it was; the attempt that died still counts, so
+      // a row that dies repeatedly still reaches a person rather than looping.
+      retryAfter: 0,
+      error: null,
+    })
+  }
+  return orphans.length
 }
 
 export async function updateDraft(
@@ -274,7 +326,25 @@ export async function retryDraft(draftId: string): Promise<void> {
 
 /** Items a person needs to look at: out of automatic attempts. */
 export function needsAttention(drafts: readonly QueuedDraft[]): QueuedDraft[] {
-  return drafts.filter((d) => !d.settled && d.status === 'failed' && d.attempts >= MAX_AUTO_ATTEMPTS)
+  /**
+   * Two ways an item stops moving, and both need a person.
+   *
+   * It only tested the attempt count. A non-retryable rejection is parked on
+   * its FIRST attempt — `afterAttempt` sets retryAfter to PARKED and leaves
+   * attempts at 1 — so it failed both tests at once: `dueForPush` skipped it
+   * because its backoff never elapses, and this skipped it because one attempt
+   * is not five. The row sat in the queue as "failed" with nothing ever
+   * picking it up and nothing ever asking anybody to look at it.
+   *
+   * That is the worst state in the whole queue: work that is neither done nor
+   * moving nor visible, on a screen somebody is relying on mid-broadcast.
+   */
+  return drafts.filter(
+    (d) =>
+      !d.settled &&
+      d.status === 'failed' &&
+      (d.attempts >= MAX_AUTO_ATTEMPTS || d.retryAfter === PARKED),
+  )
 }
 
 /** Unpushed work, for the "3 SKUs waiting to upload" indicator. */
@@ -352,7 +422,7 @@ export function afterAttempt(
     attempts,
     // A non-retryable rejection is parked immediately rather than retried:
     // it will fail identically and each attempt costs daily allowance.
-    retryAfter: outcome.retryable ? now + retryDelayMs(attempts) : Number.MAX_SAFE_INTEGER,
+    retryAfter: outcome.retryable ? now + retryDelayMs(attempts) : PARKED,
     settled: false,
   }
 }

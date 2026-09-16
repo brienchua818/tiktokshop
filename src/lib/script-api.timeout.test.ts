@@ -210,7 +210,7 @@ describe('the wording matches what actually happened', () => {
    * reason to give up.
    */
   it('retries a too-big payload as a POST and says both attempts were made', async () => {
-    const fetchMock = vi.fn(async () =>
+    const fetchMock: ReturnType<typeof vi.fn> = vi.fn(async () =>
       new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 }),
     )
     vi.stubGlobal('fetch', fetchMock)

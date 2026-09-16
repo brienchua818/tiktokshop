@@ -4,7 +4,7 @@ import { ApiError, api } from './lib/api'
 import { hasCredential, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
-import { allDrafts, pendingCount } from './offline/queue'
+import { allDrafts, pendingCount, reviveOrphanedUploads } from './offline/queue'
 import type { Shop, SignedInUser } from './types'
 import SignIn from './auth/SignIn'
 import LiveListing from './live-listing/LiveListing'
@@ -140,7 +140,11 @@ export default function App() {
   }, [user, shopsReload])
 
   const refreshPending = useCallback(() => {
-    allDrafts()
+    // Any upload orphaned by the app being closed mid-push goes back in the
+    // queue first, so the count below includes it and something picks it up.
+    reviveOrphanedUploads()
+      .catch(() => 0)
+      .then(() => allDrafts())
       .then((drafts) => setPending(pendingCount(drafts)))
       .catch(() => {
         /* IndexedDB unavailable (private window): the indicator just stays at 0. */

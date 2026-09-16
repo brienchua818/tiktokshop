@@ -135,7 +135,7 @@ ${src}
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
-    summaryHeader_, summaryRow_, summaryTotalRow_,
+    summaryHeader_, summaryRow_, summaryTotalRow_, summaryOrderCount_,
     itemHeader_, itemRow_, itemTotalRow_, unitPriceOf_, summaryHeadRows_,
     listingTopRows_, safeName_,
     lineStatusMeaning_, LINE_STATUS_MEANING,
@@ -3117,6 +3117,81 @@ check('the block is exactly as tall as the row maths assumes', () => {
   // to h0 + 1 + i. Both derive from this one length, so it is asserted rather
   // than remembered.
   eq(gs.listingTopRows_({ listing_id: 'x' }, 'w', SIX_COLS).length, 5)
+})
+
+
+
+console.log('\nthe Summary TOTAL counts each order once')
+
+/**
+ * A basket holding two listings is ONE order.
+ *
+ * summariseItems_ builds each listing's order_count from its own distinct
+ * order ids, which is right — each factory's sheet should say how many orders
+ * touched it. Summing those for the TOTAL line is NOT right: an order spanning
+ * two listings adds one to each and two to the total.
+ *
+ * The same trap the per-listing figures were given a comment about on the way
+ * in ("Distinct orders, not the sum of the per-listing counts") — and then the
+ * export summed them anyway one function later.
+ */
+check('an order spanning two listings is one order on the TOTAL line', () => {
+  const rows = [
+    item({ order_id: 'O1', listing_id: 'L1' }),
+    item({ order_id: 'O1', listing_id: 'L2' }),
+    item({ order_id: 'O2', listing_id: 'L1' }),
+    item({ order_id: 'O2', listing_id: 'L2' }),
+    item({ order_id: 'O3', listing_id: 'L1' }),
+  ]
+  const summary = gs.summariseItems_(rows)
+  eq(summary.total_orders, 3, 'three distinct baskets')
+  // Each listing counts what touched it, and that is correct.
+  const byId = {}
+  summary.listings.forEach((l) => { byId[l.listing_id] = l.order_count })
+  eq(byId.L1, 3)
+  eq(byId.L2, 2)
+  // Summing them would say five. The export must use the distinct count.
+  eq(summary.listings.reduce((n, l) => n + l.order_count, 0), 5,
+    'the sum is five, which is why summing it is wrong')
+  eq(gs.summaryOrderCount_(summary.listings, summary), 3,
+    'the TOTAL line must say three')
+})
+
+check('a filtered export counts only the orders on the listings it includes', () => {
+  // The export can be asked for a subset of listings. The distinct count over
+  // the WHOLE window would then be too high, so it is recomputed from the
+  // chosen listings rather than taken from the summary wholesale.
+  const rows = [
+    item({ order_id: 'O1', listing_id: 'L1' }),
+    item({ order_id: 'O1', listing_id: 'L2' }),
+    item({ order_id: 'O9', listing_id: 'L3' }),
+  ]
+  const summary = gs.summariseItems_(rows)
+  const chosen = summary.listings.filter((l) => l.listing_id !== 'L3')
+  eq(gs.summaryOrderCount_(chosen, summary), 1,
+    'O1 is the only basket on L1 and L2, and it is one order')
+  eq(gs.summaryOrderCount_(summary.listings, summary), 2)
+})
+
+
+
+check('a line with no listing id is named, not renamed', () => {
+  // It grouped under the invented key 'unknown', which the export then fed
+  // back to listingOrders_ as a real TikTok id — matching no row, so the
+  // factory sheet came out with a TOTAL and no lines under it.
+  const r = gs.summariseItems_([
+    item({ listing_id: '', product_name: '', quantity: 2, sale_price: '10.00' }),
+  ])
+  eq(r.listings[0].listing_id, '', 'a blank id stays blank')
+  eq(r.listings[0].unattributed, true, 'and says so')
+  eq(r.listings[0].sold_units, 2, 'while still carrying its units')
+
+  const cols = gs.tallyColumns_(r.listings)
+  const row = gs.summaryRow_(cols, null, r.listings[0])
+  eq(row[0], 'Not attributed to a listing')
+  eq(row[1], '', 'no link, because there is nothing to open')
+  eq(row[2], '')
+  row.forEach((v, i) => eq(v === undefined || v === null, false, 'cell ' + i + ' must be writable'))
 })
 
 

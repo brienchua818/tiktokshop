@@ -8,6 +8,8 @@ import {
   pendingCount,
   retryDelayMs,
   afterAttempt,
+  revivable,
+  PARKED,
   MAX_AUTO_ATTEMPTS,
   type QueuedDraft,
 } from './queue'
@@ -369,5 +371,65 @@ describe('afterAttempt — recording the listing', () => {
       tiktokProductId: 'PROD9',
     })
     expect(next.listing_id).toBe('L1')
+  })
+})
+
+/**
+ * Work that is neither done, nor moving, nor visible.
+ *
+ * Both of these were found by an adversarial sweep on 16 Sep, while Anthea had
+ * two rows stuck on Painting Matters. They are the two ways a draft can leave
+ * the queue's attention entirely — the worst state in the whole system, because
+ * the screen looks like it is still working on something it has abandoned.
+ */
+describe('a draft can never get stuck invisibly', () => {
+  const draft = (over: Partial<QueuedDraft> = {}): QueuedDraft =>
+    ({
+      draft_id: 'd1', stream_id: 's1', listing_id: 'L1', created_at: '2026-09-16T03:00:00.000Z',
+      status: 'queued', attempts: 0, retryAfter: 0, settled: false, error: null,
+      ...over,
+    }) as QueuedDraft
+
+  it('a non-retryable rejection asks for a person on its FIRST attempt', () => {
+    // afterAttempt parks it immediately — retrying cannot help and each attempt
+    // costs daily allowance. Parked means waiting for a person, so it has to
+    // be visible. It used to need five attempts to qualify and only ever got
+    // one, so it qualified for nothing: dueForPush skipped it because its
+    // backoff never elapses, and needsAttention skipped it because 1 < 5.
+    const parked = afterAttempt(draft(), { ok: false, error: 'Title too short', retryable: false })
+
+    expect(parked.attempts).toBe(1)
+    expect(parked.retryAfter).toBe(PARKED)
+    expect(dueForPush([parked], Date.now() + 365 * 24 * 3600_000)).toEqual([])
+    expect(needsAttention([parked]).map((d) => d.draft_id)).toEqual(['d1'])
+  })
+
+  it('a retryable failure still waits for its five attempts before asking', () => {
+    const failed = afterAttempt(draft(), { ok: false, error: 'busy', retryable: true })
+    expect(needsAttention([failed])).toEqual([])
+    expect(failed.retryAfter).not.toBe(PARKED)
+  })
+
+  it('a settled draft never asks for attention, however it was parked', () => {
+    const parked = afterAttempt(draft(), { ok: false, error: 'nope', retryable: false })
+    expect(needsAttention([{ ...parked, settled: true }])).toEqual([])
+  })
+
+  it('an upload orphaned by the app closing is revivable', () => {
+    // dueForPush skips 'uploading' so a reconnect cannot double-push something
+    // in flight. That is right while the app runs and wrong once it does not:
+    // every writer that clears the status lives inside the push promise, so a
+    // force-close leaves the row with nobody to finish it.
+    const flying = draft({ status: 'uploading' })
+    expect(dueForPush([flying])).toEqual([])
+    expect(revivable([flying]).map((d) => d.draft_id)).toEqual(['d1'])
+  })
+
+  it('leaves alone the rows that are genuinely fine', () => {
+    expect(revivable([draft({ status: 'queued' })])).toEqual([])
+    expect(revivable([draft({ status: 'failed' })])).toEqual([])
+    expect(revivable([draft({ status: 'pushed', settled: true })])).toEqual([])
+    // A settled upload is finished; reviving it would push a second product.
+    expect(revivable([draft({ status: 'uploading', settled: true })])).toEqual([])
   })
 })

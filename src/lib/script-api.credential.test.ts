@@ -98,7 +98,7 @@ describe('the credential never rides in the URL of a POST', () => {
    */
   it('a dropped body still recovers, because the reply is still NO_TOKEN', async () => {
     const api = await loadApi()
-    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+    fetchMock.mockImplementation(async (input: unknown) => {
       const url = new URL(String(input))
       // The body is dropped; only the query survives. This is the failure.
       const seen = Object.fromEntries(url.searchParams.entries())

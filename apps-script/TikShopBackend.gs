@@ -4611,10 +4611,23 @@ function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
 function summariseItems_(items, refunds) {
   var byListing = {};
   items.forEach(function (r) {
-    var key = String(r.listing_id || 'unknown');
+    /**
+     * A blank listing id is kept blank, not renamed.
+     *
+     * This invented the string 'unknown' as a grouping key, and the export
+     * then fed it back through `listingOrders_('unknown', ...)` as though it
+     * were a real TikTok listing id — which matches no row, so the sheet came
+     * out empty while the Summary line above it showed real units and real
+     * money. A factory sheet with a total and no lines is worse than one that
+     * says what it does not know.
+     *
+     * The blank travels as a blank, and the export names it honestly.
+     */
+    var key = String(r.listing_id || '');
     if (!byListing[key]) {
       var fresh = emptyTally_();
       fresh.listing_id = key;
+      fresh.unattributed = !key;
       fresh.product_name = String(r.product_name || '');
       fresh.orders = {};
       fresh.latest_epoch = 0;
@@ -4641,6 +4654,15 @@ function summariseItems_(items, refunds) {
   var listings = Object.keys(byListing).map(function (k) {
     var g = roundTally_(byListing[k]);
     g.order_count = Object.keys(g.orders).length;
+    /**
+     * The ids themselves, not just how many.
+     *
+     * The export can be asked for a subset of listings, and the TOTAL line
+     * then has to count the DISTINCT orders across that subset. Summing
+     * `order_count` says two for one basket that touched two listings.
+     * Counting needs the ids, so they travel with the row.
+     */
+    g.order_ids = Object.keys(g.orders);
     g.latest_order_sgt = g.latest_epoch ? sgtStampFromEpoch_(g.latest_epoch) : '';
     delete g.orders;
     return g;
@@ -6516,6 +6538,32 @@ function listingTopRows_(l, window, cols) {
   ];
 }
 
+/**
+ * Distinct orders across the listings this export actually includes.
+ *
+ * `summariseItems_` already warns that a basket holding two listings is ONE
+ * order and must not be counted twice — and then the TOTAL line summed the
+ * per-listing counts anyway, one function later, saying two.
+ *
+ * Per listing the count is right: each factory's sheet should say how many
+ * orders touched it, and a shared basket touched both. It is only the TOTAL
+ * that has to de-duplicate, and it cannot simply reuse `summary.total_orders`
+ * either, because the export may have been asked for a subset of listings.
+ */
+function summaryOrderCount_(chosen, summary) {
+  var seen = {};
+  var complete = true;
+  (chosen || []).forEach(function (l) {
+    if (!l.order_ids) { complete = false; return; }
+    l.order_ids.forEach(function (id) { seen[String(id)] = 1; });
+  });
+  // A backend that predates `order_ids` still has to produce a figure. The
+  // window's own distinct count is the honest fallback: right when the export
+  // covers every listing, and never the double-counted sum.
+  if (!complete) return Number((summary || {}).total_orders || 0);
+  return Object.keys(seen).length;
+}
+
 function summaryHeader_(cols, divisor) {
   // The id is a link (HYPERLINK survives the xlsx conversion; a rich-text link
   // may not) and the URL is also written out in plain text, so it can be
@@ -6540,8 +6588,9 @@ function summaryRow_(cols, divisor, l) {
    */
   var id = String(l.listing_id == null ? '' : l.listing_id);
   var row = [
-    String(l.product_name || id || '\u2014'), listingLinkFormula_(id),
-    listingUrl_(id), Number(l.order_count || 0)
+    String(l.product_name || id || 'Not attributed to a listing'),
+    id ? listingLinkFormula_(id) : '', id ? listingUrl_(id) : '',
+    Number(l.order_count || 0)
   ].concat(tallyValues_(cols, l));
   if (divisor) row.push(round2_(Number(l.sold_value || 0) / divisor));
   return row;
@@ -6673,7 +6722,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // column here cannot silently sum the wrong one.
     var sumTotals = chosen.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
     var totalRow = summaryTotalRow_(sumCols, divisor, sumTotals,
-      chosen.reduce(function (n, l) { return n + l.order_count; }, 0));
+      summaryOrderCount_(chosen, summary));
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -6683,6 +6732,21 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // One sheet per listing: this is what a factory actually receives, and a
     // factory should not be handed another factory's figures.
     chosen.forEach(function (l) {
+      /**
+       * Lines TikTok gave us with no listing id get a row on the Summary, and
+       * no sheet of their own.
+       *
+       * There is no listing to open, no photo to place and no factory to send
+       * it to, and asking listingOrders_ for a blank id produces a sheet with
+       * a TOTAL and no lines under it. The Summary row still carries their
+       * units and money, so nothing is hidden — it is simply not pretending to
+       * be a purchase order for a factory nobody can name.
+       */
+      if (!String(l.listing_id || '')) {
+        warn_('TS-EXP-25', l.ordered_units + ' unit(s) in this window carry no listing id. ' +
+          'They are on the Summary but have no sheet of their own.');
+        return;
+      }
       var detail = listingOrders_(l.listing_id, fromDate, fromTime, toDate, toTime);
       // Same hazard as the cells: a blank name must not become the string
       // "undefined" on the tab of a document a factory receives.
@@ -7329,4 +7393,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '463d1c0 2026-09-16';
+var BACKEND_BUILD = '9baf922-dirty 2026-09-16';

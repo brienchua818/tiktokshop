@@ -7393,4 +7393,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '9baf922-dirty 2026-09-16';
+var BACKEND_BUILD = 'f3577e3 2026-09-16';

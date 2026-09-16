@@ -257,11 +257,22 @@ export const READ_TIMEOUT_MS = 25_000
 const LONG_ACTIONS = new Set(['syncOrders', 'exportOrders', 'exportListing', 'ordersSummary'])
 
 const WRITE_ACTIONS = new Set([
+  // Exactly the backend's own WRITE_ACTIONS (apps-script/Api.gs), which is the
+  // list this one claimed to mirror and did not. setStock, reserveIdentifier
+  // and restoreVariation were missing, so a timed-out stock change told the
+  // operator "Nothing was changed, so it is safe to try again" — an invitation
+  // to add the same ten units twice.
   'addListing',
   'saveSku',
   'pushSku',
   'setRole',
+  'setStock',
+  'reserveIdentifier',
   'removeVariation',
+  'restoreVariation',
+  // Not backend writes, but they change things outside the Sheet (a synced
+  // order, a file in Drive) and take minutes, so a timeout on one is an
+  // unknown outcome for the same reason.
   'syncOrders',
   'exportOrders',
   'exportListing',
@@ -398,7 +409,27 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   // so the same call can simply be made again as a GET. That is not a
   // workaround for a bug in this code — it is the request the redirect was
   // going to turn into anyway.
-  if (fitsInAUrl(base, action, payload)) {
+  /**
+   * A READ is replayed. A write never is.
+   *
+   * Both cases that land here are cases where the execution ALREADY RAN.
+   * Apps Script runs doPost and THEN issues the 302 to the GET-only content
+   * host, so a 405 on the second leg is a write that already landed; and a 404
+   * there means the execution produced no reply, which `pageInsteadOfData`
+   * itself describes as "It may have done part of the work, so check before
+   * repeating it" — while this code went ahead and repeated it.
+   *
+   * `setStock` is where that lands as a wrong number, because it is a DELTA
+   * applied by read-modify-write: the replay reads the already-updated
+   * quantity and adds the same ten units again. TikTok ends up at 25 where the
+   * operator asked for 15, the Sheet is written to match, and buyers can order
+   * stock that does not exist. There is no ETag, no version field and no
+   * idempotency key on that endpoint to catch it.
+   *
+   * A read is safe to repeat by definition, and repeating one is the whole
+   * reason `route_` accepts its arguments from the query.
+   */
+  if (!WRITE_ACTIONS.has(action) && fitsInAUrl(base, action, payload)) {
     const got = await send(base, action, payload, 'GET', timeoutMs)
     if (got.json) return unwrap<T>(got.json)
     throw pageInsteadOfData(got, action)

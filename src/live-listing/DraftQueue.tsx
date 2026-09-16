@@ -1345,7 +1345,9 @@ function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | 
  * read-modify-write race whose consequence is a deleted variation.
  */
 async function pushOne(draft: QueuedDraft): Promise<void> {
-  await updateDraft(draft.draft_id, { status: 'uploading' })
+  // Stamped as the push starts, so `revivable` can tell this row from one whose
+  // app died mid-flight without having to know when it is being asked.
+  await updateDraft(draft.draft_id, { status: 'uploading', uploading_at: Date.now() })
 
   try {
     // The photo lives in IndexedDB beside the draft and is encoded here, at

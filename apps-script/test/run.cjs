@@ -3194,6 +3194,49 @@ check('a line with no listing id is named, not renamed', () => {
   row.forEach((v, i) => eq(v === undefined || v === null, false, 'cell ' + i + ' must be writable'))
 })
 
+check('two unattributed products stay two rows, each under its own name', () => {
+  // Pooling them put one product's name over another product's money, which
+  // is worse than the 'unknown' string it replaced.
+  const r = gs.summariseItems_([
+    item({ listing_id: '', product_name: 'Katrin Run', sku_id: 'k1', quantity: 2, sale_price: '10.00' }),
+    item({ order_id: 'o2', listing_id: '', product_name: 'Hoi An', sku_id: 'h1', quantity: 3, sale_price: '20.00' }),
+  ])
+  eq(r.listings.length, 2, 'two products, two rows')
+  r.listings.forEach((l) => {
+    eq(l.unattributed, true)
+    eq(l.listing_id, '', 'neither pretends to have a listing')
+  })
+  const byName = {}
+  r.listings.forEach((l) => { byName[l.product_name] = l.sold_units })
+  eq(byName['Katrin Run'], 2)
+  eq(byName['Hoi An'], 3)
+
+  const cols = gs.tallyColumns_(r.listings)
+  const names = r.listings.map((l) => gs.summaryRow_(cols, null, l)[0]).sort()
+  eq(names, ['Hoi An \u2014 not attributed to a listing', 'Katrin Run \u2014 not attributed to a listing'])
+})
+
+check('the Net cost TOTAL equals the sum of the cost column above it', () => {
+  // It was re-derived by dividing the grand total, so it disagreed with the
+  // rounded per-row figures by a cent or two — exactly what somebody signing
+  // a purchase order stops for.
+  const rows = [
+    Object.assign(gs.emptyTally_(), { listing_id: 'L1', order_count: 1, sold_value: 10.01, ordered_value: 10.01, ordered_units: 1, sold_units: 1 }),
+    Object.assign(gs.emptyTally_(), { listing_id: 'L2', order_count: 1, sold_value: 10.01, ordered_value: 10.01, ordered_units: 1, sold_units: 1 }),
+    Object.assign(gs.emptyTally_(), { listing_id: 'L3', order_count: 1, sold_value: 10.01, ordered_value: 10.01, ordered_units: 1, sold_units: 1 }),
+  ]
+  const divisor = 3
+  const cols = gs.tallyColumns_(rows)
+  const header = gs.summaryHeader_(cols, divisor)
+  const costCol = header.indexOf('Net cost (SGD)')
+  const colSum = rows.reduce((n, l) => n + gs.summaryRow_(cols, divisor, l)[costCol], 0)
+
+  const totals = rows.reduce((t, l) => gs.addTally_(t, l), gs.emptyTally_())
+  const totalRow = gs.summaryTotalRow_(cols, divisor, totals, 3, rows)
+  eq(totalRow.length, header.length)
+  eq(totalRow[costCol], Math.round(colSum * 100) / 100, 'the TOTAL must be the column summed')
+})
+
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

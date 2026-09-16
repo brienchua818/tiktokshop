@@ -140,8 +140,15 @@ export default function App() {
   }, [user, shopsReload])
 
   const refreshPending = useCallback(() => {
-    // Any upload orphaned by the app being closed mid-push goes back in the
-    // queue first, so the count below includes it and something picks it up.
+    /**
+     * Revival is safe here because it no longer depends on when it runs.
+     *
+     * This function is on a one-second interval AND is the queue-change
+     * callback, so an earlier version of this line un-marked pushes that were
+     * still in flight and handed them back to the pusher. `revivable` now
+     * requires the row's own `uploading_at` stamp to be older than any live
+     * push could be, so a timer cannot mistake one for the other.
+     */
     reviveOrphanedUploads()
       .catch(() => 0)
       .then(() => allDrafts())

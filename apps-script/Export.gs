@@ -747,7 +747,8 @@ function summaryRow_(cols, divisor, l) {
    */
   var id = String(l.listing_id == null ? '' : l.listing_id);
   var row = [
-    String(l.product_name || id || 'Not attributed to a listing'),
+    String(l.product_name ? l.product_name + ' \u2014 not attributed to a listing'
+                          : (id || 'Not attributed to a listing')),
     id ? listingLinkFormula_(id) : '', id ? listingUrl_(id) : '',
     Number(l.order_count || 0)
   ].concat(tallyValues_(cols, l));
@@ -755,9 +756,21 @@ function summaryRow_(cols, divisor, l) {
   return row;
 }
 
-function summaryTotalRow_(cols, divisor, totals, orderCount) {
+function summaryTotalRow_(cols, divisor, totals, orderCount, rows) {
   var row = ['TOTAL', '', '', Number(orderCount || 0)].concat(tallyValues_(cols, totals));
-  if (divisor) row.push(round2_(Number(totals.sold_value || 0) / divisor));
+  if (divisor) {
+    /**
+     * The sum of the cost column, not the total divided again.
+     *
+     * Each row's cost is rounded to cents before it is written, so dividing
+     * the grand total instead re-derives a figure the column above does not
+     * add up to — off by a cent or two on a long sheet, which is exactly the
+     * kind of thing somebody signing a purchase order notices and stops for.
+     */
+    row.push(round2_((rows || []).reduce(function (n, l) {
+      return n + round2_(Number(l.sold_value || 0) / divisor);
+    }, 0)));
+  }
   return row;
 }
 
@@ -789,12 +802,17 @@ function itemRow_(cols, divisor, v) {
   return row;
 }
 
-function itemTotalRow_(cols, divisor, totals) {
+function itemTotalRow_(cols, divisor, totals, rows) {
   // Every figure here is the sum of the column above it, taken from the same
   // spec that wrote the column. Adding a column can no longer leave a TOTAL
-  // that does not match it.
+  // that does not match it — and nor can the cost column, which is summed from
+  // the rounded per-row figures rather than re-derived from the grand total.
   var row = ['', 'TOTAL', '', ''].concat(tallyValues_(cols, totals));
-  if (divisor) row.push('', round2_(Number(totals.sold_value || 0) / divisor));
+  if (divisor) {
+    row.push('', round2_((rows || []).reduce(function (n, v) {
+      return n + round2_(Number(v.sold_value || 0) / divisor);
+    }, 0)));
+  }
   return row;
 }
 
@@ -881,7 +899,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // column here cannot silently sum the wrong one.
     var sumTotals = chosen.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
     var totalRow = summaryTotalRow_(sumCols, divisor, sumTotals,
-      summaryOrderCount_(chosen, summary));
+      summaryOrderCount_(chosen, summary), chosen);
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -902,8 +920,8 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
        * be a purchase order for a factory nobody can name.
        */
       if (!String(l.listing_id || '')) {
-        warn_('TS-EXP-25', l.ordered_units + ' unit(s) in this window carry no listing id. ' +
-          'They are on the Summary but have no sheet of their own.');
+        warn_('TS-EXP-25', l.ordered_units + ' unit(s) of "' + (l.product_name || 'an unnamed product') +
+          '" carry no listing id. They are on the Summary but have no sheet of their own.');
         return;
       }
       var detail = listingOrders_(l.listing_id, fromDate, fromTime, toDate, toTime);
@@ -932,7 +950,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
       }
 
-      var tot = itemTotalRow_(itemCols, divisor, detail.totals);
+      var tot = itemTotalRow_(itemCols, divisor, detail.totals, detail.variations);
       s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
         .setValues([tot]).setFontWeight('bold');
 

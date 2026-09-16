@@ -39,6 +39,11 @@ export interface QueuedDraft extends Draft {
   attempts: number
   /** Epoch ms before which this item should not be retried. */
   retryAfter: number
+  /**
+   * When this row's push started, so a stale in-flight marker can be told from
+   * a live one without knowing when the reader happens to be running.
+   */
+  uploading_at?: number | null
   /** True once TikTok has confirmed the product. */
   settled: boolean
   /**
@@ -117,40 +122,72 @@ export async function allDrafts(): Promise<QueuedDraft[]> {
 }
 
 /**
+ * How long an upload can be marked in-flight before it certainly is not.
+ *
+ * The push deadline is 120 seconds (api.ts, `timeoutMs: 120_000`), after which
+ * the client aborts and writes an outcome. So a row still marked 'uploading'
+ * well past that has no request behind it, whatever else is true.
+ */
+export const STALE_UPLOAD_MS = 150_000
+
+/**
  * An upload that no longer has anything watching it.
  *
  * `status: 'uploading'` is written by the one function that performs a push,
  * and every path that clears it lives inside that same promise. So if the app
- * is closed, reloaded, or killed by iOS during the 120-second push window, the
- * row stays 'uploading' in IndexedDB with no writer left alive.
+ * is closed, reloaded, or killed by iOS during the push window, the row stays
+ * 'uploading' in IndexedDB with no writer left alive, and nothing picks it up
+ * again: `dueForPush` and `nextBatch` both skip 'uploading' on purpose, so a
+ * reconnect cannot double-push something already in flight.
  *
- * Nothing ever picks it up again: `dueForPush` skips 'uploading' on purpose,
- * so a reconnect does not double-push something already in flight. That is
- * right while the app is running and wrong the moment it is not, and there was
- * no sweep to tell the two apart.
+ * Telling those two apart is the whole problem, and the first version of this
+ * got it wrong in the most dangerous direction. It reasoned "a row still
+ * uploading when the app BOOTS cannot be in flight" — true — and was then
+ * wired to a function that runs on a one-second interval and after every queue
+ * change. So it did not revive orphans; it stripped the in-flight marker off
+ * pushes that were still flying, one second in, and handed them straight back
+ * to `dueForPush`. That turns the queue's only concurrency guard into a
+ * duplicate-product machine.
  *
- * On a phone held in one hand under studio lights, being closed mid-push is
- * ordinary. So this runs at startup: a row still 'uploading' when the app
- * boots cannot be in flight, because nothing survived to be flying it.
+ * So the test is no longer WHEN this runs, but what the row itself says. A
+ * push stamps `uploading_at` as it starts; a row is revivable only once that
+ * stamp is older than the push can possibly still be running. Safe to call on
+ * a timer, from another tab, or at startup, because it no longer depends on
+ * the caller to be careful.
  *
- * Returned to 'queued', not 'failed'. The outcome is genuinely unknown — it
- * may have reached TikTok — and that is exactly what `idempotency_key` is for:
- * a retry with the same key returns the original product instead of a second
- * one. Retrying is safe; leaving it stuck is not.
+ * A row with no stamp at all was written by a build that predates it, which
+ * means a previous session — genuinely orphaned, and revivable.
  */
-export function revivable(drafts: readonly QueuedDraft[]): QueuedDraft[] {
-  return drafts.filter((d) => !d.settled && d.status === 'uploading')
+export function revivable(
+  drafts: readonly QueuedDraft[],
+  now: number = Date.now(),
+): QueuedDraft[] {
+  return drafts.filter((d) => {
+    if (d.settled || d.status !== 'uploading') return false
+    const since = Number(d.uploading_at ?? 0)
+    if (!since) return true
+    return now - since > STALE_UPLOAD_MS
+  })
 }
 
-/** Put every orphaned upload back in the queue. Call once, at startup. */
-export async function reviveOrphanedUploads(): Promise<number> {
-  const orphans = revivable(await allDrafts())
+/** Put every genuinely orphaned upload back in the queue. Safe to call often. */
+export async function reviveOrphanedUploads(now: number = Date.now()): Promise<number> {
+  const orphans = revivable(await allDrafts(), now)
   for (const d of orphans) {
     await updateDraft(d.draft_id, {
       status: 'queued' satisfies DraftStatus,
-      // Its backoff is whatever it was; the attempt that died still counts, so
-      // a row that dies repeatedly still reaches a person rather than looping.
+      /**
+       * The dead attempt still counts.
+       *
+       * It did not, and that was the second half of the same mistake: a draft
+       * whose push kills the app every time would be revived, killed, revived
+       * for ever, never reaching MAX_AUTO_ATTEMPTS and so never reaching a
+       * person. An attempt that took the app down with it is exactly the kind
+       * that should count against the five.
+       */
+      attempts: d.attempts + 1,
       retryAfter: 0,
+      uploading_at: null,
       error: null,
     })
   }

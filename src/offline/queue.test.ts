@@ -10,6 +10,7 @@ import {
   afterAttempt,
   revivable,
   PARKED,
+  STALE_UPLOAD_MS,
   MAX_AUTO_ATTEMPTS,
   type QueuedDraft,
 } from './queue'
@@ -415,21 +416,45 @@ describe('a draft can never get stuck invisibly', () => {
     expect(needsAttention([{ ...parked, settled: true }])).toEqual([])
   })
 
-  it('an upload orphaned by the app closing is revivable', () => {
-    // dueForPush skips 'uploading' so a reconnect cannot double-push something
-    // in flight. That is right while the app runs and wrong once it does not:
-    // every writer that clears the status lives inside the push promise, so a
-    // force-close leaves the row with nobody to finish it.
-    const flying = draft({ status: 'uploading' })
+  /**
+   * The one that matters, and the one the first version got backwards.
+   *
+   * reviveOrphanedUploads is called from refreshPending, which runs on a
+   * ONE-SECOND interval and after every queue change. A revive that reasons
+   * "if the app is running, nothing can still be in flight" therefore strips
+   * the in-flight marker off live pushes a second after they start and hands
+   * them back to dueForPush — turning the queue's only concurrency guard into
+   * a duplicate-product machine.
+   *
+   * So the test is what the ROW says, not when the reader runs.
+   */
+  const NOW = 1_700_000_000_000
+
+  it('will not revive a push that is still in flight, however often it is asked', () => {
+    const flying = draft({ status: 'uploading', uploading_at: NOW - 1_000 })
     expect(dueForPush([flying])).toEqual([])
-    expect(revivable([flying]).map((d) => d.draft_id)).toEqual(['d1'])
+    // One second in, ten seconds in, two minutes in — still flying.
+    expect(revivable([flying], NOW)).toEqual([])
+    expect(revivable([flying], NOW + 10_000)).toEqual([])
+    expect(revivable([flying], NOW + 119_000)).toEqual([])
+  })
+
+  it('revives it once no live push could still be running', () => {
+    // The push deadline is 120s, after which the client aborts and writes an
+    // outcome. Past STALE_UPLOAD_MS there is no request behind the marker.
+    const stale = draft({ status: 'uploading', uploading_at: NOW - STALE_UPLOAD_MS - 1 })
+    expect(revivable([stale], NOW).map((d) => d.draft_id)).toEqual(['d1'])
+  })
+
+  it('revives a row with no stamp, which can only come from a previous session', () => {
+    expect(revivable([draft({ status: 'uploading' })], NOW).map((d) => d.draft_id)).toEqual(['d1'])
   })
 
   it('leaves alone the rows that are genuinely fine', () => {
-    expect(revivable([draft({ status: 'queued' })])).toEqual([])
-    expect(revivable([draft({ status: 'failed' })])).toEqual([])
-    expect(revivable([draft({ status: 'pushed', settled: true })])).toEqual([])
+    expect(revivable([draft({ status: 'queued' })], NOW)).toEqual([])
+    expect(revivable([draft({ status: 'failed' })], NOW)).toEqual([])
+    expect(revivable([draft({ status: 'pushed', settled: true })], NOW)).toEqual([])
     // A settled upload is finished; reviving it would push a second product.
-    expect(revivable([draft({ status: 'uploading', settled: true })])).toEqual([])
+    expect(revivable([draft({ status: 'uploading', settled: true })], NOW)).toEqual([])
   })
 })

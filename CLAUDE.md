@@ -58,6 +58,25 @@ not style preferences.
   for minutes. Checking TikTok's read to decide whether a push worked gives
   the wrong answer for exactly that window.
 - A draft still inside its automatic attempts reads **Retrying**, not Failed.
+- **Never re-send a write the backend may already have run.** Apps Script
+  executes `doPost` and *then* 302s to a GET-only host, so a 405 or a 404 from
+  `script.googleusercontent.com` is a reply lost *after* the work landed. The
+  GET fallback in `script-api.ts` replays reads only, gated on `WRITE_ACTIONS`,
+  which must stay identical to `WRITE_ACTIONS` in `Api.gs`. It drifted, and
+  `setStock` — a delta applied by read-modify-write, with no ETag, no version
+  field and no idempotency key — was replayed and added twice (+10 asked,
+  +20 applied, no error shown).
+- **`NO_TOKEN` is the one refusal that proves nothing ran.** `handle_` returns
+  it before `route_`, before the lock and before any TikTok call, and no other
+  code path emits it. So retrying *that* is always safe — the exception that
+  makes the rule above checkable rather than absolute.
+- **A safety rule must live in the data, not in the caller.** `revivable` first
+  reasoned "if the app is running, nothing can still be in flight" — true only
+  at startup, and it was then wired to a one-second timer, so it stripped the
+  in-flight marker off live pushes. Rewritten to test the row's own
+  `uploading_at` stamp, it is correct wherever it is called from. If a
+  function's correctness depends on *when* it runs, the next caller will get
+  it wrong.
 
 ## Every network call has a deadline, and every phone shows the server's list
 
@@ -183,6 +202,27 @@ fixtures, and it would have sent somebody hunting a layout bug that was not
 there. A false alarm costs more than a missing check, because it teaches people
 to ignore the output. When a check reports something, it must also report
 enough geometry to diagnose it without a second run.
+
+## A test must call the code, not describe it
+
+Four tests have now shipped here that passed while asserting the fix rather
+than the behaviour. Every one was written by someone who had just fixed the
+bug and knew what the answer should be.
+
+- **Never rebuild in the test what the code builds.** The export's width tests
+  reassembled the headers themselves and would have passed forever while
+  `exportOrders_` wrote something else. Pointed at the real
+  `summaryRow_`/`itemRow_`, they went red immediately and found a cell that
+  could be `undefined` — which `setValues` throws on, after every photo has
+  been fetched.
+- **A stub must answer from what the request actually carried.** A credential
+  test returned `{ok: true}` while ignoring that the payload never arrived, so
+  it "proved" a fix that could not work. Model the real dispatch —
+  `handle_` resolves identity from `body.x || params.x`, `route_` reads every
+  argument the same way — and the stub tells the truth by construction.
+- **Break it and watch it go red.** A test that has never failed has never been
+  tested. `git stash` the fix, run the test, confirm red, restore. If it stays
+  green, it is decoration.
 
 ## Shipping
 

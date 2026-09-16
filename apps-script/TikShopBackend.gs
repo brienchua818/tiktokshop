@@ -4623,11 +4623,26 @@ function summariseItems_(items, refunds) {
      *
      * The blank travels as a blank, and the export names it honestly.
      */
+    /**
+     * Unattributed lines are grouped by PRODUCT, not pooled into one row.
+     *
+     * Keying every blank listing id as one group merged unrelated products —
+     * different brands, different factories — into a single Summary row
+     * labelled with whichever name happened to arrive first, and tapping it on
+     * the orders screen returned all of them. Naming one product and showing
+     * another's money under it is worse than the 'unknown' string it replaced.
+     *
+     * The blank listing id still travels as a blank, so nothing pretends to be
+     * a real TikTok listing. The row just says which product it is.
+     */
     var key = String(r.listing_id || '');
+    if (!key) key = '\u0000noListing:' + String(r.product_name || r.sku_id || r.seller_sku || '?');
     if (!byListing[key]) {
       var fresh = emptyTally_();
-      fresh.listing_id = key;
-      fresh.unattributed = !key;
+      // The key carries a product name so the rows stay apart; the row itself
+      // reports a blank id, because there is no listing to open.
+      fresh.unattributed = key.indexOf('\u0000noListing:') === 0;
+      fresh.listing_id = fresh.unattributed ? '' : key;
       fresh.product_name = String(r.product_name || '');
       fresh.orders = {};
       fresh.latest_epoch = 0;
@@ -5505,8 +5520,21 @@ function syncRecentOrdersOnce_() {
         var returnsKey = LAST_RETURNS_PREFIX + shopId;
         var returnsSince = Number(props.getProperty(returnsKey) || 0) ||
           (nowEpoch - SYNC_RETURNS_BACKFILL_H * 3600);
-        syncReturns_(shopId, returnsSince, 'background sync');
-        props.setProperty(returnsKey, String(nowEpoch));
+        var ret = syncReturns_(shopId, returnsSince, 'background sync');
+        /**
+         * The watermark only moves over ground actually covered.
+         *
+         * It moved to now unconditionally, including after the 60-page guard
+         * had stopped the scan early — so every refund past that point was
+         * never asked for again, and stayed counted as SOLD in every export
+         * from then on. A refund silently counted as a sale is money paid to a
+         * factory for goods the buyer gave back.
+         *
+         * Leaving it put means the next run re-reads the same window. If the
+         * backlog is genuinely that large it stays put and keeps warning,
+         * which is visible; advancing loses the refunds silently, which is not.
+         */
+        if (!ret.truncated) props.setProperty(returnsKey, String(nowEpoch));
       } catch (e) {
         warn_('TS-ORD-30', shopId + ': returns sync failed (orders are unaffected): ' + e);
       }
@@ -5737,14 +5765,17 @@ function syncReturns_(shopId, sinceEpoch, actor) {
   var all = [];
   var token = '';
   var pages = 0;
+  var truncated = false;
   do {
     var page = ttSearchReturns_(shopId, sinceEpoch, token);
     all = all.concat(page.returns);
     token = page.nextPageToken;
     pages++;
     if (pages >= 60 && token) {
+      truncated = true;
       warn_('TS-ORD-29', shopId + ': more than ' + (60 * ORDER_PAGE_SIZE) +
-        ' returns changed since ' + sinceEpoch + '; stopping and keeping what was read.');
+        ' returns changed since ' + sinceEpoch + '; stopping and keeping what was read. ' +
+        'The watermark is NOT advanced, so the rest is read on the next run.');
       break;
     }
   } while (token);
@@ -5756,7 +5787,7 @@ function syncReturns_(shopId, sinceEpoch, actor) {
     });
     logEvent_(actor, 'sync_returns', shopId, rows.length + ' return line(s)', 'ok');
   }
-  return { returns: all.length, lines: rows.length };
+  return { returns: all.length, lines: rows.length, truncated: truncated };
 }
 
 // ── reconciliation ────────────────────────────────────────────────────
@@ -6588,7 +6619,8 @@ function summaryRow_(cols, divisor, l) {
    */
   var id = String(l.listing_id == null ? '' : l.listing_id);
   var row = [
-    String(l.product_name || id || 'Not attributed to a listing'),
+    String(l.product_name ? l.product_name + ' \u2014 not attributed to a listing'
+                          : (id || 'Not attributed to a listing')),
     id ? listingLinkFormula_(id) : '', id ? listingUrl_(id) : '',
     Number(l.order_count || 0)
   ].concat(tallyValues_(cols, l));
@@ -6596,9 +6628,21 @@ function summaryRow_(cols, divisor, l) {
   return row;
 }
 
-function summaryTotalRow_(cols, divisor, totals, orderCount) {
+function summaryTotalRow_(cols, divisor, totals, orderCount, rows) {
   var row = ['TOTAL', '', '', Number(orderCount || 0)].concat(tallyValues_(cols, totals));
-  if (divisor) row.push(round2_(Number(totals.sold_value || 0) / divisor));
+  if (divisor) {
+    /**
+     * The sum of the cost column, not the total divided again.
+     *
+     * Each row's cost is rounded to cents before it is written, so dividing
+     * the grand total instead re-derives a figure the column above does not
+     * add up to — off by a cent or two on a long sheet, which is exactly the
+     * kind of thing somebody signing a purchase order notices and stops for.
+     */
+    row.push(round2_((rows || []).reduce(function (n, l) {
+      return n + round2_(Number(l.sold_value || 0) / divisor);
+    }, 0)));
+  }
   return row;
 }
 
@@ -6630,12 +6674,17 @@ function itemRow_(cols, divisor, v) {
   return row;
 }
 
-function itemTotalRow_(cols, divisor, totals) {
+function itemTotalRow_(cols, divisor, totals, rows) {
   // Every figure here is the sum of the column above it, taken from the same
   // spec that wrote the column. Adding a column can no longer leave a TOTAL
-  // that does not match it.
+  // that does not match it — and nor can the cost column, which is summed from
+  // the rounded per-row figures rather than re-derived from the grand total.
   var row = ['', 'TOTAL', '', ''].concat(tallyValues_(cols, totals));
-  if (divisor) row.push('', round2_(Number(totals.sold_value || 0) / divisor));
+  if (divisor) {
+    row.push('', round2_((rows || []).reduce(function (n, v) {
+      return n + round2_(Number(v.sold_value || 0) / divisor);
+    }, 0)));
+  }
   return row;
 }
 
@@ -6722,7 +6771,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     // column here cannot silently sum the wrong one.
     var sumTotals = chosen.reduce(function (t, l) { return addTally_(t, l); }, emptyTally_());
     var totalRow = summaryTotalRow_(sumCols, divisor, sumTotals,
-      summaryOrderCount_(chosen, summary));
+      summaryOrderCount_(chosen, summary), chosen);
     sh.getRange(r0 + 1 + sumRows.length, 1, 1, totalRow.length)
       .setValues([totalRow]).setFontWeight('bold');
 
@@ -6743,8 +6792,8 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
        * be a purchase order for a factory nobody can name.
        */
       if (!String(l.listing_id || '')) {
-        warn_('TS-EXP-25', l.ordered_units + ' unit(s) in this window carry no listing id. ' +
-          'They are on the Summary but have no sheet of their own.');
+        warn_('TS-EXP-25', l.ordered_units + ' unit(s) of "' + (l.product_name || 'an unnamed product') +
+          '" carry no listing id. They are on the Summary but have no sheet of their own.');
         return;
       }
       var detail = listingOrders_(l.listing_id, fromDate, fromTime, toDate, toTime);
@@ -6773,7 +6822,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
         s2.getRange(h0 + 1, 1, itemRows.length, itemHeader.length).setValues(itemRows);
       }
 
-      var tot = itemTotalRow_(itemCols, divisor, detail.totals);
+      var tot = itemTotalRow_(itemCols, divisor, detail.totals, detail.variations);
       s2.getRange(h0 + 1 + itemRows.length, 1, 1, tot.length)
         .setValues([tot]).setFontWeight('bold');
 
@@ -7393,4 +7442,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'f3577e3 2026-09-16';
+var BACKEND_BUILD = '1098686-dirty 2026-09-16';

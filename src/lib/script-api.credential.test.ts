@@ -1,20 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 
 /**
- * The sign-in must not depend on the body arriving.
+ * A dropped POST body must stay recoverable.
  *
  * Brien, Painting Matters, 16 Sep: a pushSku stuck on "reached the backend
  * without its sign-in, and is too large to retry another way". The backend
- * answers NO_TOKEN only when neither credential field reached it, and the
- * credential lived in the POST body — so the body did not arrive intact.
+ * answers NO_TOKEN only when neither credential field reached it, so the body
+ * did not arrive.
  *
- * Every other action recovers by retrying as a GET with everything in the
- * query. pushSku cannot: it carries a base64 photo, so it does not fit in a
- * URL and the retry never runs. It is also the only action whose body is big
- * enough to be at risk, which is why it is the only one that got stuck.
+ * The first attempt at a fix lifted the credential into the query string on
+ * every POST. That was a REGRESSION and these tests exist mostly to stop it
+ * coming back. The credential and the arguments travel in the same body, so a
+ * transport that drops one drops both; putting the credential in the URL only
+ * makes a body-less request authenticate and then run with every argument
+ * undefined. The reply stops being NO_TOKEN, so the retry that actually
+ * recovered the call never fires.
+ *
+ * The real recovery is to send the body again.
  */
 const BASE = 'https://script.google.com/macros/s/AAA/exec'
-
 const TOKEN = 'header.' + btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })) + '.sig'
 
 async function loadApi() {
@@ -25,14 +29,42 @@ async function loadApi() {
   return mod
 }
 
-function ok(body: Record<string, unknown> = { ok: true }) {
+function reply(body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), { status: 200 })
 }
 
+const NO_TOKEN = { _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }
+
 let fetchMock: ReturnType<typeof vi.fn>
 
+/**
+ * A backend that behaves the way Apps Script actually does.
+ *
+ * `handle_` resolves identity from `body.session_token || params.session_token`
+ * and `route_` reads `params.x || body.x` for every argument. So this answers
+ * from whatever the request genuinely carried — which is the part the first
+ * version of this file got wrong: its stub returned success while ignoring
+ * that the photo, price and identifier had never arrived.
+ */
+function backend(opts: { dropBody: boolean }) {
+  return vi.fn(async (input: unknown, init?: RequestInit) => {
+    const url = new URL(String(input))
+    const query = Object.fromEntries(url.searchParams.entries())
+    const sentBody =
+      init?.method === 'POST' && !opts.dropBody ? JSON.parse(String(init.body)) : {}
+    const seen = { ...sentBody, ...query }
+
+    if (!seen.session_token && !seen.id_token) return reply(NO_TOKEN)
+    // Authenticated — now the action runs on whatever arguments arrived.
+    if (!seen.listing_id) {
+      return reply({ _status: 422, error: 'Unknown listing: undefined', code: 'TS-PRD-09' })
+    }
+    return reply({ _status: 200, ok: true, listing_id: seen.listing_id })
+  })
+}
+
 beforeEach(() => {
-  fetchMock = vi.fn(async () => ok())
+  fetchMock = backend({ dropBody: false })
   vi.stubGlobal('fetch', fetchMock)
 })
 
@@ -45,82 +77,87 @@ function urlOf(call: number): URL {
   return new URL(String(fetchMock.mock.calls[call]![0]))
 }
 
-function bodyOf(call: number): Record<string, unknown> {
-  return JSON.parse(String((fetchMock.mock.calls[call]![1] as RequestInit).body))
-}
-
-describe('the credential rides in the URL as well as the body', () => {
-  it('puts the session token in the query of a POST', async () => {
+describe('the credential never rides in the URL of a POST', () => {
+  it('a POST carries action only, and the sign-in stays in the body', async () => {
     const api = await loadApi()
-    
-    await api.call('pushSku', { body: { image_base64: 'x'.repeat(50_000) }, timeoutMs: 1000 })
+    await api.call('removeVariation', { body: { listing_id: 'L1' }, timeoutMs: 1000 })
 
     const url = urlOf(0)
-    expect(url.searchParams.get('action')).toBe('pushSku')
-    expect(url.searchParams.get('id_token')).toBe(TOKEN)
-  })
-
-  it('still puts it in the body, so nothing that worked stops working', async () => {
-    const api = await loadApi()
-    
-    await api.call('pushSku', { body: { identifier: 'A1' }, timeoutMs: 1000 })
-
-    expect(bodyOf(0).id_token).toBe(TOKEN)
-    expect(bodyOf(0).identifier).toBe('A1')
+    expect(url.searchParams.get('action')).toBe('removeVariation')
+    expect(url.searchParams.get('id_token')).toBeNull()
+    expect(url.searchParams.get('session_token')).toBeNull()
   })
 
   /**
-   * The photo must never reach the URL.
+   * The regression, stated as a test.
    *
-   * Only the credential is lifted out. Putting the payload there would exceed
-   * what Apps Script accepts in a query string and fail every push instead of
-   * fixing one.
+   * With the credential in the URL this call answered "Unknown listing:
+   * undefined [TS-PRD-09]" and never retried, because the reply was no longer
+   * NO_TOKEN. That is the exact 15 Sep mid-broadcast error the `params || body`
+   * rule was written to eliminate.
    */
-  it('lifts the credential only, never the payload', async () => {
+  it('a dropped body still recovers, because the reply is still NO_TOKEN', async () => {
     const api = await loadApi()
-    
-    const photo = 'y'.repeat(50_000)
-    await api.call('pushSku', { body: { image_base64: photo, price: '99' }, timeoutMs: 1000 })
-
-    const url = urlOf(0)
-    expect(url.searchParams.get('image_base64')).toBeNull()
-    expect(url.searchParams.get('price')).toBeNull()
-    expect(url.toString().length).toBeLessThan(2000)
-    expect(bodyOf(0).image_base64).toBe(photo)
-  })
-
-  it('sends no credential at all when the call is anonymous', async () => {
-    const api = await loadApi()
-    
-    await api.call('ping', { anonymous: true, timeoutMs: 1000 })
-
-    expect(urlOf(0).searchParams.get('session_token')).toBeNull()
-    expect(urlOf(0).searchParams.get('id_token')).toBeNull()
-  })
-
-  /**
-   * The failure exactly as it was photographed.
-   *
-   * A backend that reads the credential ONLY from the query — which is what a
-   * dropped body looks like from the outside — now succeeds where it used to
-   * come back NO_TOKEN with no retry available.
-   */
-  it('a push whose body is dropped now succeeds on the URL credential', async () => {
-    const api = await loadApi()
-    
-    fetchMock.mockImplementation(async (input: unknown) => {
+    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
       const url = new URL(String(input))
-      // The body never arrives. Only the query is readable.
-      if (!url.searchParams.get('session_token') && !url.searchParams.get('id_token')) {
-        return ok({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' })
+      // The body is dropped; only the query survives. This is the failure.
+      const seen = Object.fromEntries(url.searchParams.entries())
+      if (!seen.session_token && !seen.id_token) return reply(NO_TOKEN)
+      if (!seen.listing_id) {
+        return reply({ _status: 422, error: 'Unknown listing: undefined', code: 'TS-PRD-09' })
       }
-      return ok({ ok: true, product_id: '123' })
+      return reply({ _status: 200, ok: true, listing_id: seen.listing_id })
+    })
+
+    const out = await api.call<{ listing_id: string }>(
+      'removeVariation', { body: { listing_id: 'L1' }, timeoutMs: 1000 },
+    )
+
+    // Recovered on the GET, which carries the whole payload in the query.
+    expect(out.listing_id).toBe('L1')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: 'GET' })
+    expect(urlOf(1).searchParams.get('listing_id')).toBe('L1')
+  })
+})
+
+describe('pushSku, which cannot be retried as a GET', () => {
+  it('retries as a POST rather than giving up', async () => {
+    const api = await loadApi()
+    let first = true
+    fetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+      // The body is dropped once, then arrives. A transient transport failure.
+      const dropped = first
+      first = false
+      const url = new URL(String(input))
+      const sentBody = dropped ? {} : JSON.parse(String(init!.body))
+      const seen = { ...sentBody, ...Object.fromEntries(url.searchParams.entries()) }
+      if (!seen.session_token && !seen.id_token) return reply(NO_TOKEN)
+      return reply({ _status: 200, ok: true, product_id: '123' })
     })
 
     const out = await api.call<{ product_id: string }>(
       'pushSku', { body: { image_base64: 'z'.repeat(50_000) }, timeoutMs: 1000 },
     )
+
     expect(out.product_id).toBe('123')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    // A POST, because the photo cannot fit in a query string.
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: 'POST' })
+    expect(urlOf(1).toString().length).toBeLessThan(2000)
+  })
+
+  it('says the session is good when both attempts lose the body', async () => {
+    const api = await loadApi()
+    fetchMock.mockImplementation(async () => reply(NO_TOKEN))
+
+    const err = await api
+      .call('pushSku', { body: { image_base64: 'z'.repeat(50_000) }, timeoutMs: 1000 })
+      .catch((e: unknown) => e as InstanceType<Awaited<ReturnType<typeof loadApi>>['ScriptError']>)
+
+    expect((err as { code: string }).code).toBe('CREDENTIAL_LOST_IN_TRANSIT')
+    expect((err as { message: string }).message).toMatch(/on both attempts/)
+    expect((err as { message: string }).message).toMatch(/session is still good/)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

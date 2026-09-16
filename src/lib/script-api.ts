@@ -340,27 +340,44 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
      * that only happens after a request has already failed this way.
      */
     if (sentCredential && credentialMissing(posted.json)) {
-      let retries = 0
-      if (fitsInAUrl(base, action, payload)) {
-        retries = 1
-        const retried = await send(base, action, payload, 'GET', timeoutMs)
-        if (retried.json && !credentialMissing(retried.json)) return unwrap<T>(retried.json)
-        if (!retried.json) throw pageInsteadOfData(retried, action)
-      }
+      /**
+       * Retried once. As a GET when the payload fits in a URL, as a POST when
+       * it does not.
+       *
+       * The credential must NOT be lifted into the query to "protect" it. It
+       * was, for a few hours on 16 Sep, and that was a regression: the
+       * credential and the arguments travel in the same body, so a transport
+       * that drops the body drops both. Putting the credential in the URL only
+       * makes a body-less request AUTHENTICATE — and then run with every
+       * argument undefined.
+       *
+       * That is strictly worse than failing. The reply stops being NO_TOKEN,
+       * so this branch never runs and the GET retry below — the thing that
+       * actually recovered the call — becomes unreachable for every action.
+       * `removeVariation` answered "Unknown listing: undefined", which is the
+       * exact 15 Sep error the `params.x || body.x` rule was written to
+       * eliminate. Worse, `listings` answered an EMPTY LIST with HTTP 200: the
+       * stream's own listing invisible, and the next push creating a second
+       * product for the same factory run.
+       *
+       * So the recovery is a fresh request carrying the body again, and
+       * `pushSku` — too big for a URL, which is why it was the one action with
+       * no recovery at all — now gets the same retry as a POST.
+       */
+      const asGet = fitsInAUrl(base, action, payload)
+      const retried = await send(base, action, payload, asGet ? 'GET' : 'POST', timeoutMs)
+      if (retried.json && !credentialMissing(retried.json)) return unwrap<T>(retried.json)
+      if (!retried.json) throw pageInsteadOfData(retried, action)
+
       /**
        * Say what happened, rather than telling somebody who is signed in to
        * sign in. That was the message Brien photographed, and acting on it
        * would have discarded a session that was working.
-       *
-       * The count is counted, not assumed. This said "twice" unconditionally,
-       * which was false whenever the payload was too big for a URL and the
-       * retry never ran — a wrong message added while fixing wrong messages.
        */
       throw new ScriptError(
         401,
-        retries === 0
-          ? `The "${action}" request reached the backend without its sign-in, and is too large to retry another way. Your session is still good.`
-          : `The "${action}" request reached the backend without its sign-in, on both attempts. Your session is still good, so try again.`,
+        `The "${action}" request reached the backend without its sign-in, on both attempts. ` +
+          'Your session is still good, so try again.',
         'CREDENTIAL_LOST_IN_TRANSIT',
         posted.json,
       )
@@ -423,48 +440,6 @@ function timedOut(action: string, timeoutMs: number): ScriptError {
   )
 }
 
-/**
- * The sign-in, lifted out of the body so it can also ride in the URL.
- *
- * Brien, Painting Matters, 16 Sep: a pushSku stuck on *"The 'pushSku' request
- * reached the backend without its sign-in, and is too large to retry another
- * way."* The backend answered NO_TOKEN, which it can only do when neither
- * credential field reached it — and the credential was in the POST body, so
- * the body did not arrive intact.
- *
- * Every other action survives this, because the client retries it as a GET
- * with everything in the query. `pushSku` cannot: it carries a base64 photo,
- * so it does not fit in a URL, and the retry never runs. It is also the ONLY
- * action with a body big enough to be at risk — which is the part worth
- * noticing.
- *
- * So the credential stops depending on the body. It is a few hundred bytes and
- * it goes in the query on every POST, next to `action`, which has always
- * travelled there. The backend already reads `params.session_token ||
- * body.session_token`, so this works against the backend as currently
- * deployed — nothing has to be pasted for it to take effect.
- *
- * It stays in the body too. If the body arrives, that is the path that has
- * always worked; if it does not, the URL carries it. Sending it twice costs
- * nothing and removes a dependency between two things that had no reason to be
- * coupled.
- *
- * The cost is a token in a URL, which Apps Script writes to its execution log.
- * That cost was already being paid on every read fallback and on the GET
- * retry; this makes it uniform rather than new. The session token is
- * HMAC-signed, expires, and grants only what the signed-in person already has.
- */
-function credentialOf(payload: Record<string, unknown>): Record<string, string> {
-  const out: Record<string, string> = {}
-  if (typeof payload.session_token === 'string' && payload.session_token) {
-    out.session_token = payload.session_token
-  }
-  if (typeof payload.id_token === 'string' && payload.id_token) {
-    out.id_token = payload.id_token
-  }
-  return out
-}
-
 async function send(
   base: string,
   action: string,
@@ -477,7 +452,7 @@ async function send(
   const url =
     method === 'GET'
       ? `${base}?${new URLSearchParams({ action, ...stringify(payload) }).toString()}`
-      : `${base}?${new URLSearchParams({ action, ...credentialOf(payload) }).toString()}`
+      : `${base}?action=${encodeURIComponent(action)}`
 
   let response: Response
   try {

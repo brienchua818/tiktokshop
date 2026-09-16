@@ -200,22 +200,32 @@ describe('the wording matches what actually happened', () => {
     vi.unstubAllGlobals()
   })
 
-  it('does not claim two attempts when the payload was too big to retry', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 }),
-      ),
+  /**
+   * A payload too big for a URL is retried as a POST, not abandoned.
+   *
+   * This used to assert the opposite — that a pushSku got ONE attempt and a
+   * message saying so. That was the behaviour Brien hit on Painting Matters:
+   * the one action with no recovery at all, stuck with nothing to do about it.
+   * Not fitting in a URL is a reason to choose a different method, not a
+   * reason to give up.
+   */
+  it('retries a too-big payload as a POST and says both attempts were made', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ _status: 401, error: 'Sign in with Google to continue.', code: 'NO_TOKEN' }), { status: 200 }),
     )
+    vi.stubGlobal('fetch', fetchMock)
     const mod = await import('./script-api')
     mod.setIdToken(live())
-    // A photo is far past the 6000-character URL ceiling, so the GET leg
-    // cannot run and the message must not say it did.
+    // A photo is far past the 6000-character URL ceiling, so the retry must be
+    // a POST — and the photo must never appear in the query.
     const huge = { photo_base64: 'A'.repeat(8_000) }
     const err = await mod.call('pushSku', { body: huge }).then(() => null, (e: unknown) => e) as InstanceType<typeof mod.ScriptError>
+
     expect(err.code).toBe('CREDENTIAL_LOST_IN_TRANSIT')
-    expect(err.message).not.toMatch(/both attempts/)
-    expect(err.message).toMatch(/too large to retry/)
+    expect(err.message).toMatch(/both attempts/)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock.mock.calls[1]![1]).toMatchObject({ method: 'POST' })
+    expect(String(fetchMock.mock.calls[1]![0]).length).toBeLessThan(2_000)
   })
 
   it('tells a read it is safe to try again, and a write that it may have landed', async () => {

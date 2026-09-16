@@ -500,8 +500,23 @@ function warmShop(prefix) {
   });
 
   step('Drive photo folder', function () {
-    var f = datedPhotoFolder_(id, sgtDate_(new Date()));
-    return f.getName() + ' — ' + folderPath_(f);
+    /**
+     * `datedPhotoFolder_` formats the date itself, so it takes a Date.
+     *
+     * This passed it `sgtDate_(new Date())` — an already-formatted STRING —
+     * which `sgtDate_` then tried to format again, and Apps Script refused
+     * with "The parameters (String,String,String) don't match the method
+     * signature for Utilities.formatDate". A bug in the diagnostic, not in the
+     * app: every real caller passes no date at all and gets today's.
+     *
+     * Worth keeping the scar tissue: this is the step that MATTERS. On a shop
+     * that has never listed, the day folder and the shop folder do not exist
+     * and Drive has to create them — which is the one part of a first push
+     * that touches Drive hardest, on the service that produced
+     * "Service error: Drive" on HOUZE the same day.
+     */
+    var f = datedPhotoFolder_(id);
+    return f.getName() + ' \u2014 ' + folderPath_(f) + ' (created if it did not exist)';
   });
 
   step('product search reachable', function () {
@@ -7504,4 +7519,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = '2d62dba 2026-09-16';
+var BACKEND_BUILD = '225a297-dirty 2026-09-16';

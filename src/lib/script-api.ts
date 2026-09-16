@@ -248,6 +248,14 @@ export const READ_TIMEOUT_MS = 25_000
  * inferred from the timeout, because a long deadline means "this is slow", not
  * "this writes": the orders summary takes 60 seconds and changes nothing.
  */
+/**
+ * Actions that can legitimately run for minutes.
+ *
+ * Only these can plausibly hit the six-minute execution limit. Everything else
+ * that produces no reply threw, and saying so points at the right thing.
+ */
+const LONG_ACTIONS = new Set(['syncOrders', 'exportOrders', 'exportListing', 'ordersSummary'])
+
 const WRITE_ACTIONS = new Set([
   'addListing',
   'saveSku',
@@ -337,7 +345,7 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
         retries = 1
         const retried = await send(base, action, payload, 'GET', timeoutMs)
         if (retried.json && !credentialMissing(retried.json)) return unwrap<T>(retried.json)
-        if (!retried.json) throw pageInsteadOfData(retried)
+        if (!retried.json) throw pageInsteadOfData(retried, action)
       }
       /**
        * Say what happened, rather than telling somebody who is signed in to
@@ -376,10 +384,10 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   if (fitsInAUrl(base, action, payload)) {
     const got = await send(base, action, payload, 'GET', timeoutMs)
     if (got.json) return unwrap<T>(got.json)
-    throw pageInsteadOfData(got)
+    throw pageInsteadOfData(got, action)
   }
 
-  throw pageInsteadOfData(posted)
+  throw pageInsteadOfData(posted, action)
 }
 
 /** One request, and whether it came back as JSON. */
@@ -550,7 +558,7 @@ function stringify(payload: Record<string, unknown>): Record<string, string> {
  * message used to carry neither — so a deployment that is not shared with
  * "Anyone" and a redirect the browser mishandled produced identical text.
  */
-function pageInsteadOfData(attempt: Attempt): ScriptError {
+function pageInsteadOfData(attempt: Attempt, action: string): ScriptError {
   const host = (() => {
     try {
       return new URL(attempt.url).host
@@ -582,12 +590,28 @@ function pageInsteadOfData(attempt: Attempt): ScriptError {
    * this message was telling him the deployment was probably not published.
    */
   if (attempt.status === 404 && /googleusercontent/.test(host)) {
+    /**
+     * "No reply" is a crash OR a timeout, and only one of those is likely.
+     *
+     * This message named the six-minute limit as the cause and told the reader
+     * to look for "a long sync or export". Brien got it on a pushSku — which
+     * does a handful of TikTok calls and a Drive write, and has no business
+     * taking six minutes. So the message sent him hunting for a slow job when
+     * the likely answer was an exception partway through.
+     *
+     * A short action that produced no reply almost certainly threw. A long one
+     * probably ran out of time. The message now says which case this is, by
+     * the action's own deadline, rather than asserting the same cause for both.
+     */
+    const long = LONG_ACTIONS.has(action)
     return new ScriptError(
       502,
-      'The backend started this but never finished it, so there is no reply to read. ' +
-        'That usually means it ran past Apps Script\u2019s six-minute limit — most likely on a ' +
-        'long sync or export. It may have got part of the way, so check before repeating it. ' +
-        'The Execution log for this run says how far it got.',
+      `The backend started "${action}" and produced no reply. ` +
+        (long
+          ? 'On a job this long that usually means it ran past Apps Script\u2019s six-minute limit. '
+          : 'An action this short does not normally time out, so it most likely hit an error partway through. ') +
+        'It may have done part of the work, so check before repeating it \u2014 ' +
+        'the Execution log for this run says exactly how far it got.',
       'NOT_JSON',
     )
   }

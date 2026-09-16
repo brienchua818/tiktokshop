@@ -42,11 +42,11 @@ afterEach(() => {
 })
 
 function urlOf(call: number): URL {
-  return new URL(String(fetchMock.mock.calls[call][0]))
+  return new URL(String(fetchMock.mock.calls[call]![0]))
 }
 
 function bodyOf(call: number): Record<string, unknown> {
-  return JSON.parse(String((fetchMock.mock.calls[call][1] as RequestInit).body))
+  return JSON.parse(String((fetchMock.mock.calls[call]![1] as RequestInit).body))
 }
 
 describe('the credential rides in the URL as well as the body', () => {

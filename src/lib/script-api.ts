@@ -415,6 +415,48 @@ function timedOut(action: string, timeoutMs: number): ScriptError {
   )
 }
 
+/**
+ * The sign-in, lifted out of the body so it can also ride in the URL.
+ *
+ * Brien, Painting Matters, 16 Sep: a pushSku stuck on *"The 'pushSku' request
+ * reached the backend without its sign-in, and is too large to retry another
+ * way."* The backend answered NO_TOKEN, which it can only do when neither
+ * credential field reached it — and the credential was in the POST body, so
+ * the body did not arrive intact.
+ *
+ * Every other action survives this, because the client retries it as a GET
+ * with everything in the query. `pushSku` cannot: it carries a base64 photo,
+ * so it does not fit in a URL, and the retry never runs. It is also the ONLY
+ * action with a body big enough to be at risk — which is the part worth
+ * noticing.
+ *
+ * So the credential stops depending on the body. It is a few hundred bytes and
+ * it goes in the query on every POST, next to `action`, which has always
+ * travelled there. The backend already reads `params.session_token ||
+ * body.session_token`, so this works against the backend as currently
+ * deployed — nothing has to be pasted for it to take effect.
+ *
+ * It stays in the body too. If the body arrives, that is the path that has
+ * always worked; if it does not, the URL carries it. Sending it twice costs
+ * nothing and removes a dependency between two things that had no reason to be
+ * coupled.
+ *
+ * The cost is a token in a URL, which Apps Script writes to its execution log.
+ * That cost was already being paid on every read fallback and on the GET
+ * retry; this makes it uniform rather than new. The session token is
+ * HMAC-signed, expires, and grants only what the signed-in person already has.
+ */
+function credentialOf(payload: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (typeof payload.session_token === 'string' && payload.session_token) {
+    out.session_token = payload.session_token
+  }
+  if (typeof payload.id_token === 'string' && payload.id_token) {
+    out.id_token = payload.id_token
+  }
+  return out
+}
+
 async function send(
   base: string,
   action: string,
@@ -427,7 +469,7 @@ async function send(
   const url =
     method === 'GET'
       ? `${base}?${new URLSearchParams({ action, ...stringify(payload) }).toString()}`
-      : `${base}?action=${encodeURIComponent(action)}`
+      : `${base}?${new URLSearchParams({ action, ...credentialOf(payload) }).toString()}`
 
   let response: Response
   try {

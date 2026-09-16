@@ -135,6 +135,9 @@ ${src}
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
+    summaryHeader_, summaryRow_, summaryTotalRow_,
+    itemHeader_, itemRow_, itemTotalRow_, unitPriceOf_, summaryHeadRows_,
+    listingTopRows_, safeName_,
     lineStatusMeaning_, LINE_STATUS_MEANING,
     returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
@@ -2904,6 +2907,216 @@ check('money is rounded to cents in the cells, not left as float drift', () => {
 
 check('an empty export still has the six columns rather than none', () => {
   eq(gs.tallyHeader_(gs.tallyColumns_([])), SIX)
+})
+
+
+
+// ---------------------------------------------------------------------------
+// The sheet is built without a width mismatch.
+//
+// setValues throws when the array is not exactly the width of the range, and
+// exportOrders_ has no per-sheet failsafe: one mismatch kills the whole
+// workbook after the photos have already been fetched. The column count is now
+// data-dependent — it varies with the cost divisor AND with which buckets are
+// non-zero — so the combinations are asserted rather than reasoned about.
+// ---------------------------------------------------------------------------
+console.log('\nevery row is exactly as wide as its header')
+
+function widthsMatch(tallies, divisor, where) {
+  const cols = gs.tallyColumns_(tallies)
+  const totals = tallies.reduce((a, t) => gs.addTally_(a, t), gs.emptyTally_())
+
+  // THE EXPORT'S OWN BUILDERS, not a copy of them. A test that rebuilds the
+  // header itself passes happily while the export writes something else.
+  const sheets = [
+    {
+      name: 'Summary',
+      header: gs.summaryHeader_(cols, divisor),
+      rows: tallies.map((t) => gs.summaryRow_(cols, divisor, t))
+        .concat([gs.summaryTotalRow_(cols, divisor, totals, 7)]),
+    },
+    {
+      name: 'a factory sheet',
+      header: gs.itemHeader_(cols, divisor),
+      rows: tallies.map((t) => gs.itemRow_(cols, divisor, t))
+        .concat([gs.itemTotalRow_(cols, divisor, totals)]),
+    },
+  ]
+
+  sheets.forEach((sheet) => {
+    sheet.rows.forEach((row, i) => {
+      eq(row.length, sheet.header.length,
+        where + ': ' + sheet.name + ' row ' + i + ' is not the header width')
+      row.forEach((v, c) => {
+        // setValues takes strings, numbers, booleans and dates. An object or
+        // undefined in a cell throws and takes the workbook with it.
+        const ok = typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean'
+        eq(ok, true, where + ': ' + sheet.name + ' r' + i + 'c' + c + ' is not writable')
+        if (typeof v === 'number') {
+          eq(isFinite(v), true, where + ': ' + sheet.name + ' r' + i + 'c' + c + ' is not finite')
+        }
+      })
+    })
+  })
+}
+
+const CLEAN = Object.assign(gs.emptyTally_(), {
+  listing_id: 'L1', product_name: 'Katrin Run', order_count: 2,
+  seller_sku: 'A1', variation: 'A1 Blue Mug', price: '10.00',
+  ordered_units: 3, sold_units: 2, cancelled_units: 1,
+  ordered_value: 30, sold_value: 20, cancelled_value: 10,
+})
+const MESSY = Object.assign(gs.emptyTally_(), {
+  listing_id: 'L2', product_name: 'Hoi An', order_count: 5,
+  seller_sku: 'B7', variation: 'B7 Rattan Tray', price: '10.00',
+  ordered_units: 6, sold_units: 1, cancelled_units: 1, refunded_units: 1,
+  at_risk_units: 1, held_units: 1, unknown_units: 1,
+  ordered_value: 60, sold_value: 10, cancelled_value: 10, refunded_value: 10,
+  at_risk_value: 10, held_value: 10, unknown_value: 10,
+})
+
+check('six columns, no cost', () => widthsMatch([CLEAN], null, 'clean/no-divisor'))
+check('six columns, with cost', () => widthsMatch([CLEAN], 2.5, 'clean/divisor'))
+check('every bucket showing, no cost', () => widthsMatch([MESSY], null, 'messy/no-divisor'))
+check('every bucket showing, with cost', () => widthsMatch([MESSY], 2.5, 'messy/divisor'))
+check('a clean row beside a messy one still lines up', () =>
+  widthsMatch([CLEAN, MESSY], 2.5, 'mixed'))
+check('an export with no listings at all', () => widthsMatch([], 2.5, 'empty'))
+
+/**
+ * A listing with nothing to call it by still writes a cell.
+ *
+ * setValues throws on undefined, and it throws AFTER every photo has been
+ * fetched — so one missing field costs the whole workbook rather than one
+ * blank cell. Found by pointing this test at the export's own row builders
+ * instead of at a copy of them.
+ */
+check('a row with no name and no id is still writable', () => {
+  const bare = gs.emptyTally_()
+  const cols = gs.tallyColumns_([bare])
+  gs.summaryRow_(cols, null, bare).concat(gs.itemRow_(cols, null, bare)).forEach((v) => {
+    eq(v === undefined || v === null, false, 'setValues would throw on this cell')
+  })
+  eq(gs.unitPriceOf_(bare), 0, 'no units ordered is a zero price, not a division by zero')
+  eq(gs.unitPriceOf_({ price: 'not a number' }), 0, 'a nonsense price is zero, not NaN')
+})
+
+check('a variation straight out of the aggregator writes cleanly', () => {
+  // The fixtures above are hand-built. This one is a real tally, so a field
+  // the aggregator sets and the fixtures do not cannot slip through.
+  const rows = [
+    line({ status: 'COMPLETED', sale_price: '12.50' }),
+    line({ order_id: 'o2', status: 'CANCELLED', sale_price: '12.50' }),
+    line({ order_id: 'o3', status: 'ON_HOLD', sale_price: '12.50' }),
+  ]
+  const byVariation = gs.groupVariationSales_(rows)
+  widthsMatch(Object.keys(byVariation).map((k) => gs.roundTally_(byVariation[k])), 2.5, 'live')
+  widthsMatch(gs.summariseItems_(rows).listings, null, 'live listings')
+})
+
+
+
+// ---------------------------------------------------------------------------
+// The warning is bold, whatever else is above it.
+//
+// The bold row used to be the literal 5, on the assumption that the block above
+// the table was five rows long. Adding the line that explains the subtraction
+// made that assumption silently wrong — and CHECK BEFORE PAYING set in the same
+// weight as everything around it is a warning nobody reads.
+// ---------------------------------------------------------------------------
+console.log('\nthe purchase order header block')
+
+const SHOP = { brand: 'HOUZE' }
+const SIX_COLS = gs.tallyColumns_([])
+
+function headOf(recon, divisor) {
+  return gs.summaryHeadRows_(SHOP, '6 Sep to 6 Sep', divisor || null, 'brien', SIX_COLS, recon)
+}
+
+check('the bolded row is the warning, not a row number someone remembered', () => {
+  const b = headOf({ checked: 0, missing: ['o1', 'o2'], units: 3 })
+  eq(b.alert > 0, true, 'there is a warning, so a row must be bolded')
+  eq(/CHECK BEFORE PAYING/.test(b.rows[b.alert - 1][0]), true,
+    'the bolded row must be the warning itself')
+})
+
+check('a failed check is bolded too, and says it was not checked', () => {
+  const b = headOf({ error: 'TikTok timed out', checked: 0, missing: [] })
+  eq(/NOT CHECKED against TikTok/.test(b.rows[b.alert - 1][0]), true)
+})
+
+check('a clean check is stated but not shouted', () => {
+  const b = headOf({ checked: 41, missing: [] })
+  eq(b.alert, 0, 'nothing to bold when nothing is wrong')
+  eq(b.rows.some((r) => /all 41 recorded line/.test(r[0])), true)
+})
+
+check('no reconciliation at all is not a crash and not a false all-clear', () => {
+  const b = headOf({ checked: 0, missing: [] })
+  eq(b.alert, 0)
+  eq(b.rows.some((r) => /Checked against TikTok/.test(r[0])), false)
+})
+
+check('every row of the block is one writable cell', () => {
+  ;[headOf({ checked: 0, missing: ['o1'], units: 1 }, 2.5),
+    headOf({ error: 'boom', missing: [] }),
+    headOf({ checked: 3, missing: [] }),
+    headOf({ checked: 0, missing: [] })].forEach((b, i) => {
+    b.rows.forEach((r, j) => {
+      eq(r.length, 1, 'block ' + i + ' row ' + j + ' must be exactly one cell wide')
+      eq(typeof r[0], 'string', 'block ' + i + ' row ' + j + ' must be writable')
+    })
+  })
+})
+
+check('the subtraction it explains is the one the table performs', () => {
+  // The explainer is built from the SAME columns the table is, so it can never
+  // describe a sheet somebody is not looking at.
+  const messy = Object.assign(gs.emptyTally_(), { ordered_units: 2, refunded_units: 1, sold_units: 1 })
+  const cols = gs.tallyColumns_([messy])
+  const b = gs.summaryHeadRows_(SHOP, 'w', null, 'brien', cols, { checked: 0, missing: [] })
+  const line = b.rows.map((r) => r[0]).find((t) => /^Net sold =/.test(t))
+  eq(/refunded/.test(line), true, 'the refund column is on the table, so it must be in the sentence')
+  eq(gs.tallyHeader_(cols).indexOf('Refunded') >= 0, true)
+})
+
+check('and it names nothing the table does not show', () => {
+  const b = headOf({ checked: 0, missing: [] })
+  const line = b.rows.map((r) => r[0]).find((t) => /^Net sold =/.test(t))
+  eq(/refunded|on hold|awaiting/.test(line), false)
+  eq(/Net sold = total sold \u2212 cancelled\./.test(line), true)
+})
+
+
+
+check("a factory's sheet survives a listing with no name and no id", () => {
+  // Same class as the Summary row, and it was still live here after that fix:
+  // the first cell was `l.product_name || l.listing_id` with nothing beneath
+  // it, so an undefined on both would have thrown and taken the workbook with
+  // it — after every photo had already been fetched.
+  const top = gs.listingTopRows_({}, undefined, SIX_COLS)
+  top.forEach((r, i) => {
+    eq(r.length, 1, 'row ' + i + ' must be exactly one cell wide')
+    eq(typeof r[0], 'string', 'row ' + i + ' must be writable')
+    eq(/undefined|null|NaN/.test(r[0]), false, 'row ' + i + ' must not print a JS value: ' + r[0])
+  })
+})
+
+check('a real listing still reads as it did', () => {
+  const top = gs.listingTopRows_(
+    { listing_id: '123', product_name: 'Katrin Run' }, '6 Sep to 6 Sep', SIX_COLS)
+  eq(top[0][0], 'Katrin Run')
+  eq(/TikTok listing 123/.test(top[1][0]), true)
+  eq(/6 Sep to 6 Sep/.test(top[1][0]), true)
+  eq(/^Net sold =/.test(top[3][0]), true)
+  eq(top[4][0], '')
+})
+
+check('the block is exactly as tall as the row maths assumes', () => {
+  // h0 = top.length + 1, item rows start at h0 + 1, and each photo is anchored
+  // to h0 + 1 + i. Both derive from this one length, so it is asserted rather
+  // than remembered.
+  eq(gs.listingTopRows_({ listing_id: 'x' }, 'w', SIX_COLS).length, 5)
 })
 
 

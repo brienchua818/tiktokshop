@@ -49,15 +49,16 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | Code | Where | Message (as raised) |
 | --- | --- | --- |
 | `TS-UNC-00` | Api.gs | An error without a code reached the API handler. The message is prefixed with the runtime error type (TypeError, Exception). This is a gap in the code: find the line from the execution log stack and give it a code. |
-| `TS-API-01` | Api.gs:457 | Unknown role: . Expected one of , . |
-| `TS-API-02` | Api.gs:464 | The owner account cannot be demoted. |
-| `TS-API-03` | Api.gs:479 | No such user: |
+| `TS-API-01` | Api.gs:498 | Unknown role: . Expected one of , . |
+| `TS-API-02` | Api.gs:505 | The owner account cannot be demoted. |
+| `TS-API-03` | Api.gs:520 | No such user: |
 | `TS-API-04` | Api.gs:26 | took s |
-| `TS-API-05` | Api.gs:460 | No email given, so there is nobody to change. |
+| `TS-API-05` | Api.gs:501 | No email given, so there is nobody to change. |
+| `TS-API-06` | Api.gs:167 | No credential reached the backend on " " ( ). Body: . Query keys: , . |
 | `TS-EXP-01` | Export.gs:479 | Unknown listing: |
-| `TS-EXP-02` | Export.gs:607 | Unknown shop: |
-| `TS-EXP-03` | Export.gs:613 | The cost divisor must be greater than zero. |
-| `TS-EXP-04` | Export.gs:649 | No orders in that window for those listings. |
+| `TS-EXP-02` | Export.gs:777 | Unknown shop: |
+| `TS-EXP-03` | Export.gs:783 | The cost divisor must be greater than zero. |
+| `TS-EXP-04` | Export.gs:819 | No orders in that window for those listings. |
 | `TS-EXP-10` | Export.gs:148 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-11` | Export.gs:150 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-12` | Export.gs:153 | Non-fatal reason attached to a result (see the line). |
@@ -71,7 +72,7 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
 | `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
 | `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
-| `TS-EXP-23` | Export.gs:637 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
+| `TS-EXP-23` | Export.gs:807 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
 | `TS-ORD-01` | Orders.gs:59 | Could not read orders: |
 | `TS-ORD-02` | Orders.gs:85 | That range has more than orders. Narrow the dates and sync again. |
 | `TS-ORD-03` | Orders.gs:101 | Not a date: |

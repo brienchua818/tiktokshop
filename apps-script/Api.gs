@@ -100,8 +100,31 @@ var OPEN_ACTIONS = { ping: 1, whoami: 1 };
 function handle_(e, method) {
   var action = (e && e.parameter && e.parameter.action) || 'ping';
   var body = {};
-  if (method === 'POST' && e && e.postData && e.postData.contents) {
-    try { body = JSON.parse(e.postData.contents); } catch (err) { body = {}; }
+  /**
+   * What actually arrived, recorded rather than inferred.
+   *
+   * Brien, Painting Matters, 16 Sep: a pushSku refused with NO_TOKEN while he
+   * was signed in. NO_TOKEN means neither credential field reached this
+   * function, and the credential was in the POST body — so the body did not
+   * arrive intact. Which of the three ways that can happen was a guess:
+   * postData absent, contents empty, or contents present but not JSON.
+   *
+   * A guess is not good enough for something that stops a broadcast, so the
+   * refusal below now names the case instead. `bodyState` is the diagnosis.
+   */
+  var bodyState = 'n/a';
+  if (method === 'POST') {
+    if (!e || !e.postData) bodyState = 'no postData';
+    else if (!e.postData.contents) bodyState = 'postData empty';
+    else {
+      bodyState = 'parsed ' + e.postData.contents.length + ' bytes';
+      try {
+        body = JSON.parse(e.postData.contents);
+      } catch (err) {
+        body = {};
+        bodyState = 'unparseable, ' + e.postData.contents.length + ' bytes';
+      }
+    }
   }
   var params = e && e.parameter ? e.parameter : {};
 
@@ -131,6 +154,24 @@ function handle_(e, method) {
       // "Sign in with Google to continue.", so a backend that was merely
       // misconfigured looked exactly like a user who had not signed in — and
       // the screen looped with nothing to act on.
+      if (identity.code === 'NO_TOKEN') {
+        /**
+         * The one refusal that is never the person's fault.
+         *
+         * NO_TOKEN means no credential reached this function at all, which the
+         * app refuses to let happen — it will not send a request without one.
+         * So it is a transport failure, and the only useful thing to say is
+         * what arrived. Logged with the action and the body's state so the
+         * next occurrence is a fact rather than another inference.
+         */
+        warn_('TS-API-06', 'No credential reached the backend on "' + action + '" (' +
+          method + '). Body: ' + bodyState + '. Query keys: ' +
+          Object.keys(params).join(', ') + '.');
+        return json_({
+          error: identity.message, code: identity.code,
+          body_state: bodyState, method: method
+        }, 401);
+      }
       return json_({ error: identity.message, code: identity.code }, 401);
     }
 

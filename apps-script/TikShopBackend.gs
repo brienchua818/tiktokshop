@@ -3475,14 +3475,16 @@ function pushSku_(body, user) {
     var imageUri = body.tiktok_image_uri || '';
     var attributeImageUri = body.tiktok_attribute_image_uri || '';
     if (body.photo_base64) {
-      photoUrl = savePhoto_(prefix, body.identifier, body.photo_base64,
-                            body.photo_mime || 'image/jpeg', user.name);
+      // Optional on purpose: a Drive wobble must never stop a product going
+      // live. See savePhotoOptional_ — WX11 and WX12, 16 Sep.
+      photoUrl = savePhotoOptional_(prefix, body.identifier, body.photo_base64,
+                                    body.photo_mime || 'image/jpeg', user.name);
       // The small copy for the purchase order, filed beside the photo. Made
       // by the phone; the backend cannot resize. Carried on `body` so the row
       // writer, three calls down, can record it without a new parameter on
       // every function in between.
       body.photo_thumb_url = body.thumb_base64
-        ? savePhoto_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
+        ? savePhotoOptional_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
         : '';
       var blob = Utilities.newBlob(
         Utilities.base64Decode(body.photo_base64),
@@ -6337,6 +6339,45 @@ function savePhoto_(shopId, identifier, base64, mimeType, creatorName) {
 }
 
 /**
+ * Archive a photo, and never fail a listing because the archive failed.
+ *
+ * Brien, HOUZE, 16 Sep: WX11 and WX12 both stopped with
+ * "Exception: Service error: Drive" and were never listed. Drive had a bad
+ * minute — which it periodically does, and which this app cannot prevent —
+ * and because `savePhoto_` runs BEFORE the TikTok upload, a wobble in our own
+ * record-keeping stopped two products going live mid-broadcast.
+ *
+ * That is the wrong way round. The archive is ours; the listing is the
+ * business. The export already tries three sources for a variation's picture
+ * (`photoCandidates_`: the phone's thumbnail, our Drive copy, then TikTok's),
+ * so a missing Drive copy costs a fallback, not a photo.
+ *
+ * Retried first, because "Service error: Drive" is transient by nature and one
+ * more attempt a second later usually lands. If it still fails, the push
+ * carries on with no archive URL and says so in the log, where TS-EXP-26 can
+ * be matched against the SKU afterwards.
+ */
+function savePhotoOptional_(shopId, identifier, base64, mimeType, creatorName) {
+  var last = null;
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return savePhoto_(shopId, identifier, base64, mimeType, creatorName);
+    } catch (e) {
+      last = e;
+      // Drive's own transient failures clear in about a second. Anything
+      // structural — a missing folder, no permission — fails all three the
+      // same way and is reported identically, which is correct: either way the
+      // listing must not be held up by it.
+      if (attempt < 3) Utilities.sleep(700 * attempt);
+    }
+  }
+  warn_('TS-EXP-26', 'Could not archive the photo for ' + identifier + ' to Drive after 3 tries (' +
+    (last && last.message ? last.message : last) + '). The SKU is being listed anyway; ' +
+    'the export will fall back to TikTok\u2019s copy of the picture.');
+  return '';
+}
+
+/**
  * Export a listing's SKUs as a real .xlsx into today's dated folder.
  *
  * Built by writing a temporary Google Sheet and exporting it, which is the
@@ -7173,11 +7214,32 @@ function handle_(e, method) {
     logEvent_(actorName_ || (params && params.actor) || 'unknown', action, '',
       '[' + code + '] ' + message, 'error');
 
-    // A rejection from TikTok is the operator's to act on, so its own wording
-    // goes through verbatim — "you haven't set the return warehouse" is
-    // actionable, "push failed" is not. 422 rather than 500: the request was
-    // understood and refused, and the client must not retry it.
-    return json_({ error: message, code: code }, action === 'pushSku' ? 422 : 500);
+    /**
+     * "Refused" and "went wrong" are different answers, and only one is final.
+     *
+     * A rejection from TikTok is the operator's to act on, so its own wording
+     * goes through verbatim — "you haven't set the return warehouse" is
+     * actionable, "push failed" is not. 422 rather than 500: the request was
+     * understood and refused, and the client must NOT retry it, because it
+     * would be refused identically and each attempt costs daily allowance.
+     *
+     * That was applied to every exception, which is how a transient
+     * infrastructure error became permanent. Brien, HOUZE, 16 Sep: WX11 and
+     * WX12 both stopped dead on "Exception: Service error: Drive" — Drive
+     * having one of its periodic bad minutes — because the catch answered 422
+     * and the client reads 422 as "will fail identically, park it". A retry
+     * three seconds later would have worked.
+     *
+     * TS-UNC-00 is precisely the code for "nobody anticipated this": it is set
+     * by codeOf_ when the error carries no code of ours, which means the
+     * RUNTIME raised it — a Drive outage, a Sheets limit, a TypeError — not a
+     * decision anybody made about this SKU. Those get 500, which the client
+     * already treats as retryable. Everything we or TikTok deliberately
+     * refused keeps 422 and stays final.
+     */
+    var unanticipated = code === 'TS-UNC-00';
+    var status = (action === 'pushSku' && !unanticipated) ? 422 : 500;
+    return json_({ error: message, code: code, retryable: unanticipated }, status);
   }
 }
 
@@ -7442,4 +7504,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'bda6808 2026-09-16';
+var BACKEND_BUILD = '2e7029a-dirty 2026-09-16';

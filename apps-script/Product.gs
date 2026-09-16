@@ -1343,14 +1343,16 @@ function pushSku_(body, user) {
     var imageUri = body.tiktok_image_uri || '';
     var attributeImageUri = body.tiktok_attribute_image_uri || '';
     if (body.photo_base64) {
-      photoUrl = savePhoto_(prefix, body.identifier, body.photo_base64,
-                            body.photo_mime || 'image/jpeg', user.name);
+      // Optional on purpose: a Drive wobble must never stop a product going
+      // live. See savePhotoOptional_ — WX11 and WX12, 16 Sep.
+      photoUrl = savePhotoOptional_(prefix, body.identifier, body.photo_base64,
+                                    body.photo_mime || 'image/jpeg', user.name);
       // The small copy for the purchase order, filed beside the photo. Made
       // by the phone; the backend cannot resize. Carried on `body` so the row
       // writer, three calls down, can record it without a new parameter on
       // every function in between.
       body.photo_thumb_url = body.thumb_base64
-        ? savePhoto_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
+        ? savePhotoOptional_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
         : '';
       var blob = Utilities.newBlob(
         Utilities.base64Decode(body.photo_base64),

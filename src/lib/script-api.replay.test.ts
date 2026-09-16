@@ -119,3 +119,48 @@ describe('the write list mirrors the backend', () => {
     }
   })
 })
+
+/**
+ * "Refused" and "went wrong" are different answers.
+ *
+ * Every exception during a push used to come back 422, and the client reads
+ * 422 as "will fail identically, park it". So Drive having one of its periodic
+ * bad minutes — "Exception: Service error: Drive", WX11 and WX12, HOUZE,
+ * 16 Sep — was treated exactly like TikTok refusing a title, and two SKUs
+ * stopped dead mid-broadcast. A retry three seconds later would have worked.
+ */
+describe('a push distinguishes a refusal from a hiccup', () => {
+  async function errorFor(body: Record<string, unknown>, status: number) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(JSON.stringify({ _status: status, ...body }), { status: 200 }),
+      ),
+    )
+    const api = await loadApi()
+    return (await api
+      .call('pushSku', { body: { identifier: 'A1' }, timeoutMs: 1000 })
+      .then(() => null, (e: unknown) => e)) as { isRetryable: boolean; code?: string }
+  }
+
+  it('an unanticipated runtime error retries', async () => {
+    const err = await errorFor(
+      { error: 'Exception: Service error: Drive', code: 'TS-UNC-00', retryable: true },
+      500,
+    )
+    expect(err.isRetryable).toBe(true)
+  })
+
+  it("TikTok's own refusal does not", async () => {
+    const err = await errorFor(
+      { error: 'Product name must be at least 25 characters', code: 'TS-TT-12', retryable: false },
+      422,
+    )
+    expect(err.isRetryable).toBe(false)
+  })
+
+  it('an older backend that sends no flag still behaves as before', async () => {
+    expect((await errorFor({ error: 'nope', code: 'TS-TT-12' }, 422)).isRetryable).toBe(false)
+    expect((await errorFor({ error: 'boom', code: 'TS-UNC-00' }, 500)).isRetryable).toBe(true)
+  })
+})

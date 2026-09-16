@@ -465,6 +465,45 @@ function savePhoto_(shopId, identifier, base64, mimeType, creatorName) {
 }
 
 /**
+ * Archive a photo, and never fail a listing because the archive failed.
+ *
+ * Brien, HOUZE, 16 Sep: WX11 and WX12 both stopped with
+ * "Exception: Service error: Drive" and were never listed. Drive had a bad
+ * minute — which it periodically does, and which this app cannot prevent —
+ * and because `savePhoto_` runs BEFORE the TikTok upload, a wobble in our own
+ * record-keeping stopped two products going live mid-broadcast.
+ *
+ * That is the wrong way round. The archive is ours; the listing is the
+ * business. The export already tries three sources for a variation's picture
+ * (`photoCandidates_`: the phone's thumbnail, our Drive copy, then TikTok's),
+ * so a missing Drive copy costs a fallback, not a photo.
+ *
+ * Retried first, because "Service error: Drive" is transient by nature and one
+ * more attempt a second later usually lands. If it still fails, the push
+ * carries on with no archive URL and says so in the log, where TS-EXP-26 can
+ * be matched against the SKU afterwards.
+ */
+function savePhotoOptional_(shopId, identifier, base64, mimeType, creatorName) {
+  var last = null;
+  for (var attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return savePhoto_(shopId, identifier, base64, mimeType, creatorName);
+    } catch (e) {
+      last = e;
+      // Drive's own transient failures clear in about a second. Anything
+      // structural — a missing folder, no permission — fails all three the
+      // same way and is reported identically, which is correct: either way the
+      // listing must not be held up by it.
+      if (attempt < 3) Utilities.sleep(700 * attempt);
+    }
+  }
+  warn_('TS-EXP-26', 'Could not archive the photo for ' + identifier + ' to Drive after 3 tries (' +
+    (last && last.message ? last.message : last) + '). The SKU is being listed anyway; ' +
+    'the export will fall back to TikTok\u2019s copy of the picture.');
+  return '';
+}
+
+/**
  * Export a listing's SKUs as a real .xlsx into today's dated folder.
  *
  * Built by writing a temporary Google Sheet and exporting it, which is the

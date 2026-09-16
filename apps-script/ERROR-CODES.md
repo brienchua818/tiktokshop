@@ -55,10 +55,10 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-API-04` | Api.gs:26 | took s |
 | `TS-API-05` | Api.gs:501 | No email given, so there is nobody to change. |
 | `TS-API-06` | Api.gs:167 | No credential reached the backend on " " ( ). Body: . Query keys: , . |
-| `TS-EXP-01` | Export.gs:479 | Unknown listing: |
-| `TS-EXP-02` | Export.gs:804 | Unknown shop: |
-| `TS-EXP-03` | Export.gs:810 | The cost divisor must be greater than zero. |
-| `TS-EXP-04` | Export.gs:846 | No orders in that window for those listings. |
+| `TS-EXP-01` | Export.gs:518 | Unknown listing: |
+| `TS-EXP-02` | Export.gs:861 | Unknown shop: |
+| `TS-EXP-03` | Export.gs:867 | The cost divisor must be greater than zero. |
+| `TS-EXP-04` | Export.gs:903 | No orders in that window for those listings. |
 | `TS-EXP-10` | Export.gs:148 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-11` | Export.gs:150 | Non-fatal reason attached to a result (see the line). |
 | `TS-EXP-12` | Export.gs:153 | Non-fatal reason attached to a result (see the line). |
@@ -72,29 +72,30 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-EXP-20` | Export.gs:246 | Slides returned no thumbnail URL. |
 | `TS-EXP-21` | Export.gs:249 | Slides thumbnail download failed: HTTP |
 | `TS-EXP-22` | Export.gs:376 | Non-fatal reason attached to a result (see the line). |
-| `TS-EXP-23` | Export.gs:834 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
-| `TS-EXP-25` | Export.gs:905 | unit(s) in this window carry no listing id. They are on the Summary but have no sheet of their own. |
+| `TS-EXP-23` | Export.gs:891 | Could not reconcile this window against TikTok: . The export is built from the Sheet as recorded. |
+| `TS-EXP-25` | Export.gs:962 | unit(s) of " an unnamed product " carry no listing id. They are on the Summary but have no sheet of their own. |
+| `TS-EXP-26` | Export.gs:500 | Could not archive the photo for to Drive after 3 tries ( ). The SKU is being listed anyway; the export will fall back to TikTok\u2019s copy of the picture. |
 | `TS-ORD-01` | Orders.gs:59 | Could not read orders: |
 | `TS-ORD-02` | Orders.gs:85 | That range has more than orders. Narrow the dates and sync again. |
 | `TS-ORD-03` | Orders.gs:101 | Not a date: |
 | `TS-ORD-04` | Orders.gs:130 | Unknown shop: |
 | `TS-ORD-05` | Orders.gs:134 | The end of the range is before its start. |
 | `TS-ORD-06` | Orders.gs:150 | TikTok returned order(s) outside the requested window (for example ). The date filter is not being applied, so nothing was saved. Tell Brien. |
-| `TS-ORD-07` | Orders.gs:523 | seller_sku lookup: could not read listing : [ ] |
-| `TS-ORD-08` | Orders.gs:1295 | order line(s) have no identifier from any source ( ) |
-| `TS-ORD-20` | Orders.gs:849 | Sales cache unavailable: |
-| `TS-ORD-21` | Orders.gs:857 | Could not cache sales for : |
+| `TS-ORD-07` | Orders.gs:538 | seller_sku lookup: could not read listing : [ ] |
+| `TS-ORD-08` | Orders.gs:1323 | order line(s) have no identifier from any source ( ) |
+| `TS-ORD-20` | Orders.gs:864 | Sales cache unavailable: |
+| `TS-ORD-21` | Orders.gs:872 | Could not cache sales for : |
 | `TS-ORD-22` | Product.gs:576 | Could not read sales for : |
-| `TS-ORD-23` | Orders.gs:1141 | Background sync could not read its activity marks: |
-| `TS-ORD-24` | Orders.gs:1218 | Background sync failed for : |
-| `TS-ORD-25` | Orders.gs:1177 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
-| `TS-ORD-26` | Orders.gs:632 | Order line statuses this app does not recognise on : , . They are NOT counted as sold. Add them to LINE_STATUS_MEANING once their meaning is confirmed. |
-| `TS-ORD-27` | Orders.gs:594 | order line(s) on carry no creation time, so they are counted in every window rather than none. |
-| `TS-ORD-28` | Orders.gs:1379 | Could not read returns: |
-| `TS-ORD-29` | Orders.gs:1448 | : more than returns changed since ; stopping and keeping what was read. |
-| `TS-ORD-30` | Orders.gs:1213 | : returns sync failed (orders are unaffected): |
-| `TS-ORD-31` | Orders.gs:969 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
-| `TS-ORD-32` | Orders.gs:1531 | : recorded order(s) are not in TikTok\'s list for this window, carrying unit(s) still counted as sold. They may have been cancelled and dropped, or may simply be absent from this response — check before paying on them. O… |
+| `TS-ORD-23` | Orders.gs:1156 | Background sync could not read its activity marks: |
+| `TS-ORD-24` | Orders.gs:1246 | Background sync failed for : |
+| `TS-ORD-25` | Orders.gs:1192 | : update_time filter not applied ( order(s) older than the watermark). Falling back to creation time. |
+| `TS-ORD-26` | Orders.gs:647 | Order line statuses this app does not recognise on : , . They are NOT counted as sold. Add them to LINE_STATUS_MEANING once their meaning is confirmed. |
+| `TS-ORD-27` | Orders.gs:609 | order line(s) on carry no creation time, so they are counted in every window rather than none. |
+| `TS-ORD-28` | Orders.gs:1407 | Could not read returns: |
+| `TS-ORD-29` | Orders.gs:1478 | : more than returns changed since ; stopping and keeping what was read. The watermark is NOT advanced, so the rest is read on the next run. |
+| `TS-ORD-30` | Orders.gs:1241 | : returns sync failed (orders are unaffected): |
+| `TS-ORD-31` | Orders.gs:984 | SYNC_EVERY_MINUTES is , which Apps Script will refuse. It must be one of , . |
+| `TS-ORD-32` | Orders.gs:1562 | : recorded order(s) are not in TikTok\'s list for this window, carrying unit(s) still counted as sold. They may have been cancelled and dropped, or may simply be absent from this response — check before paying on them. O… |
 | `TS-ORD-33` | Orders.gs:297 | Order line statuses this app does not recognise in this window: , . They are NOT counted as sold, so the orders screen and the export short by their units rather than overpaying. Add them to LINE_STATUS_MEANING once thei… |
 | `TS-PRD-01` | Product.gs:58 | Image upload failed: |
 | `TS-PRD-02` | Product.gs:246 | Could not read the listing: |
@@ -121,34 +122,34 @@ error numbers, documented at https://partner.tiktokshop.com/docv2/page/error-cod
 | `TS-PRD-23` | Product.gs:1297 | A photo is required. |
 | `TS-PRD-24` | Product.gs:1304 |  |
 | `TS-PRD-25` | Product.gs:1308 |  |
-| `TS-PRD-26` | Product.gs:1484 | TikTok refused the variation. |
-| `TS-PRD-27` | Product.gs:1555 | Could not read the title of the listing this continues, so the new one cannot be named. Try again in a moment. |
-| `TS-PRD-28` | Product.gs:1561 |  |
-| `TS-PRD-29` | Product.gs:1585 | Listing check failed. |
-| `TS-PRD-30` | Product.gs:1592 | TikTok returned no product ID. |
+| `TS-PRD-26` | Product.gs:1486 | TikTok refused the variation. |
+| `TS-PRD-27` | Product.gs:1557 | Could not read the title of the listing this continues, so the new one cannot be named. Try again in a moment. |
+| `TS-PRD-28` | Product.gs:1563 |  |
+| `TS-PRD-29` | Product.gs:1587 | Listing check failed. |
+| `TS-PRD-30` | Product.gs:1594 | TikTok returned no product ID. |
 | `TS-PRD-31` | Product.gs:733 | : TikTok shows variation(s), the app draws |
 | `TS-PRD-32` | Product.gs:1138 | Identifier is already on this listing, on a different variation. Two phones have reached the same number. Nothing was sent — refresh to pick up the next free identifier and list it again under that. |
 | `TS-PRD-33` | Product.gs:530 | No live version for (nothing buyable yet): |
-| `TS-PRD-34` | Product.gs:2098 | is not a removed variation on this listing. |
-| `TS-PRD-35` | Product.gs:2102 | Unknown shop on : |
-| `TS-PRD-36` | Product.gs:2110 | has no photo on record, and TikTok requires one on every variation. List it again from the app instead. |
-| `TS-PRD-37` | Product.gs:2131 | TikTok refused the restore. |
-| `TS-SEQ-01` | Product.gs:2033 | An identifier has to be reserved against a listing. |
+| `TS-PRD-34` | Product.gs:2100 | is not a removed variation on this listing. |
+| `TS-PRD-35` | Product.gs:2104 | Unknown shop on : |
+| `TS-PRD-36` | Product.gs:2112 | has no photo on record, and TikTok requires one on every variation. List it again from the app instead. |
+| `TS-PRD-37` | Product.gs:2133 | TikTok refused the restore. |
+| `TS-SEQ-01` | Product.gs:2035 | An identifier has to be reserved against a listing. |
 | `TS-SHT-01` | Sheet.gs:349 | Unknown shop: |
 | `TS-SHT-04` | Sheet.gs:449 | SKU cache unavailable for : |
 | `TS-SHT-05` | Sheet.gs:467 | Could not cache SKUs for : |
 | `TS-SHT-06` | Sheet.gs:505 | No column called on |
-| `TS-STK-01` | Product.gs:1958 | Could not read the listing before changing stock, so nothing was sent. |
-| `TS-STK-02` | Product.gs:1729 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
-| `TS-STK-03` | Product.gs:1735 | That variation has no warehouse on TikTok, so its stock cannot be changed. |
-| `TS-STK-04` | Product.gs:1751 | Stock has to be a whole number between 1 and 99,999, and is not. TikTok cannot set a variation to zero from here — remove the variation instead. |
-| `TS-STK-05` | Product.gs:1888 | TikTok refused the stock change: |
-| `TS-STK-06` | Product.gs:1908 | The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. Nothing further was sent. |
-| `TS-STK-07` | Product.gs:1975 | TikTok accepted the change for but is now reporting rather than . Nothing further was sent. Check Seller Center before trying again. |
-| `TS-STK-08` | Product.gs:1898 | TikTok reported success but refused this SKU: no reason given ( ) |
-| `TS-STK-09` | Product.gs:1878 | This variation stocks in warehouses, so there is no single total to set. Change it in Seller Center, per warehouse. |
-| `TS-STK-10` | Product.gs:1938 | A stock change needs a listing and a variation. |
-| `TS-STK-11` | Product.gs:1952 | Unknown listing: |
+| `TS-STK-01` | Product.gs:1960 | Could not read the listing before changing stock, so nothing was sent. |
+| `TS-STK-02` | Product.gs:1731 | That variation is not one of the variations TikTok is returning for this listing. A variation still under review is not returned, so wait for it to go live before changing its stock. |
+| `TS-STK-03` | Product.gs:1737 | That variation has no warehouse on TikTok, so its stock cannot be changed. |
+| `TS-STK-04` | Product.gs:1753 | Stock has to be a whole number between 1 and 99,999, and is not. TikTok cannot set a variation to zero from here — remove the variation instead. |
+| `TS-STK-05` | Product.gs:1890 | TikTok refused the stock change: |
+| `TS-STK-06` | Product.gs:1910 | The variation is no longer returned by TikTok after the write, so its stock cannot be confirmed. Nothing further was sent. |
+| `TS-STK-07` | Product.gs:1977 | TikTok accepted the change for but is now reporting rather than . Nothing further was sent. Check Seller Center before trying again. |
+| `TS-STK-08` | Product.gs:1900 | TikTok reported success but refused this SKU: no reason given ( ) |
+| `TS-STK-09` | Product.gs:1880 | This variation stocks in warehouses, so there is no single total to set. Change it in Seller Center, per warehouse. |
+| `TS-STK-10` | Product.gs:1940 | A stock change needs a listing and a variation. |
+| `TS-STK-11` | Product.gs:1954 | Unknown listing: |
 | `TS-TT-01` | TikTok.gs:20 | No app credentials for . Add _APP_KEY and _APP_SECRET in Script Properties. |
 | `TS-TT-02` | TikTok.gs:67 | Set _SERVICE_ID in Script Properties first.\n\n It comes from THIS project\'s app in TikTok Partner Center — next to the App Key and App Secret, or as the number after "service_id=" in the authorisation link Partner Cent… |
 | `TS-TT-03` | TikTok.gs:195 | token exchange failed |

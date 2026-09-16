@@ -90,6 +90,18 @@ export class ScriptError extends Error {
 
   /** Retrying unchanged is the right response. */
   get isRetryable(): boolean {
+    /**
+     * The backend can say so outright, and on a push it has to.
+     *
+     * Every exception during a push used to come back 422, so a transient
+     * Drive outage was indistinguishable from "TikTok refused this title" and
+     * both were parked for ever. The backend now marks the unanticipated ones
+     * (TS-UNC-00 — the runtime raised it, nobody decided it) with
+     * `retryable: true`, and this honours that above the status code.
+     */
+    if (this.payload && typeof this.payload.retryable === 'boolean') {
+      return this.payload.retryable
+    }
     return this.status === 0 || this.code === 'LISTING_BUSY' || this.status >= 500
   }
 

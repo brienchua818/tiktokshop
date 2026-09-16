@@ -9,6 +9,7 @@ import {
   retryDelayMs,
   afterAttempt,
   revivable,
+  isStuck,
   PARKED,
   STALE_UPLOAD_MS,
   MAX_AUTO_ATTEMPTS,
@@ -456,5 +457,53 @@ describe('a draft can never get stuck invisibly', () => {
     expect(revivable([draft({ status: 'pushed', settled: true })], NOW)).toEqual([])
     // A settled upload is finished; reviving it would push a second product.
     expect(revivable([draft({ status: 'uploading', settled: true })], NOW)).toEqual([])
+  })
+})
+
+/**
+ * The banner, the badge and the Retry button must agree.
+ *
+ * They did not. `needsAttention` learned that a parked draft counts; the row
+ * badge and the Retry button kept testing the attempt count alone. So the
+ * screen showed "2 SKUs could not be listed and stopped retrying" above two
+ * rows badged **Retrying**, neither offering a Retry button — Brien
+ * photographed it, HOUZE, 16 Sep.
+ */
+describe('one rule for whether a draft has stopped', () => {
+  const d = (over: Partial<QueuedDraft> = {}): QueuedDraft =>
+    ({
+      draft_id: 'd1', stream_id: 's1', listing_id: 'L1',
+      created_at: '2026-09-16T03:00:00.000Z',
+      status: 'failed', attempts: 1, retryAfter: 0, settled: false, error: 'Service error: Drive',
+      ...over,
+    }) as QueuedDraft
+
+  it('a parked draft is stuck on its first attempt', () => {
+    const parked = d({ retryAfter: PARKED })
+    expect(isStuck(parked)).toBe(true)
+    expect(needsAttention([parked])).toHaveLength(1)
+  })
+
+  it('a draft still inside its attempts is not stuck', () => {
+    expect(isStuck(d({ attempts: 2, retryAfter: Date.now() + 5_000 }))).toBe(false)
+    expect(needsAttention([d({ attempts: 2, retryAfter: Date.now() + 5_000 })])).toEqual([])
+  })
+
+  it('a draft that used up its attempts is stuck', () => {
+    expect(isStuck(d({ attempts: MAX_AUTO_ATTEMPTS }))).toBe(true)
+  })
+
+  it('what the banner counts is exactly what the rows would badge Failed', () => {
+    const rows = [
+      d({ draft_id: 'a', retryAfter: PARKED }),
+      d({ draft_id: 'b', attempts: MAX_AUTO_ATTEMPTS }),
+      d({ draft_id: 'c', attempts: 2, retryAfter: Date.now() + 5_000 }),
+      d({ draft_id: 'e', status: 'queued' }),
+      d({ draft_id: 'f', status: 'pushed', settled: true }),
+    ]
+    expect(needsAttention(rows).map((r) => r.draft_id)).toEqual(
+      rows.filter(isStuck).map((r) => r.draft_id),
+    )
+    expect(rows.filter(isStuck).map((r) => r.draft_id)).toEqual(['a', 'b'])
   })
 })

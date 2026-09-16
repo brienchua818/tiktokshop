@@ -263,11 +263,32 @@ function handle_(e, method) {
     logEvent_(actorName_ || (params && params.actor) || 'unknown', action, '',
       '[' + code + '] ' + message, 'error');
 
-    // A rejection from TikTok is the operator's to act on, so its own wording
-    // goes through verbatim — "you haven't set the return warehouse" is
-    // actionable, "push failed" is not. 422 rather than 500: the request was
-    // understood and refused, and the client must not retry it.
-    return json_({ error: message, code: code }, action === 'pushSku' ? 422 : 500);
+    /**
+     * "Refused" and "went wrong" are different answers, and only one is final.
+     *
+     * A rejection from TikTok is the operator's to act on, so its own wording
+     * goes through verbatim — "you haven't set the return warehouse" is
+     * actionable, "push failed" is not. 422 rather than 500: the request was
+     * understood and refused, and the client must NOT retry it, because it
+     * would be refused identically and each attempt costs daily allowance.
+     *
+     * That was applied to every exception, which is how a transient
+     * infrastructure error became permanent. Brien, HOUZE, 16 Sep: WX11 and
+     * WX12 both stopped dead on "Exception: Service error: Drive" — Drive
+     * having one of its periodic bad minutes — because the catch answered 422
+     * and the client reads 422 as "will fail identically, park it". A retry
+     * three seconds later would have worked.
+     *
+     * TS-UNC-00 is precisely the code for "nobody anticipated this": it is set
+     * by codeOf_ when the error carries no code of ours, which means the
+     * RUNTIME raised it — a Drive outage, a Sheets limit, a TypeError — not a
+     * decision anybody made about this SKU. Those get 500, which the client
+     * already treats as retryable. Everything we or TikTok deliberately
+     * refused keeps 422 and stays final.
+     */
+    var unanticipated = code === 'TS-UNC-00';
+    var status = (action === 'pushSku' && !unanticipated) ? 422 : 500;
+    return json_({ error: message, code: code, retryable: unanticipated }, status);
   }
 }
 

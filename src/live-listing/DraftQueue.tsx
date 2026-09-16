@@ -6,6 +6,8 @@ import {
   backfillListingId,
   allDrafts,
   MAX_AUTO_ATTEMPTS,
+  isStuck,
+  PARKED,
   nextBatch,
   getPhoto,
   needsAttention,
@@ -337,7 +339,9 @@ export default function DraftQueue({
   const renderDraft = (draft: QueuedDraft) => {
     const v = liveFor(live, draft.identifier)
     const canAdjust = Boolean(v && v.on_tiktok && !v.removed && v.stock_available !== null)
-    const stuckHere = draft.status === 'failed' && draft.attempts >= MAX_AUTO_ATTEMPTS
+    // The same predicate the banner counts with, so the two can never
+    // disagree about whether this row is still trying.
+    const stuckHere = isStuck(draft)
     const error = draft.error ? draft.error.replace(LISTING_FULL_MARKER, '').trim() : ''
 
     // Removing from TikTok takes something away from buyers, so it asks
@@ -1320,7 +1324,7 @@ function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | 
     // Still inside its automatic attempts: the queue will push it again by
     // itself (or find it already landed). "Failed" here sent someone to
     // Seller Center for a SKU that was minutes from sorting itself out.
-    if (draft.attempts < MAX_AUTO_ATTEMPTS) {
+    if (!isStuck(draft)) {
       return (
         <span className="text-[12px] text-warn" title={`attempt ${draft.attempts} of ${MAX_AUTO_ATTEMPTS}; will retry`}>
           Retrying
@@ -1328,7 +1332,14 @@ function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | 
       )
     }
     return (
-      <span className="text-[12px] text-bad" title={`${draft.attempts} attempts`}>
+      <span
+        className="text-[12px] text-bad"
+        title={
+          draft.retryAfter === PARKED
+            ? 'TikTok will refuse this again unchanged, so it was not retried'
+            : `${draft.attempts} attempts`
+        }
+      >
         Failed
       </span>
     )

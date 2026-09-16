@@ -362,6 +362,23 @@ export async function retryDraft(draftId: string): Promise<void> {
 }
 
 /** Items a person needs to look at: out of automatic attempts. */
+/**
+ * Is this draft done moving on its own?
+ *
+ * THE one rule, because it had three call sites and only one of them was
+ * updated. `needsAttention` learned that a parked draft counts; the row badge
+ * and the Retry button did not, so the screen showed a red banner saying
+ * "2 SKUs could not be listed and stopped retrying" above two rows badged
+ * **Retrying** with no Retry button on either. Brien photographed exactly that.
+ *
+ * Both ways a draft stops: it used up its automatic attempts, or it was parked
+ * on the first one because the rejection will repeat.
+ */
+export function isStuck(draft: QueuedDraft): boolean {
+  if (draft.settled || draft.status !== 'failed') return false
+  return draft.attempts >= MAX_AUTO_ATTEMPTS || draft.retryAfter === PARKED
+}
+
 export function needsAttention(drafts: readonly QueuedDraft[]): QueuedDraft[] {
   /**
    * Two ways an item stops moving, and both need a person.
@@ -376,12 +393,7 @@ export function needsAttention(drafts: readonly QueuedDraft[]): QueuedDraft[] {
    * That is the worst state in the whole queue: work that is neither done nor
    * moving nor visible, on a screen somebody is relying on mid-broadcast.
    */
-  return drafts.filter(
-    (d) =>
-      !d.settled &&
-      d.status === 'failed' &&
-      (d.attempts >= MAX_AUTO_ATTEMPTS || d.retryAfter === PARKED),
-  )
+  return drafts.filter(isStuck)
 }
 
 /** Unpushed work, for the "3 SKUs waiting to upload" indicator. */

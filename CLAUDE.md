@@ -91,6 +91,16 @@ not style preferences.
 
 ## Data in the Sheet
 
+- **A timestamp read back from the Sheet may be a Date object, not the string
+  you wrote.** Sheets converts an ISO string to a Date on write, and
+  `String(date)` is `"Wed Sep 23 2026 11:15:00 GMT+0800"`. That broke three
+  separate comparisons: the variation list and the listing picker both sorted
+  by *weekday name*, and the daily upload count matched nothing, so the
+  low-allowance warning never showed. Never compare, sort or prefix-match a
+  Sheet timestamp as text — go through `isoOf_`, then compare instants or
+  Singapore calendar dates. Order times are stored as epoch numbers, which
+  Sheets leaves alone; prefer that for anything new.
+
 - Reads and writes map columns **by position in `HEADERS`**. Adding, removing
   or reordering a column is a **migration**: `ensureHeaders_` re-lays rows out
   by name when the header row and `HEADERS` disagree. Add the column to

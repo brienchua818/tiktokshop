@@ -499,13 +499,48 @@ function listSkusFromSheet_(listingId) {
 }
 
 /** Already-pushed SKUs today, for the daily allowance figure. */
+/**
+ * How many products this shop pushed today, Singapore time.
+ *
+ * It compared `String(r.pushed_at)` against today's date, and that could not
+ * work twice over. `pushed_at` is written as a UTC ISO string, and Sheets turns
+ * an ISO string into a Date object when it is written — the same coercion
+ * behind the weekday-sorted listing — so reading it back and stringifying gave
+ * "Wed Sep 23 2026 11:15:00 GMT+0800", which never starts with "2026-09-23".
+ * And even as a string, a push before 8am Singapore carries YESTERDAY's UTC
+ * date. So this reported zero, and the "running low on daily uploads" warning
+ * on the listing screen never appeared however close a shop came to TikTok's
+ * cap — a safety guard switched off without anyone noticing.
+ *
+ * Now each timestamp is normalised with `isoOf_` (Date or string alike) and
+ * compared as a Singapore calendar date.
+ *
+ * It also read every SKU row ever written, on every open of the listing
+ * screen. The count is now kept for five minutes, keyed on the SKU tab's
+ * version, so any push or edit anywhere starts a fresh count and a cached
+ * figure can never be older than the last write.
+ */
 function pushedToday_(shopId) {
   var today = Utilities.formatDate(new Date(), 'Asia/Singapore', 'yyyy-MM-dd');
-  return readAll_(TAB_SKUS).filter(function (r) {
-    return String(r.shop_id) === String(shopId) &&
-      String(r.status) === 'pushed' &&
-      String(r.pushed_at).indexOf(today) === 0;
+  var key = 'pushedToday:' + shopId + ':' + today + ':v' + skuVersion_();
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit != null) return Number(hit);
+  } catch (e) {
+    // No cache: count it, as before.
+  }
+
+  var n = readAll_(TAB_SKUS).filter(function (r) {
+    if (String(r.shop_id) !== String(shopId) || String(r.status) !== 'pushed') return false;
+    var iso = isoOf_(r.pushed_at);
+    if (!iso) return false;
+    return Utilities.formatDate(new Date(iso), 'Asia/Singapore', 'yyyy-MM-dd') === today;
   }).length;
+
+  try { if (cache) cache.put(key, String(n), 300); } catch (e) { /* best effort */ }
+  return n;
 }
 
 /**

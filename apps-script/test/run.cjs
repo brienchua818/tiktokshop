@@ -171,7 +171,7 @@ ${src}
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
     ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
-    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_
+    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_, pushedToday_
   };
 `
 
@@ -3801,6 +3801,95 @@ console.log('\nlogging takes no lock')
     gs.logEvent_('system', 'warn', '', 'during a push', 'warn')
     eq(appended.length, 1, 'written regardless of who holds the lock')
     lockState.refused = false
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// The daily upload count is right, in the shapes the Sheet actually returns.
+//
+// It compared String(pushed_at) with today's date. Sheets turns the ISO string
+// into a Date object, so that read "Wed Sep 23 2026 ..." and never matched; and
+// a push before 8am Singapore carries yesterday's UTC date. It reported zero,
+// so the low-allowance warning never showed.
+// ---------------------------------------------------------------------------
+console.log('\nthe daily upload count sees every push made today')
+
+{
+  // 23 Sep 2026, 14:00 Singapore = 06:00 UTC.
+  const NOW = Date.parse('2026-09-23T06:00:00Z')
+  let rows = []
+  let reads = 0
+  const skuSheet = () => ({
+    getLastRow: () => rows.length + 1,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => { reads++; return rows.map((o) => SKU_COLS.slice(c - 1, c - 1 + nc).map((k) => (k in o ? o[k] : ''))) },
+      setValues: () => {}, setValue: () => {}, setFontWeight() { return this },
+    }),
+  })
+  const SKU_COLS = ['shop_id', 'status', 'pushed_at']
+  const count = (fn) => {
+    const realNow = Date.now
+    const RealDate = Date
+    Date.now = () => NOW
+    global.Date = class extends RealDate { constructor(...a) { if (a.length) super(...a); else super(NOW) } static now() { return NOW } }
+    gs.__setHeaders('SKUs', SKU_COLS)
+    gs.__setSheetImpl(skuSheet)
+    gs.invalidateRead_()
+    cacheState.store = {}
+    reads = 0
+    try { return fn() } finally { Date.now = realNow; global.Date = RealDate }
+  }
+
+  check('a push the Sheet hands back as a Date object is counted', () => {
+    // What Sheets actually returns for an ISO string written into a cell.
+    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: new Date('2026-09-23T03:15:00Z') }]
+    eq(count(() => gs.pushedToday_('PM')), 1)
+  })
+
+  check('a push before 8am Singapore counts as today, not yesterday', () => {
+    // 07:00 SGT on the 23rd is 23:00 UTC on the 22nd.
+    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-22T23:00:00.000Z' }]
+    eq(count(() => gs.pushedToday_('PM')), 1)
+  })
+
+  check('yesterday in Singapore is not today', () => {
+    // 23:00 SGT on the 22nd is 15:00 UTC on the 22nd.
+    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-22T15:00:00.000Z' }]
+    eq(count(() => gs.pushedToday_('PM')), 0)
+  })
+
+  check('only this shop, and only what was actually pushed', () => {
+    rows = [
+      { shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' },
+      { shop_id: 'HZ', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' },
+      { shop_id: 'PM', status: 'failed', pushed_at: '2026-09-23T03:00:00.000Z' },
+      { shop_id: 'PM', status: 'pushed', pushed_at: '' },
+    ]
+    eq(count(() => gs.pushedToday_('PM')), 1)
+  })
+
+  check('the count is not recomputed from the whole tab on every open', () => {
+    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' }]
+    count(() => {
+      gs.pushedToday_('PM')
+      gs.invalidateRead_()          // a later request
+      const before = reads
+      gs.pushedToday_('PM')
+      eq(reads, before, 'served from cache, no Sheet read')
+    })
+  })
+
+  check('any push starts a fresh count, so the cache is never behind a write', () => {
+    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' }]
+    count(() => {
+      eq(gs.pushedToday_('PM'), 1)
+      rows.push({ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T04:00:00.000Z' })
+      gs.bumpSkuVersion_()          // what every SKU write does
+      gs.invalidateRead_()
+      eq(gs.pushedToday_('PM'), 2)
+    })
   })
 }
 

@@ -442,10 +442,56 @@ function datedExportFolder_(date) {
 }
 
 /** Product Photos/YYYY-MM-DD/{shop}, created as needed. */
+/**
+ * Where a shop's photos go today, found once rather than on every save.
+ *
+ * Finding it took three Drive round trips — open the Photos root, search for
+ * today's folder by name, search for the shop's folder inside it — and a push
+ * saves TWO files there (the photo and its thumbnail), so it searched for the
+ * same folder twice. Roughly eight Drive calls a push, in a row, before TikTok
+ * was contacted at all.
+ *
+ * "Painting Matters, 23 Sep" does not move, so its id is kept: for the rest of
+ * this execution in memory, and across executions in the script cache for six
+ * hours. A later push opens the folder by id — one call — and the thumbnail
+ * that follows reuses it for none.
+ *
+ * If the remembered folder has been deleted or moved, opening it fails and it
+ * is simply looked up again, so a stale id costs one retry, never a lost photo.
+ * Folder creation stays inside the push lock (pushSku is a write action), so
+ * two phones cannot race to create the same day's folder.
+ */
+var PHOTO_FOLDER_TTL_S = 6 * 3600;
+var PHOTO_FOLDER_MEMO_ = {};
+
 function datedPhotoFolder_(shopId, date) {
+  var day = sgtDate_(date);
+  var key = 'photofolder:' + shopId + ':' + day;
+  if (PHOTO_FOLDER_MEMO_[key]) return PHOTO_FOLDER_MEMO_[key];
+
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var id = cache.get(key);
+    if (id) {
+      try {
+        var known = DriveApp.getFolderById(id);
+        PHOTO_FOLDER_MEMO_[key] = known;
+        return known;
+      } catch (e) {
+        // Deleted or moved since it was remembered. Look it up again below.
+      }
+    }
+  } catch (e) {
+    // No cache: resolve it the long way, which is always correct.
+  }
+
   var root = DriveApp.getFolderById(PHOTOS_FOLDER_ID);
-  var day = childFolder_(root, sgtDate_(date));
-  return childFolder_(day, shopId);
+  var dayFolder = childFolder_(root, day);
+  var shopFolder = childFolder_(dayFolder, shopId);
+  PHOTO_FOLDER_MEMO_[key] = shopFolder;
+  try { if (cache) cache.put(key, shopFolder.getId(), PHOTO_FOLDER_TTL_S); } catch (e) { /* best effort */ }
+  return shopFolder;
 }
 
 /**

@@ -153,7 +153,12 @@ ${src}
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
-    __setHeaders: function (name, cols) { HEADERS[name] = cols }
+    __setHeaders: function (name, cols) { HEADERS[name] = cols },
+    // Drive swapped for a counter, so "how many Drive calls does a push make"
+    // is an assertion too.
+    __setDriveApp: function (d) { DriveApp = d },
+    __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
+    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S
   };
 `
 
@@ -3469,6 +3474,84 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
   })
 
   check('the cache is short-lived', () => eq(gs.USERS_CACHE_TTL_S <= 60, true))
+}
+
+
+
+// ---------------------------------------------------------------------------
+// A push does not search Drive for the same folder over and over.
+//
+// Finding the photo folder took three Drive calls, and a push saves two files
+// into it (photo and thumbnail), searching from scratch both times — about
+// eight sequential Drive round trips before TikTok was contacted.
+// ---------------------------------------------------------------------------
+console.log('\nthe photo folder is found once, not on every save')
+
+{
+  let driveCalls = 0
+  let deleted = new Set()
+  const folder = (id, name) => ({
+    getId: () => id,
+    getName: () => name,
+    getFoldersByName: (n) => {
+      driveCalls++
+      let given = false
+      return { hasNext: () => !given, next: () => { given = true; return folder(id + '/' + n, n) } }
+    },
+    createFolder: (n) => { driveCalls++; return folder(id + '/' + n, n) },
+    createFile: (blob) => { driveCalls++; return { getUrl: () => 'https://drive/' + id } },
+  })
+  const fakeDrive = {
+    getFolderById: (id) => {
+      driveCalls++
+      if (deleted.has(id)) throw new Error('No item with the given ID could be found')
+      return folder(id, 'root')
+    },
+  }
+  const installDrive = () => {
+    gs.__setDriveApp(fakeDrive)
+    gs.__resetPhotoFolderMemo()
+    cacheState.store = {}
+    deleted = new Set()
+    driveCalls = 0
+  }
+  const newExecution = () => gs.__resetPhotoFolderMemo()   // memo is per execution; the cache is not
+
+  check("a push's photo and thumbnail find their folder once between them", () => {
+    installDrive()
+    gs.datedPhotoFolder_('PM')
+    const first = driveCalls
+    gs.datedPhotoFolder_('PM')     // the thumbnail, same execution
+    eq(driveCalls, first, 'the second save in one push must not touch Drive to find the folder')
+  })
+
+  check('a later push opens the folder by id: one call, not three', () => {
+    installDrive()
+    gs.datedPhotoFolder_('PM')     // first push of the day resolves it
+    newExecution()
+    driveCalls = 0
+    gs.datedPhotoFolder_('PM')     // the next push
+    eq(driveCalls, 1, 'one getFolderById from the remembered id')
+  })
+
+  check('a remembered folder that was deleted is looked up again, not lost', () => {
+    installDrive()
+    const f = gs.datedPhotoFolder_('PM')
+    deleted.add(f.getId())
+    newExecution()
+    const again = gs.datedPhotoFolder_('PM')
+    eq(Boolean(again), true, 'a stale id must fall back to finding the folder, never fail the save')
+  })
+
+  check('each shop has its own folder', () => {
+    installDrive()
+    const pm = gs.datedPhotoFolder_('PM')
+    const hz = gs.datedPhotoFolder_('HZ')
+    eq(pm.getId() === hz.getId(), false)
+  })
+
+  check('the remembered folder expires within the working day', () =>
+    eq(gs.PHOTO_FOLDER_TTL_S <= 6 * 3600, true))
 }
 
 

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { ApiError, api } from './lib/api'
-import { hasCredential, setIdToken, setSessionToken } from './lib/script-api'
+import { getSessionToken, hasCredential, hasLiveSession, setIdToken, setSessionToken } from './lib/script-api'
+import { forgetBoot, readBoot, rememberMe, rememberShops } from './lib/boot-cache'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
 import { allDrafts, pendingCount, reviveOrphanedUploads } from './offline/queue'
@@ -20,6 +21,8 @@ export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null)
   const [checkingSession, setCheckingSession] = useState(true)
   const [shops, setShops] = useState<Shop[]>([])
+  /** True while the shop list on screen came from memory, not the backend. */
+  const shopsFromMemory = useRef(false)
   /** Why the shop list could not be read, if it could not. */
   const [shopsError, setShopsError] = useState('')
   /** Bumped to ask again after a failure, without a full reload. */
@@ -59,9 +62,42 @@ export default function App() {
       setCheckingSession(false)
       return
     }
+
+    /**
+     * Open on what we remembered, and ask the backend behind it.
+     *
+     * This call used to gate the whole app. It pays the Apps Script floor
+     * (1.5s at best, 8-31s when Google is slow) plus a Users-tab read, and it
+     * sat in front of `shops`, which sat in front of the listing screen — three
+     * waits in a row that Brien timed at a minute. On a phone signed in earlier
+     * today the answer is almost always what it was, so the app opens on that
+     * immediately and corrects itself if the backend says otherwise.
+     *
+     * Only with a LIVE backend session: a bare Google token has not been
+     * checked against the allowlist yet, so that path still waits. See
+     * boot-cache.ts for why a remembered role cannot grant anything.
+     */
+    const remembered = hasLiveSession() ? readBoot(getSessionToken()) : null
+    if (remembered?.me) {
+      setUser(remembered.me)
+      if (remembered.shops) {
+        setShops(remembered.shops)
+        shopsFromMemory.current = true
+        // The selected shop too, or the listing screen would still sit waiting
+        // for the network to say which shop to open.
+        const last = localStorage.getItem('tikshop.shop')
+        const pick = remembered.shops.find((x) => x.shop_id === last) ?? remembered.shops[0]
+        setShopId(pick?.shop_id ?? null)
+      }
+      setCheckingSession(false)
+    }
+
     api
       .me()
-      .then((me) => setUser(me.approved ? me : null))
+      .then((me) => {
+        rememberMe(getSessionToken(), me)
+        setUser(me.approved ? me : null)
+      })
       .catch((e: unknown) => {
         /**
          * Only sign out when the credential is actually dead.
@@ -81,8 +117,18 @@ export default function App() {
         if (e instanceof ApiError && e.isCredentialDead) {
           setIdToken(null)
           setSessionToken(null)
+          forgetBoot()
+          setUser(null)
+          return
         }
-        setUser(null)
+        /**
+         * A slow or failed check does not sign out a phone that opened on a
+         * remembered, still-live session. That is the whole point of opening
+         * on it: the backend being slow is not evidence anything changed.
+         * Without a remembered session there is nothing to show, so it falls
+         * back to the sign-in screen as before.
+         */
+        if (!remembered?.me) setUser(null)
       })
       .finally(() => setCheckingSession(false))
   }, [])
@@ -112,6 +158,8 @@ export default function App() {
       .then((rows) => {
         if (cancelled) return
         setShops(rows)
+        shopsFromMemory.current = false
+        rememberShops(getSessionToken(), rows)
         // Remember the last shop across sessions: the team works one brand at
         // a time and re-picking it every morning is friction for nothing.
         const remembered = localStorage.getItem('tikshop.shop')
@@ -130,6 +178,9 @@ export default function App() {
          * configuration one.
          */
         if (cancelled) return
+        // Keep a list already shown from memory: a slow refresh is not
+        // evidence the shops went away. Only an empty screen gets the error.
+        if (shopsFromMemory.current) return
         setShops([])
         setShopsError(e instanceof ApiError ? e.display : String(e))
       })
@@ -192,6 +243,8 @@ export default function App() {
      */
     setIdToken(null)
     setSessionToken(null)
+    // Nothing remembered may survive a sign-out, on a phone that may be shared.
+    forgetBoot()
     setUser(null)
     void forgetAccount()
   }

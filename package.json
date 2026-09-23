@@ -17,7 +17,8 @@
     "audit:ui": "npm run build:audit && node tools/ui-audit.mjs",
     "audit:ui:shots": "npm run build:audit && node tools/ui-audit.mjs --shots",
     "audit:signin": "npm run build:audit && node tools/signin-check.mjs",
-    "audit": "npm run typecheck && npm test && npm run audit:ui && node tools/signin-check.mjs && node tools/device-check.mjs"
+    "audit": "npm run typecheck && npm test && npm run audit:ui && node tools/signin-check.mjs && node tools/device-check.mjs && node tools/speed-check.mjs",
+    "audit:speed": "npm run build:audit && node tools/speed-check.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",

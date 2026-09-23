@@ -1,0 +1,130 @@
+/**
+ * How long until the app is usable, against a backend that is having a bad day.
+ *
+ * Brien, 23 Sep: "I tried just logging into the app just now and it took
+ * 1 minute to just enter the app." Measured against the live deployment the
+ * same day, `ping` — which touches no Sheet, no network and no auth — took
+ * 1.5s at best and 11-31s at worst. That spike is Google's, not ours, and no
+ * amount of code tidying removes it. What CAN be removed is the app waiting
+ * for it.
+ *
+ * This serves the real built app and answers every backend call after a
+ * deliberate delay, then times how long until the listing screen can be used.
+ * Two cases, and both must hold:
+ *
+ *   REMEMBERED  a phone signed in earlier today. The backend is made SLOW
+ *               (whoami and shops take 20s each). The app must be usable in
+ *               under three seconds anyway, because it no longer waits.
+ *
+ *   FIRST RUN   nothing remembered. The app is ALLOWED to wait here — it has
+ *               nothing to show — and this case exists to prove the harness
+ *               can measure a slow start at all. A speed test that cannot
+ *               fail is decoration.
+ *
+ * Run after `npm run build:audit`.
+ */
+import { chromium } from 'playwright'
+import http from 'node:http'
+import fs from 'node:fs'
+import path from 'node:path'
+
+const PORT = 4179
+const DIST = new URL('../dist', import.meta.url).pathname
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png' }
+
+const SLOW_MS = 20_000
+const BUDGET_MS = 3_000
+
+const server = http.createServer((req, res) => {
+  const url = req.url.split('?')[0]
+  let file = path.join(DIST, url === '/' ? 'index.html' : url)
+  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) file = path.join(DIST, 'index.html')
+  res.setHeader('content-type', TYPES[path.extname(file)] ?? 'application/octet-stream')
+  res.end(fs.readFileSync(file))
+})
+await new Promise((r) => server.listen(PORT, r))
+
+const session = (() => {
+  const body = Buffer.from(JSON.stringify({ e: 'brienchua@sheldonglobal.com', n: 'Brien Chua', x: Date.now() + 12 * 3600_000 })).toString('base64url')
+  return `${body}.stub`
+})()
+
+const ME = {
+  email: 'brienchua@sheldonglobal.com', name: 'Brien Chua', picture: null, role: 'admin',
+  approved: true, admin: true,
+}
+const SHOPS = [
+  { shop_id: 'HZ', brand: 'HOUZE', tiktok_handle: '@houze.com.sg', entity: 'Sheldon Global Pte Ltd', shop_cipher: 'c', authorised: true, daily_listing_cap: 1000, listings_used_today: 12 },
+]
+const REPLIES = {
+  whoami: { ...ME, session_token: session, session_expires_at: new Date(Date.now() + 12 * 3600_000).toISOString() },
+  shops: SHOPS,
+  listings: [{ listing_id: '1734903629786286062', shop_id: 'HZ', brand: 'HOUZE', product_name: 'HOUZE x Table Matters - I12 Clearance Sale', supplier: 'Katrin BJ', created_at: '2026-09-06T06:43:29Z' }],
+  allowance: { used: 12, cap: 1000, remaining: 988, tracked: true },
+  skus: [],
+}
+
+/** The calls that used to gate the app, made deliberately slow. */
+const SLOW = new Set(['whoami', 'shops'])
+
+const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' })
+
+async function timeToUsable({ remembered }) {
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true })
+  await context.route('**script.google.com/**', async (route) => {
+    const action = new URL(route.request().url()).searchParams.get('action') ?? ''
+    if (SLOW.has(action)) await new Promise((r) => setTimeout(r, SLOW_MS))
+    const body = REPLIES[action]
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(body === undefined ? { _status: 200 } : body),
+    }).catch(() => {})
+  })
+  await context.addInitScript(
+    ([tok, me, shops, withMemory]) => {
+      localStorage.setItem('tikshop.session', tok)
+      localStorage.setItem('tikshop.shop', 'HZ')
+      if (withMemory) {
+        localStorage.setItem('tikshop.boot', JSON.stringify({ session: tok, me, shops, savedAt: Date.now() }))
+      } else {
+        localStorage.removeItem('tikshop.boot')
+      }
+    },
+    [session, ME, SHOPS, remembered],
+  )
+
+  const page = await context.newPage()
+  const t0 = Date.now()
+  await page.goto(`http://localhost:${PORT}/live-listing`)
+  // Usable = the listing screen for the shop is on screen, not the sign-in
+  // screen and not the "checking your session" placeholder.
+  let usable = -1
+  try {
+    await page.waitForSelector('text=I12 Clearance Sale', { timeout: SLOW_MS * 2 + 10_000 })
+    usable = Date.now() - t0
+  } catch {
+    usable = -1
+  }
+  await context.close()
+  return usable
+}
+
+let failed = 0
+function report(label, ms, ok, why) {
+  console.log(`${ok ? 'OK  ' : 'FAIL'} ${label.padEnd(12)} ${ms < 0 ? 'never usable' : (ms / 1000).toFixed(2) + 's'}  ${why}`)
+  if (!ok) failed++
+}
+
+const remembered = await timeToUsable({ remembered: true })
+report('remembered', remembered, remembered >= 0 && remembered < BUDGET_MS,
+  `backend answers in ${SLOW_MS / 1000}s; budget ${BUDGET_MS / 1000}s`)
+
+const first = await timeToUsable({ remembered: false })
+report('first run', first, first >= SLOW_MS,
+  `must WAIT for the backend (proves the harness can see a slow start)`)
+
+await browser.close()
+server.close()
+
+console.log(failed ? `\n${failed} speed check(s) failed\n` : '\nspeed checks clean\n')
+process.exit(failed ? 1 : 0)

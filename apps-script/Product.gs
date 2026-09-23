@@ -53,8 +53,17 @@ function validateTitle_(title) {
  * So the same JPEG is uploaded twice on the SKU that creates a listing.
  */
 function ttUploadImage_(prefix, blob, useCase) {
-  var r = ttFetch_(prefix, 'post', '/product/202309/images/upload',
+  return ttImageFrom_(ttFetch_(prefix, 'post', '/product/202309/images/upload',
+    { use_case: useCase || 'MAIN_IMAGE' }, blob));
+}
+
+/** The image upload, built but not sent — so it can share a round trip. */
+function ttImageRequest_(prefix, blob, useCase) {
+  return ttRequest_(prefix, 'post', '/product/202309/images/upload',
     { use_case: useCase || 'MAIN_IMAGE' }, blob);
+}
+
+function ttImageFrom_(r) {
   if (r.code !== 0) throw fail_('TS-PRD-01', 'Image upload failed: ' + ttReason_(r));
   return r.data.uri;
 }
@@ -238,10 +247,22 @@ function ttGetProduct_(prefix, productId) {
  * Writes keep using the under-review version, which is the latest state and
  * what partial_edit rebuilds from.
  */
+/** The product read, built but not sent — so it can share a round trip. */
+function ttProductRequest_(prefix, productId, underReview) {
+  return ttRequest_(prefix, 'get', '/product/202309/products/' + productId,
+    { category_version: CATEGORY_VERSION,
+      return_under_review_version: underReview ? 'true' : 'false' }, null);
+}
+
 function ttGetProductVersion_(prefix, productId, underReview) {
   var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
     { category_version: CATEGORY_VERSION,
       return_under_review_version: underReview ? 'true' : 'false' }, null);
+  return ttProductFrom_(r, productId);
+}
+
+/** A product read's answer, as the rest of the app reads a product. */
+function ttProductFrom_(r, productId) {
   if (r.code !== 0 || !r.data) {
     throw fail_('TS-PRD-02', 'Could not read the listing: ' + ttReason_(r));
   }
@@ -1396,6 +1417,8 @@ function pushSku_(body, user) {
     var photoUrl = '';
     var imageUri = body.tiktok_image_uri || '';
     var attributeImageUri = body.tiktok_attribute_image_uri || '';
+    /** The product, when it was read alongside the image upload. */
+    var prefetchedSnapshot = null;
     if (body.photo_base64) {
       // Optional on purpose: a Drive wobble must never stop a product going
       // live. See savePhotoOptional_ — WX11 and WX12, 16 Sep.
@@ -1408,16 +1431,33 @@ function pushSku_(body, user) {
       body.photo_thumb_url = body.thumb_base64
         ? savePhotoOptional_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
         : '';
-      var blob = Utilities.newBlob(
-        Utilities.base64Decode(body.photo_base64),
-        body.photo_mime || 'image/jpeg', 'product.jpg'
-      );
-      // Only the SKU that creates a listing needs a MAIN_IMAGE; every other
-      // one is a variation and needs only the attribute image. Uploading just
-      // what is needed halves the calls on the common path.
-      attributeImageUri = ttUploadImage_(prefix, blob, 'ATTRIBUTE_IMAGE');
-      if (!body.listing_id) imageUri = ttUploadImage_(prefix, blob, 'MAIN_IMAGE');
-      else if (!imageUri) imageUri = attributeImageUri;
+      var photoBytes = Utilities.base64Decode(body.photo_base64);
+      var photoMime = body.photo_mime || 'image/jpeg';
+      var blob = Utilities.newBlob(photoBytes, photoMime, 'product.jpg');
+      /**
+       * Independent TikTok calls go out together, in one round trip.
+       *
+       * The push made them strictly in sequence — upload the image, THEN
+       * read the product, THEN edit it — though the first two need nothing
+       * from each other. They are now sent as one parallel batch, and only
+       * the edit, which needs both answers, waits.
+       *
+       * Errors surface exactly as before: the image answer is read first, so
+       * a failed upload still reports TS-PRD-01, and a failed read TS-PRD-02.
+       *
+       * Only the SKU that creates a listing needs a MAIN_IMAGE; every other
+       * one is a variation and needs only the attribute image.
+       */
+      if (body.listing_id) {
+        var appended = appendAssets_(prefix, blob, String(body.listing_id));
+        attributeImageUri = appended.attributeImageUri;
+        prefetchedSnapshot = appended.snapshot;
+        if (!imageUri) imageUri = attributeImageUri;
+      } else {
+        var fresh = newListingAssets_(prefix, photoBytes, photoMime);
+        attributeImageUri = fresh.attributeImageUri;
+        imageUri = fresh.imageUri;
+      }
     }
 
     var addition = {
@@ -1429,15 +1469,43 @@ function pushSku_(body, user) {
     };
 
     return body.listing_id
-      ? addVariation_(body, user, prefix, shop, addition, photoUrl)
+      ? addVariation_(body, user, prefix, shop, addition, photoUrl, prefetchedSnapshot)
       : startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl);
   }
 }
 
+/**
+ * What an append needs from TikTok before it can edit: the uploaded image,
+ * and the product as it stands. One round trip for both.
+ */
+function appendAssets_(prefix, blob, listingId) {
+  var both = ttFetchAll_([
+    ttImageRequest_(prefix, blob, 'ATTRIBUTE_IMAGE'),
+    ttProductRequest_(prefix, listingId, true)
+  ]);
+  // Image first, so a failed upload still reports TS-PRD-01 as it always did.
+  var attributeImageUri = ttImageFrom_(both[0]);
+  return { attributeImageUri: attributeImageUri, snapshot: ttProductFrom_(both[1], listingId) };
+}
+
+/**
+ * A new listing uploads the photo twice, for two uses. One round trip for both,
+ * and two blobs so the parallel requests never share one.
+ */
+function newListingAssets_(prefix, photoBytes, photoMime) {
+  var ups = ttFetchAll_([
+    ttImageRequest_(prefix, Utilities.newBlob(photoBytes, photoMime, 'product.jpg'), 'ATTRIBUTE_IMAGE'),
+    ttImageRequest_(prefix, Utilities.newBlob(photoBytes, photoMime, 'product.jpg'), 'MAIN_IMAGE')
+  ]);
+  return { attributeImageUri: ttImageFrom_(ups[0]), imageUri: ttImageFrom_(ups[1]) };
+}
+
 /** Add a variation to the listing this stream is already using. */
-function addVariation_(body, user, prefix, shop, addition, photoUrl) {
+function addVariation_(body, user, prefix, shop, addition, photoUrl, prefetched) {
   var listingId = String(body.listing_id);
-  var snapshot = ttGetProduct_(prefix, listingId);
+  // Already read in parallel with the image upload when a photo came with the
+  // push; read here only when it did not.
+  var snapshot = prefetched || ttGetProduct_(prefix, listingId);
 
   /**
    * Has this identifier already been added?

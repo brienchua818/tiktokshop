@@ -279,7 +279,16 @@ function cipherAllowed_(path) {
   return true;
 }
 
-function ttFetch_(prefix, method, path, extraQuery, payload) {
+/**
+ * A signed TikTok request, built but not sent.
+ *
+ * This is the body of what `ttFetch_` always did, moved rather than rewritten:
+ * the same query, the same stringify-once-then-sign, the same headers. It is
+ * separate only so several requests can be sent in ONE round trip by
+ * `ttFetchAll_` — a push used to make its TikTok calls one after another even
+ * where none depended on the others.
+ */
+function ttRequest_(prefix, method, path, extraQuery, payload) {
   var c = ttCreds_(prefix);
   var token = ttToken_(prefix);
   var cipher = prop_(prefix + '_SHOP_CIPHER');
@@ -302,17 +311,55 @@ function ttFetch_(prefix, method, path, extraQuery, payload) {
     opts.payload = bodyString;
   }
 
-  var url = TT_HOST + path + '?' + ttQuery_(query);
-  var res = UrlFetchApp.fetch(url, opts);
+  return { url: TT_HOST + path + '?' + ttQuery_(query), opts: opts };
+}
+
+/** Throttled: HTTP 429 or business code 36009002. */
+function ttThrottled_(res, parsed) {
+  return res.getResponseCode() === 429 || parsed.code === 36009002;
+}
+
+function ttFetch_(prefix, method, path, extraQuery, payload) {
+  var req = ttRequest_(prefix, method, path, extraQuery, payload);
+  var res = UrlFetchApp.fetch(req.url, req.opts);
   var parsed = ttParse_(res);
 
   // Throttling is HTTP 429 or business code 36009002. At three shops we sit
   // near one write per second, so one backoff is worth it.
-  if (res.getResponseCode() === 429 || parsed.code === 36009002) {
+  if (ttThrottled_(res, parsed)) {
     Utilities.sleep(5000);
-    parsed = ttParse_(UrlFetchApp.fetch(url, opts));
+    parsed = ttParse_(UrlFetchApp.fetch(req.url, req.opts));
   }
   return parsed;
+}
+
+/**
+ * Several independent TikTok calls, sent at once.
+ *
+ * A push made its calls strictly in sequence — upload the image, THEN read
+ * the product, THEN edit it — although the first two need nothing from each
+ * other. `UrlFetchApp.fetchAll` sends a batch in parallel and returns when all
+ * have answered, so two independent calls cost one round trip instead of two.
+ *
+ * Only for calls that truly do not depend on one another. Each answer is
+ * parsed exactly as `ttFetch_` would, and a throttled one is retried once on
+ * its own, as `ttFetch_` does. Returns the parsed answers in request order.
+ */
+function ttFetchAll_(requests) {
+  var batch = requests.map(function (r) {
+    var one = { url: r.url };
+    Object.keys(r.opts).forEach(function (k) { one[k] = r.opts[k]; });
+    return one;
+  });
+  var responses = UrlFetchApp.fetchAll(batch);
+  return responses.map(function (res, i) {
+    var parsed = ttParse_(res);
+    if (ttThrottled_(res, parsed)) {
+      Utilities.sleep(5000);
+      parsed = ttParse_(UrlFetchApp.fetch(requests[i].url, requests[i].opts));
+    }
+    return parsed;
+  });
 }
 
 function ttParse_(res) {

@@ -44,6 +44,8 @@ const sandbox = `
   } };
   var Utilities = {
     getUuid: function () { return 'uuid' },
+    // A backoff must not actually wait in a test.
+    sleep: function () {},
     newBlob: function (bytes) {
       var buf = Buffer.from(Array.isArray(bytes) ? bytes.map(function (b) { return b & 0xff }) : String(bytes))
       return { getBytes: function () { return Array.from(buf) }, getDataAsString: function () { return buf.toString('utf8') } }
@@ -157,6 +159,12 @@ ${src}
     // Drive swapped for a counter, so "how many Drive calls does a push make"
     // is an assertion too.
     __setDriveApp: function (d) { DriveApp = d },
+    __setUrlFetch: function (u) { UrlFetchApp = u },
+    ttFetch_, appendAssets_, newListingAssets_,
+    // Guarded so the suite still LOADS against code that predates the split,
+    // which is how the golden URL below was proven identical to the old one.
+    ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
+    ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
     datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S
   };
@@ -3552,6 +3560,183 @@ console.log('\nthe photo folder is found once, not on every save')
 
   check('the remembered folder expires within the working day', () =>
     eq(gs.PHOTO_FOLDER_TTL_S <= 6 * 3600, true))
+}
+
+
+
+// ---------------------------------------------------------------------------
+// The signed request is unchanged by the split into build and send.
+//
+// ttFetch_ built, signed, sent and parsed in one function. It is now
+// ttRequest_ (build and sign) plus a send, so independent calls can go out
+// in one round trip. A signing mistake here fails EVERY push with an opaque
+// TikTok refusal, so the URL is compared byte for byte against a golden value
+// captured from the code as it was before the split.
+// ---------------------------------------------------------------------------
+console.log('\nthe signed TikTok request is byte-for-byte what it was')
+
+{
+  const FIXED_MS = 1_790_000_000_000
+  const sent = []
+  const fakeFetch = {
+    fetch: (url, opts) => {
+      sent.push({ url, opts })
+      return { getResponseCode: () => 200, getContentText: () => '{"code":0,"data":{"uri":"tos-u"}}' }
+    },
+    fetchAll: (batch) => batch.map((b) => {
+      sent.push({ url: b.url, opts: b, batched: true })
+      return { getResponseCode: () => 200, getContentText: () => '{"code":0,"data":{"uri":"tos-u"}}' }
+    }),
+  }
+  const withTikTok = (fn) => {
+    const realNow = Date.now
+    Date.now = () => FIXED_MS
+    authState.props = {
+      HZ_APP_KEY: 'appkey123', HZ_APP_SECRET: 'secret456',
+      HZ_ACCESS_TOKEN: 'tok789', HZ_ACCESS_EXPIRES: String(Math.floor(FIXED_MS / 1000) + 30 * 86400),
+      HZ_SHOP_CIPHER: 'cipherABC',
+    }
+    gs.__setUrlFetch(fakeFetch)
+    sent.length = 0
+    try { return fn() } finally { Date.now = realNow }
+  }
+
+  /**
+   * Captured from TikTok.gs as it was BEFORE the split (commit 29792ca) and
+   * matched exactly by the code after it. If this ever changes, the signing
+   * changed, and every push will fail at TikTok until it is explained.
+   */
+  const GOLDEN_URL = 'https://open-api.tiktokglobalshop.com/product/202309/products/123?app_key=appkey123&timestamp=1790000000&shop_cipher=cipherABC&category_version=v2&return_under_review_version=true&sign=56053f93a7378df83dbf2f9956eadce1d8383ae6da7efdf408142d08983d6622'
+
+  check('a product read is signed exactly as before the split', () => {
+    withTikTok(() => gs.ttFetch_('HZ', 'get', '/product/202309/products/123',
+      { category_version: 'v2', return_under_review_version: 'true' }, null))
+    if (process.env.PRINT_GOLDEN) console.log('GOLDEN=' + sent[0].url)
+    eq(sent[0].url, GOLDEN_URL)
+    eq(sent[0].opts.headers['x-tts-access-token'], 'tok789')
+    eq(sent[0].opts.method, 'get')
+  })
+
+  check('building a request sends nothing', () => {
+    withTikTok(() => gs.ttRequest_('HZ', 'get', '/product/202309/products/123',
+      { category_version: 'v2', return_under_review_version: 'true' }, null))
+    eq(sent.length, 0, 'ttRequest_ must only build, never send')
+  })
+
+  check('the request built is the one ttFetch_ sends', () => {
+    const built = withTikTok(() => gs.ttRequest_('HZ', 'get', '/product/202309/products/123',
+      { category_version: 'v2', return_under_review_version: 'true' }, null))
+    eq(built.url, GOLDEN_URL)
+  })
+
+  check('fetchAll sends every request in ONE batch and answers in order', () => {
+    const out = withTikTok(() => gs.ttFetchAll_([
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/1', {}, null),
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/2', {}, null),
+    ]))
+    eq(sent.filter((x) => x.batched).length, 2, 'both requests went in the batch')
+    eq(sent.filter((x) => !x.batched).length, 0, 'none went one at a time')
+    eq(out.length, 2)
+    eq(out[0].code, 0)
+    eq(sent[0].url.indexOf('/products/1?') > 0, true, 'first answer is for the first request')
+  })
+
+  check('a throttled answer in a batch is retried once, on its own', () => {
+    let first = true
+    const throttling = {
+      fetch: (url, opts) => { sent.push({ url, retried: true }); return { getResponseCode: () => 200, getContentText: () => '{"code":0}' } },
+      fetchAll: (batch) => batch.map(() => {
+        const r = first ? { getResponseCode: () => 429, getContentText: () => '{"code":36009002}' }
+                        : { getResponseCode: () => 200, getContentText: () => '{"code":0}' }
+        first = false
+        return r
+      }),
+    }
+    const out = withTikTok(() => { gs.__setUrlFetch(throttling); return gs.ttFetchAll_([
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/1', {}, null),
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/2', {}, null),
+    ]) })
+    eq(out[0].code, 0, 'the throttled one was retried and succeeded')
+    eq(sent.filter((x) => x.retried).length, 1, 'retried exactly once, and only that one')
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// A push sends its independent TikTok calls together.
+//
+// Upload the image, THEN read the product, THEN edit it — strictly one after
+// another, though the first two need nothing from each other. They now go in
+// one parallel batch, and only the edit waits.
+// ---------------------------------------------------------------------------
+console.log('\nindependent TikTok calls share one round trip')
+
+{
+  const FIXED_MS = 1_790_000_000_000
+  let sent = []
+  const reply = (body) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(body) })
+  const PRODUCT = { code: 0, data: { id: 'P1', status: 'ACTIVATE', skus: [], main_images: [{ uri: 'main-uri' }] } }
+  const IMAGE = { code: 0, data: { uri: 'tos-img' } }
+  const route = (url, fail) => {
+    if (url.indexOf('/images/upload') > 0) return fail === 'image' ? { code: 12052000, message: 'bad image' } : IMAGE
+    if (url.indexOf('/products/') > 0) return fail === 'product' ? { code: 12052001, message: 'no such product' } : PRODUCT
+    return { code: 0 }
+  }
+  const tiktok = (fail) => ({
+    fetch: (url) => { sent.push({ url, batched: false }); return reply(route(url, fail)) },
+    fetchAll: (batch) => batch.map((b) => { sent.push({ url: b.url, batched: true }); return reply(route(b.url, fail)) }),
+  })
+  const run = (fn, fail) => {
+    const realNow = Date.now
+    Date.now = () => FIXED_MS
+    authState.props = {
+      HZ_APP_KEY: 'k', HZ_APP_SECRET: 's', HZ_ACCESS_TOKEN: 't',
+      HZ_ACCESS_EXPIRES: String(Math.floor(FIXED_MS / 1000) + 30 * 86400), HZ_SHOP_CIPHER: 'c',
+    }
+    gs.__setUrlFetch(tiktok(fail))
+    sent = []
+    try { return fn() } finally { Date.now = realNow }
+  }
+  const blob = () => ({ getBytes: () => [1, 2, 3] })
+
+  check('an append uploads the image and reads the product in ONE round trip', () => {
+    const out = run(() => gs.appendAssets_('HZ', blob(), 'P1'))
+    eq(sent.filter((x) => x.batched).length, 2, 'both calls in the batch')
+    eq(sent.filter((x) => !x.batched).length, 0, 'nothing sent one at a time')
+    eq(out.attributeImageUri, 'tos-img')
+    eq(out.snapshot.productId, 'P1')
+    eq(out.snapshot.mainImageUri, 'main-uri')
+  })
+
+  check('a new listing uploads both images in ONE round trip', () => {
+    const out = run(() => gs.newListingAssets_('HZ', [1, 2, 3], 'image/jpeg'))
+    eq(sent.filter((x) => x.batched).length, 2)
+    eq(sent.filter((x) => !x.batched).length, 0)
+    eq(out.attributeImageUri, 'tos-img')
+    eq(out.imageUri, 'tos-img')
+  })
+
+  check('a failed upload still reports TS-PRD-01, exactly as before', () => {
+    let code = ''
+    try { run(() => gs.appendAssets_('HZ', blob(), 'P1'), 'image') } catch (e) { code = gs.codeOf_(e) }
+    eq(code, 'TS-PRD-01')
+  })
+
+  check('a failed product read still reports TS-PRD-02', () => {
+    let code = ''
+    try { run(() => gs.appendAssets_('HZ', blob(), 'P1'), 'product') } catch (e) { code = gs.codeOf_(e) }
+    eq(code, 'TS-PRD-02')
+  })
+
+  check('the upload is ATTRIBUTE_IMAGE and the read asks for the version under review', () => {
+    run(() => gs.appendAssets_('HZ', blob(), 'P1'))
+    const up = sent.find((x) => x.url.indexOf('/images/upload') > 0)
+    const rd = sent.find((x) => x.url.indexOf('/products/P1') > 0)
+    eq(up.url.indexOf('use_case=ATTRIBUTE_IMAGE') > 0, true)
+    // The live snapshot is the wrong one during a stream — see ttGetProduct_.
+    eq(rd.url.indexOf('return_under_review_version=true') > 0, true)
+  })
 }
 
 

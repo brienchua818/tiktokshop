@@ -328,12 +328,6 @@ export function credentialsToSend(): { session: string | null; token: string | n
   return { session: hasLiveSession() ? getSessionToken() : null, token: getIdToken() }
 }
 
-/** A comparable stamp of what a call sent now would carry. */
-export function credentialStamp(): string {
-  const c = credentialsToSend()
-  return `${c.session ?? ''}|${c.token ?? ''}`
-}
-
 export async function call<T>(action: string, options: CallOptions = {}): Promise<T> {
   if (!BASE) {
     throw new ScriptError(

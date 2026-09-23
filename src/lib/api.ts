@@ -1,5 +1,5 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
-import { call, credentialEpoch, credentialStamp, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
+import { call, credentialEpoch, credentialsToSend, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
 import { onToken, promptSilently } from '../auth/google'
 
 /**
@@ -495,7 +495,7 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
     let refusal: unknown = null
     let hedgeTimer: ReturnType<typeof setTimeout> | null = null
     /** What each request still out was sent with, by launch number. */
-    const outWith = new Map<number, string>()
+    const outWith = new Map<number, { session: string | null; token: string | null }>()
 
     const done = (id: number, ok: boolean, value: unknown) => {
       const sentWith = outWith.get(id)
@@ -517,21 +517,31 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
        * answer, so for those the twin still in flight is allowed to land, and
        * the refusal is reported only if it does not.
        *
-       * Every other refusal is a verdict — an expired session, an account
-       * awaiting approval — and asking twice with the SAME credential cannot
-       * change it, so it is final at once. But the two requests do not always
-       * carry the same one: a session in its last minute is left off the
-       * later request, and a Google token can be renewed between the two. A
-       * verdict on one credential says nothing about the other, so while a
-       * twin sent with a different credential is still out, it may land.
+       * Every other refusal is a verdict, final at once — with one exception.
+       * The two requests do not always carry the same credential: a session in
+       * its last minute is left off the later request, and a Google token can
+       * be renewed between the two. A refusal of the CREDENTIAL (a 401) says
+       * nothing about one it was not shown, so if a twin still out carries a
+       * session or token the refused request lacked, the twin may land.
+       *
+       * Nothing else waits. A refusal of the PERSON (403: blocked, awaiting
+       * approval) names the same account whatever it was sent with. And a twin
+       * carrying only what the refused request already carried cannot do
+       * better — the backend tries the session first, then the token.
        */
       if (value instanceof ScriptError && !value.isRetryable) {
         if (hedgeTimer) {
           clearTimeout(hedgeTimer)
           hedgeTimer = null
         }
-        const twinDiffers = [...outWith.values()].some((w) => w !== sentWith)
-        const verdict = !TRIP_REFUSALS.has(String(value.code ?? '')) && !twinDiffers
+        const twinCarriesMore =
+          value.status === 401 &&
+          [...outWith.values()].some(
+            (w) =>
+              (w.session !== null && w.session !== (sentWith?.session ?? null)) ||
+              (w.token !== null && w.token !== (sentWith?.token ?? null)),
+          )
+        const verdict = !TRIP_REFUSALS.has(String(value.code ?? '')) && !twinCarriesMore
         if (verdict || failures >= started) {
           settled = true
           reject(value)
@@ -559,7 +569,7 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
 
     const launch = (timeoutMs: number) => {
       const id = started++
-      outWith.set(id, credentialStamp())
+      outWith.set(id, credentialsToSend())
       read(timeoutMs).then(
         (v) => done(id, true, v),
         (e: unknown) => done(id, false, e),

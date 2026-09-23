@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { retryRead, LIGHT_READ, HEAVY_READ, type ReadPlan } from './api'
-import { ScriptError, setIdToken } from './script-api'
+import { ScriptError, setIdToken, setSessionToken } from './script-api'
 
 /**
  * The reads that gate the app must survive a slow Apps Script.
@@ -149,6 +149,39 @@ describe('retryRead', () => {
     setIdToken(null)
     expect(r.ok).toBe(true)
     expect(r.v).toBe('renewed')
+  })
+
+  it('a refusal of the PERSON is final at once, even after a token renewal', async () => {
+    // Blocked is blocked, whichever token asked. Waiting for the stuck twin
+    // only made a blocked person hear it 16s later.
+    setIdToken('google-token-a')
+    const { read } = scripted([
+      { after: 9_000, fail: new ScriptError(403, 'blocked', 'ACCOUNT_BLOCKED') },
+      { after: 60_000, fail: timeout() },
+    ])
+    const p = retryRead(read)
+    setTimeout(() => setIdToken('google-token-b'), 4_000)
+    const r = await timed(p)
+    setIdToken(null)
+    expect((r.e as ScriptError).code).toBe('ACCOUNT_BLOCKED')
+    expect(r.at).toBeLessThan(10_000)
+  })
+
+  it('a refused request that carried MORE than its twin is final at once', async () => {
+    // The original carried session + token and was refused; the hedge carries
+    // only the token. It cannot do better, so nobody waits for it.
+    const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+    setSessionToken(b64({ e: 'a@x.com', n: 'a', x: Date.now() + 65_000 }) + '.sig')   // drops off at 5s
+    setIdToken('google-token-a')
+    const { read } = scripted([
+      { after: 9_000, fail: new ScriptError(401, 'expired', 'TOKEN_REJECTED') },
+      { after: 60_000, fail: timeout() },
+    ])
+    const r = await timed(retryRead(read))
+    setSessionToken(null)
+    setIdToken(null)
+    expect((r.e as ScriptError).code).toBe('TOKEN_REJECTED')
+    expect(r.at).toBeLessThan(10_000)
   })
 
   it('a trip refusal is reported if its twin fails too, and is not retried', async () => {

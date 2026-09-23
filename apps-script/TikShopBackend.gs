@@ -701,7 +701,10 @@ function withScriptLockOptional_(timeoutMs, fn) {
   if (HELD_) return fn();
 
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(timeoutMs || 5000)) return undefined;
+  // `== null`, not `||`: zero means "do not wait at all", and `0 || 5000` is
+  // 5000. Written that way first, it silently turned every no-wait caller into
+  // a five-second wait — the exact stall the zero was there to prevent.
+  if (!lock.tryLock(timeoutMs == null ? 5000 : timeoutMs)) return undefined;
 
   HELD_ = true;
   try {
@@ -812,21 +815,48 @@ HEADERS[TAB_USERS] = ['email', 'name', 'role', 'first_seen', 'last_seen', 'appro
 function sheet_(name) {
   var ss = ss_();
   var sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
+  if (sh) {
+    ensureHeaders_(name, sh);
+    return sh;
+  }
+  // Creating a tab is decided under the lock, like migrating one. Two
+  // executions that both saw it missing would otherwise both insert it: the
+  // second insert throws "already exists", and when the caller is logEvent_ —
+  // which takes no lock and swallows its own failures — that line is simply
+  // lost. This happens at most once per tab, ever, so the wait costs nothing.
+  return withScriptLock_(30000, function () {
+    var again = ss.getSheetByName(name);
+    if (again) {
+      ensureHeaders_(name, again);
+      return again;
+    }
+    var made = ss.insertSheet(name);
     var headers = HEADERS[name] || [];
     if (headers.length) {
-      sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-      sh.setFrozenRows(1);
+      made.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+      made.setFrozenRows(1);
     }
     // Drop the default "Sheet1" once a real tab exists, so the file does not
     // open on an empty sheet.
     var first = ss.getSheetByName('Sheet1');
     if (first && ss.getSheets().length > 1) ss.deleteSheet(first);
-  } else {
-    ensureHeaders_(name, sh);
-  }
-  return sh;
+    SpreadsheetApp.flush();
+    return made;
+  });
+}
+
+/**
+ * Everything that must happen after a tab's rows change, in one place.
+ *
+ * Each cache over a tab is retired here rather than by whoever wrote: the
+ * request read memo, the SKU slices (by version), and sign-in's copy of the
+ * Users tab (by version). Callers used to repeat the right subset themselves,
+ * and the one that forgot was always the one nobody was looking at.
+ */
+function tabChanged_(name) {
+  invalidateRead_(name);
+  if (name === TAB_SKUS) bumpSkuVersion_();
+  if (name === TAB_USERS) invalidateUsersCache_();
 }
 
 /** Tabs whose header row has been checked this execution. One read each. */
@@ -924,8 +954,7 @@ function ensureHeaders_(name, sh) {
     SpreadsheetApp.flush();
     // The columns themselves moved, so anything read earlier in this request
     // is laid out differently from what is now on the tab.
-    invalidateRead_(name);
-    if (name === TAB_SKUS) bumpSkuVersion_();
+    tabChanged_(name);
     logEvent_('system', 'migrate_headers', '',
       name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
   });
@@ -955,8 +984,9 @@ function appendRows_(name, rows) {
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
     SpreadsheetApp.flush();
   });
-  invalidateRead_(name);
-  if (name === TAB_SKUS) bumpSkuVersion_();
+  // Anyone registered, including the seeded owner: sign-in's cached copy of
+  // the Users tab must see them on the next request. See usersForAuth_.
+  tabChanged_(name);
 }
 
 /**
@@ -1044,15 +1074,36 @@ function readAll_(name) {
  * replaced had no notion of a user at all.
  */
 function logEvent_(actor, action, shop, detail, result) {
+  /**
+   * One row, appended atomically, without the script lock.
+   *
+   * This went through appendRows_, which takes the script lock for up to
+   * THIRTY seconds — because appendRows_ finds the last row and writes after
+   * it, and two writers doing that at once could overwrite each other. Inside
+   * a push that cost nothing (the lock is re-entrant), but READS that log a
+   * warning hold no lock, and several warn on every call: TS-ORD-27 fires on
+   * every refresh of a listing with undated order lines. So a listing refresh
+   * during somebody else's push could wait up to half a minute to write one
+   * log line, then give up silently.
+   *
+   * `Sheet.appendRow` finds the end and writes in ONE server-side call, so
+   * there is no "read the last row, then write after it" gap for another
+   * writer to fall into. Older revisions of Google's reference said so in as
+   * many words ("This operation is atomic"); the current page no longer
+   * states it, so this rests on long-standing behaviour rather than a
+   * documented guarantee — which is acceptable for a log line and would not
+   * be for business rows, which still go through appendRows_ under the lock.
+   * The Log tab is never read by the app, so there is no read cache to clear.
+   */
   try {
-    appendRows_(TAB_LOG, [[
+    sheet_(TAB_LOG).appendRow([
       Utilities.formatDate(new Date(), 'Asia/Singapore', 'yyyy-MM-dd HH:mm:ss'),
       actor || 'unknown',
       action,
       shop || '',
       String(detail || '').slice(0, 500),
       result || ''
-    ]]);
+    ]);
   } catch (e) {
     // Logging must never break the thing it is logging.
     console.error('log failed: ' + e);
@@ -1060,10 +1111,24 @@ function logEvent_(actor, action, shop, detail, result) {
 }
 
 // ── listings ─────────────────────────────────────────────────────────
+/**
+ * A shop's listings, newest first — by the instant, not by the text.
+ *
+ * This sorted on `String(created_at)`. Sheets turns an ISO string into a Date
+ * object when it is written, so that string was "Wed Sep 23 2026 ..." and the
+ * listing picker was ordered by WEEKDAY NAME — the same fault that once sorted
+ * the variation list, fixed there and left here. `isoOf_` gives one comparable
+ * shape whether the cell holds a Date or a string; a listing with no usable
+ * time sorts last rather than wherever its garbage happened to land.
+ */
 function listListings_(shopId) {
+  var when = function (r) {
+    var t = Date.parse(isoOf_(r.created_at));
+    return isNaN(t) ? -Infinity : t;
+  };
   return readAll_(TAB_LISTINGS)
     .filter(function (r) { return String(r.shop_id) === String(shopId); })
-    .sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); });
+    .sort(function (a, b) { return when(b) - when(a); });
 }
 
 function addListing_(shopId, listingId, actor, productName) {
@@ -1198,14 +1263,70 @@ function listSkusFromSheet_(listingId) {
   });
 }
 
-/** Already-pushed SKUs today, for the daily allowance figure. */
+/**
+ * How many products this shop created today, Singapore time.
+ *
+ * It compared `String(r.pushed_at)` against today's date, and that could not
+ * work twice over. `pushed_at` is written as a UTC ISO string, and Sheets turns
+ * an ISO string into a Date object when it is written — the same coercion
+ * behind the weekday-sorted listing — so reading it back and stringifying gave
+ * "Wed Sep 23 2026 11:15:00 GMT+0800", which never starts with "2026-09-23".
+ * And even as a string, a push before 8am Singapore carries YESTERDAY's UTC
+ * date. So this reported zero, and the "running low on daily uploads" warning
+ * on the listing screen never appeared however close a shop came to TikTok's
+ * cap — a safety guard switched off without anyone noticing.
+ *
+ * Now each timestamp is normalised with `isoOf_` (Date or string alike) and
+ * compared as a Singapore calendar date.
+ *
+ * It also read every SKU row ever written, on every open of the listing
+ * screen. The count is now kept for five minutes, keyed on the SKU tab's
+ * version, so any push or edit anywhere starts a fresh count and a cached
+ * figure can never be older than the last write.
+ */
 function pushedToday_(shopId) {
   var today = Utilities.formatDate(new Date(), 'Asia/Singapore', 'yyyy-MM-dd');
-  return readAll_(TAB_SKUS).filter(function (r) {
-    return String(r.shop_id) === String(shopId) &&
-      String(r.status) === 'pushed' &&
-      String(r.pushed_at).indexOf(today) === 0;
+  var key = 'pushedToday:' + shopId + ':' + today + ':v' + skuVersion_();
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit != null) return Number(hit);
+  } catch (e) {
+    // No cache: count it, as before.
+  }
+
+  /**
+   * Products CREATED today, not variation rows.
+   *
+   * Every variation appended to a listing writes its own row, so counting rows
+   * counted a 100-variation stream on one product as 100 "uploads" — and at a
+   * probation cap of 100 the listing screen would announce that further
+   * pushes will be rejected while they were still succeeding. TikTok's
+   * wording is "product listings per day" (error 12052093); whether a
+   * variation added by partial edit counts is not stated anywhere we have
+   * found, so this counts what the words say and never raises a false alarm.
+   * If TikTok does count variations, its own refusal still names the cap.
+   *
+   * A product counts on the day its first row was pushed. A row since marked
+   * removed still counts: an upload spent is not refunded.
+   */
+  var firstPush = {};
+  readAll_(TAB_SKUS).forEach(function (r) {
+    if (String(r.shop_id) !== String(shopId)) return;
+    var st = String(r.status);
+    if (st !== 'pushed' && st !== 'removed') return;
+    var at = Date.parse(isoOf_(r.pushed_at));
+    if (isNaN(at)) return;
+    var id = String(r.listing_id || r.tiktok_product_id || '');
+    if (!(id in firstPush) || at < firstPush[id]) firstPush[id] = at;
+  });
+  var n = Object.keys(firstPush).filter(function (id) {
+    return Utilities.formatDate(new Date(firstPush[id]), 'Asia/Singapore', 'yyyy-MM-dd') === today;
   }).length;
+
+  try { if (cache) cache.put(key, String(n), 300); } catch (e) { /* best effort */ }
+  return n;
 }
 
 /**
@@ -1293,8 +1414,7 @@ function replaceByKey_(tabName, keyField, rows) {
     });
     if (appends.length) appendRows_(tabName, appends);
     SpreadsheetApp.flush();
-    invalidateRead_(tabName);
-    if (tabName === TAB_SKUS) bumpSkuVersion_();
+    tabChanged_(tabName);
     return rows.length;
   }
 
@@ -1329,8 +1449,7 @@ function replaceByKey_(tabName, keyField, rows) {
     sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
   }
   SpreadsheetApp.flush();
-  invalidateRead_(tabName);
-  if (tabName === TAB_SKUS) bumpSkuVersion_();
+  tabChanged_(tabName);
   return rows.length;
 }
 
@@ -1369,8 +1488,7 @@ function markSkus_(updates) {
     }
     if (written) {
       SpreadsheetApp.flush();
-      invalidateRead_(TAB_SKUS);
-      bumpSkuVersion_();
+      tabChanged_(TAB_SKUS);
     }
     return written;
   });
@@ -1449,6 +1567,13 @@ function verifyIdToken_(idToken) {
       'Could not reach Google to check your sign-in. Try again in a moment.');
   }
 
+  // A 5xx is Google having a bad moment, not a verdict on the token. Reported
+  // as TOKEN_REJECTED it signed the phone out — the app treats that code as a
+  // dead credential — over an outage that clears in seconds.
+  if (res.getResponseCode() >= 500) {
+    return refuse_('GOOGLE_UNREACHABLE',
+      'Could not reach Google to check your sign-in. Try again in a moment.');
+  }
   if (res.getResponseCode() !== 200) {
     return refuse_('TOKEN_REJECTED',
       'Your Google sign-in has expired. Sign in again.');
@@ -1603,20 +1728,138 @@ function shortClient_(id) {
 
 function usersAll_() { return readAll_(TAB_USERS); }
 
-function findUser_(email) {
+/**
+ * The Users tab, as sign-in needs it, without re-reading it on every request.
+ *
+ * `resolveUser_` runs on EVERY authenticated request — every push, refresh and
+ * stock change — and it read the whole Users tab from the Sheet each time:
+ * measured by the latency sweep at 0.3-1.5s per request on sign-in and
+ * 0.2-1.0s on every other call. The tab is small and changes rarely, so it is
+ * kept in the script cache for a minute.
+ *
+ * Three rules keep that safe, and each is load-bearing:
+ *
+ *   1. The key carries a version, like the SKU slices, and every write to the
+ *      Users tab bumps it AFTER flushing (`tabChanged_`). Clearing the key was
+ *      not enough: a sign-in that read the tab a moment before a block was
+ *      written could put the old row back after the clear, and the block would
+ *      be undone for a minute. A copy saved under an old version is never read
+ *      again, whoever saved it and whenever.
+ *   2. A MISS is never proof of absence. `findUser_` re-reads the Sheet before
+ *      concluding somebody is new, so a person added by hand in the last
+ *      minute is found rather than registered a second time.
+ *   3. The admin Users screen does not use this at all; it reads the Sheet
+ *      fresh, so it always shows the true state.
+ *
+ * The one real limit: a role edited BY HAND in the Sheet, bypassing the app,
+ * can take up to USERS_CACHE_TTL_S to apply. Through the app it is instant.
+ */
+var USERS_CACHE_KEY = 'users:auth';
+var USERS_CACHE_TTL_S = 60;
+var USERS_VERSION_KEY = 'USERS_VERSION';
+
+function usersVersion_() {
+  return Number(PropertiesService.getScriptProperties().getProperty(USERS_VERSION_KEY) || 0);
+}
+
+/**
+ * The Users rows, from the cache unless `fresh`. The version is read BEFORE the
+ * rows, so whatever is saved under it is at least as new as that version.
+ */
+/** The Users version this execution's memo was read under. Per execution, never shared. */
+var USERS_MEMO_VERSION_ = null;
+
+function usersForAuth_(fresh) {
+  var key = null;
+  var version = null;
+  try {
+    version = usersVersion_();
+    key = USERS_CACHE_KEY + ':v' + version;
+    if (!fresh) {
+      var hit = CacheService.getScriptCache().get(key);
+      if (hit) return JSON.parse(hit);
+    }
+  } catch (e) {
+    // A cache that cannot be read means reading the Sheet, as before.
+  }
+  // This request's memo only if it is at least as new as the version just
+  // read. Sign-in looks users up twice (the owner, then the person); a block
+  // landing between the two would otherwise be saved under the NEW version
+  // from rows read BEFORE it, and undone for a minute. Dropping the memo on
+  // every miss fixed that but doubled the Sheet reads whenever the cache
+  // cannot store its copy, so it is dropped only when it is actually older.
+  if (fresh || !key || USERS_MEMO_VERSION_ !== version) invalidateRead_(TAB_USERS);
+  var rows = usersAll_();
+  USERS_MEMO_VERSION_ = key ? version : null;
+  if (key) {
+    try {
+      CacheService.getScriptCache().put(key, JSON.stringify(rows), USERS_CACHE_TTL_S);
+    } catch (e) {
+      // Too large or unavailable: correct, just not faster.
+    }
+  }
+  return rows;
+}
+
+/**
+ * Retire the cached Users tab. Called, through `tabChanged_`, by everything
+ * that changes who may do what. Flushes first: a role written with setValue
+ * can still be sitting in the write buffer, and a reader that misses the new
+ * version must find the new role in the Sheet, not the old one.
+ */
+function invalidateUsersCache_() {
+  try {
+    SpreadsheetApp.flush();
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty(USERS_VERSION_KEY, String(Number(props.getProperty(USERS_VERSION_KEY) || 0) + 1));
+  } catch (e) {
+    // Best effort: the old copy still expires within USERS_CACHE_TTL_S.
+  }
+}
+
+function findIn_(rows, email) {
   var target = String(email || '').toLowerCase();
-  return usersAll_().filter(function (u) {
+  return rows.filter(function (u) {
     return String(u.email).toLowerCase() === target;
   })[0] || null;
+}
+
+function findUser_(email) {
+  var hit = findIn_(usersForAuth_(), email);
+  if (hit) return hit;
+  // Not in the cached copy is not the same as not in the Sheet: they may have
+  // been added by hand a moment ago. Only a fresh read may say "new".
+  return findIn_(usersForAuth_(true), email);
+}
+
+/**
+ * Add somebody to the Users tab exactly once.
+ *
+ * "Look, then append" was two steps with nothing between them, and two
+ * sign-ins for the same newcomer — which the app's hedged whoami now sends on
+ * a slow first sign-in — both looked, both saw nobody, and both appended. The
+ * second row could never be changed from the app, because setRole edits the
+ * first match. So the look is repeated under the lock, against a fresh read,
+ * and only then does anybody append. This is the first-sign-in path only; a
+ * known person never reaches it.
+ *
+ * @return {boolean} true if this call added the row
+ */
+function registerOnce_(email, row) {
+  return withScriptLock_(30000, function () {
+    if (findIn_(usersForAuth_(true), email)) return false;
+    appendRows_(TAB_USERS, [row]);
+    return true;
+  });
 }
 
 /** Seed the owner as admin, so there is always someone who can approve. */
 function ensureOwner_() {
   if (findUser_(OWNER_EMAIL)) return;
-  appendRows_(TAB_USERS, [[
+  registerOnce_(OWNER_EMAIL, [
     OWNER_EMAIL, 'Brien Chua', ROLE_ADMIN,
     new Date().toISOString(), '', 'system', 'Seeded owner'
-  ]]);
+  ]);
 }
 
 /**
@@ -1631,12 +1874,18 @@ function resolveUser_(identity) {
   var found = findUser_(identity.email);
 
   if (!found) {
-    appendRows_(TAB_USERS, [[
+    var added = registerOnce_(identity.email, [
       identity.email, identity.name, ROLE_PENDING,
       new Date().toISOString(), new Date().toISOString(), '', 'Awaiting approval'
-    ]]);
-    logEvent_(identity.email, 'first_sign_in', '', identity.name + ' — awaiting approval', 'pending');
-    return { email: identity.email, name: identity.name, role: ROLE_PENDING };
+    ]);
+    if (added) {
+      logEvent_(identity.email, 'first_sign_in', '', identity.name + ' — awaiting approval', 'pending');
+      return { email: identity.email, name: identity.name, role: ROLE_PENDING };
+    }
+    // Registered by a concurrent request a moment ago: use that row, whatever
+    // role it now holds, rather than assuming pending.
+    found = findUser_(identity.email);
+    if (!found) return { email: identity.email, name: identity.name, role: ROLE_PENDING };
   }
 
   touchLastSeen_(identity.email);
@@ -1647,13 +1896,40 @@ function resolveUser_(identity) {
   };
 }
 
+/** How long a "last seen" stays fresh before it is written again. */
+var LAST_SEEN_TTL_S = 3600;
+
 function touchLastSeen_(email) {
-  // Best effort: skipped rather than blocking a livestream push to record a
-  // timestamp. See Lock.gs for why this does not take the lock directly.
-  withScriptLockOptional_(5000, function () {
+  /**
+   * Once an hour per person, and never waiting for anyone.
+   *
+   * This ran on EVERY authenticated request — every push, every listing
+   * refresh, every stock change, every sign-in — and it waited up to FIVE
+   * SECONDS for the script lock (`withScriptLockOptional_(5000, ...)`). The
+   * script lock is held by every write and by the background sync every
+   * minute. So during a broadcast, one phone pushing a variation made every
+   * other request on every phone sit behind it for up to five seconds, purely
+   * to record a timestamp nobody reads while the stream is on.
+   *
+   * Now: a cache key says whether this person was recorded in the last hour.
+   * If so, nothing happens at all — no lock, no read, no write. If not, the
+   * lock is TRIED, not waited for; if another write holds it, this is skipped
+   * and tried again on the next request. A "last seen" that is an hour stale,
+   * or one request late, costs nothing. A five-second stall on air does.
+   */
+  var key = 'seen:' + String(email || '').toLowerCase();
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (cache.get(key)) return;
+  } catch (e) {
+    // No cache means paying for the write, not skipping it.
+  }
+
+  var recorded = withScriptLockOptional_(0, function () {
     var sh = sheet_(TAB_USERS);
     var last = sh.getLastRow();
-    if (last < 2) return;
+    if (last < 2) return false;
     var emails = sh.getRange(2, 1, last - 1, 1).getValues();
     var target = String(email).toLowerCase();
     for (var i = 0; i < emails.length; i++) {
@@ -1661,10 +1937,24 @@ function touchLastSeen_(email) {
         sh.getRange(i + 2, 5).setValue(new Date().toISOString());
         // Written outside Sheet.gs, so it clears the request read cache itself.
         invalidateRead_(TAB_USERS);
-        return;
+        return true;
       }
     }
+    return false;
   });
+
+  /**
+   * Remembered whenever the lock was obtained — row found or not.
+   *
+   * `withScriptLockOptional_` returns undefined ONLY when the lock was
+   * refused, so that is the one case retried. Caching only on a matched row
+   * meant a person absent from the Users tab — or an empty tab — tried the
+   * lock again on every single request, for ever: the stall this exists to
+   * remove, reintroduced by the guard meant to prevent it.
+   */
+  if (recorded !== undefined && cache) {
+    try { cache.put(key, '1', LAST_SEEN_TTL_S); } catch (e) { /* best effort */ }
+  }
 }
 
 /**
@@ -1987,7 +2277,16 @@ function cipherAllowed_(path) {
   return true;
 }
 
-function ttFetch_(prefix, method, path, extraQuery, payload) {
+/**
+ * A signed TikTok request, built but not sent.
+ *
+ * This is the body of what `ttFetch_` always did, moved rather than rewritten:
+ * the same query, the same stringify-once-then-sign, the same headers. It is
+ * separate only so several requests can be sent in ONE round trip by
+ * `ttFetchAll_` — a push used to make its TikTok calls one after another even
+ * where none depended on the others.
+ */
+function ttRequest_(prefix, method, path, extraQuery, payload) {
   var c = ttCreds_(prefix);
   var token = ttToken_(prefix);
   var cipher = prop_(prefix + '_SHOP_CIPHER');
@@ -2010,17 +2309,55 @@ function ttFetch_(prefix, method, path, extraQuery, payload) {
     opts.payload = bodyString;
   }
 
-  var url = TT_HOST + path + '?' + ttQuery_(query);
-  var res = UrlFetchApp.fetch(url, opts);
+  return { url: TT_HOST + path + '?' + ttQuery_(query), opts: opts };
+}
+
+/** Throttled: HTTP 429 or business code 36009002. */
+function ttThrottled_(res, parsed) {
+  return res.getResponseCode() === 429 || parsed.code === 36009002;
+}
+
+function ttFetch_(prefix, method, path, extraQuery, payload) {
+  var req = ttRequest_(prefix, method, path, extraQuery, payload);
+  var res = UrlFetchApp.fetch(req.url, req.opts);
   var parsed = ttParse_(res);
 
   // Throttling is HTTP 429 or business code 36009002. At three shops we sit
   // near one write per second, so one backoff is worth it.
-  if (res.getResponseCode() === 429 || parsed.code === 36009002) {
+  if (ttThrottled_(res, parsed)) {
     Utilities.sleep(5000);
-    parsed = ttParse_(UrlFetchApp.fetch(url, opts));
+    parsed = ttParse_(UrlFetchApp.fetch(req.url, req.opts));
   }
   return parsed;
+}
+
+/**
+ * Several independent TikTok calls, sent at once.
+ *
+ * A push made its calls strictly in sequence — upload the image, THEN read
+ * the product, THEN edit it — although the first two need nothing from each
+ * other. `UrlFetchApp.fetchAll` sends a batch in parallel and returns when all
+ * have answered, so two independent calls cost one round trip instead of two.
+ *
+ * Only for calls that truly do not depend on one another. Each answer is
+ * parsed exactly as `ttFetch_` would, and a throttled one is retried once on
+ * its own, as `ttFetch_` does. Returns the parsed answers in request order.
+ */
+function ttFetchAll_(requests) {
+  var batch = requests.map(function (r) {
+    var one = { url: r.url };
+    Object.keys(r.opts).forEach(function (k) { one[k] = r.opts[k]; });
+    return one;
+  });
+  var responses = UrlFetchApp.fetchAll(batch);
+  return responses.map(function (res, i) {
+    var parsed = ttParse_(res);
+    if (ttThrottled_(res, parsed)) {
+      Utilities.sleep(5000);
+      parsed = ttParse_(UrlFetchApp.fetch(requests[i].url, requests[i].opts));
+    }
+    return parsed;
+  });
 }
 
 function ttParse_(res) {
@@ -2200,8 +2537,17 @@ function validateTitle_(title) {
  * So the same JPEG is uploaded twice on the SKU that creates a listing.
  */
 function ttUploadImage_(prefix, blob, useCase) {
-  var r = ttFetch_(prefix, 'post', '/product/202309/images/upload',
+  return ttImageFrom_(ttFetch_(prefix, 'post', '/product/202309/images/upload',
+    { use_case: useCase || 'MAIN_IMAGE' }, blob));
+}
+
+/** The image upload, built but not sent — so it can share a round trip. */
+function ttImageRequest_(prefix, blob, useCase) {
+  return ttRequest_(prefix, 'post', '/product/202309/images/upload',
     { use_case: useCase || 'MAIN_IMAGE' }, blob);
+}
+
+function ttImageFrom_(r) {
   if (r.code !== 0) throw fail_('TS-PRD-01', 'Image upload failed: ' + ttReason_(r));
   return r.data.uri;
 }
@@ -2385,10 +2731,22 @@ function ttGetProduct_(prefix, productId) {
  * Writes keep using the under-review version, which is the latest state and
  * what partial_edit rebuilds from.
  */
+/** The product read, built but not sent — so it can share a round trip. */
+function ttProductRequest_(prefix, productId, underReview) {
+  return ttRequest_(prefix, 'get', '/product/202309/products/' + productId,
+    { category_version: CATEGORY_VERSION,
+      return_under_review_version: underReview ? 'true' : 'false' }, null);
+}
+
 function ttGetProductVersion_(prefix, productId, underReview) {
   var r = ttFetch_(prefix, 'get', '/product/202309/products/' + productId,
     { category_version: CATEGORY_VERSION,
       return_under_review_version: underReview ? 'true' : 'false' }, null);
+  return ttProductFrom_(r, productId);
+}
+
+/** A product read's answer, as the rest of the app reads a product. */
+function ttProductFrom_(r, productId) {
   if (r.code !== 0 || !r.data) {
     throw fail_('TS-PRD-02', 'Could not read the listing: ' + ttReason_(r));
   }
@@ -2678,6 +3036,43 @@ function bySellerSku_(skus) {
   return out;
 }
 
+/**
+ * Both versions of a product, in ONE round trip.
+ *
+ * `listingState` read the version under review, waited for it, then read the
+ * live one — two TikTok calls in a row on every listing tap and every refresh
+ * after a push, though neither needs the other. They now go out together.
+ *
+ * Failures behave exactly as they did one at a time: the version under review
+ * must be readable (TS-PRD-02 if not), and the live one may be missing — a
+ * product never yet approved has none, which is an answer, not an error. A
+ * batch that fails outright (a network error fails every request in it) falls
+ * back to asking one at a time, which is the old path unchanged.
+ */
+function productVersions_(prefix, productId) {
+  var answers = null;
+  try {
+    answers = ttFetchAll_([
+      ttProductRequest_(prefix, productId, true),
+      ttProductRequest_(prefix, productId, false)
+    ]);
+  } catch (e) {
+    answers = null;
+  }
+  var pending = answers
+    ? ttProductFrom_(answers[0], productId)
+    : ttGetProductVersion_(prefix, productId, true);
+  var buyable = null;
+  try {
+    buyable = answers
+      ? ttProductFrom_(answers[1], productId)
+      : ttGetProductVersion_(prefix, productId, false);
+  } catch (e) {
+    warn_('TS-PRD-33', 'No live version for ' + productId + ' (nothing buyable yet): ' + e);
+  }
+  return { pending: pending, buyable: buyable };
+}
+
 function listingState_(listingId) {
   /**
    * Read once.
@@ -2715,13 +3110,9 @@ function listingState_(listingId) {
    * ("nothing is buyable yet"), not an error worth failing the whole screen
    * over.
    */
-  var live = ttGetProductVersion_(shopId, String(listingId), true);
-  var buyable = null;
-  try {
-    buyable = ttGetProductVersion_(shopId, String(listingId), false);
-  } catch (e) {
-    warn_('TS-PRD-33', 'No live version for ' + listingId + ' (nothing buyable yet): ' + e);
-  }
+  var versions = productVersions_(shopId, String(listingId));
+  var live = versions.pending;
+  var buyable = versions.buyable;
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
   var pendingSkus = bySellerSku_(live.skus);
 
@@ -3543,6 +3934,8 @@ function pushSku_(body, user) {
     var photoUrl = '';
     var imageUri = body.tiktok_image_uri || '';
     var attributeImageUri = body.tiktok_attribute_image_uri || '';
+    /** The product, when it was read alongside the image upload. */
+    var prefetchedSnapshot = null;
     if (body.photo_base64) {
       // Optional on purpose: a Drive wobble must never stop a product going
       // live. See savePhotoOptional_ — WX11 and WX12, 16 Sep.
@@ -3555,16 +3948,33 @@ function pushSku_(body, user) {
       body.photo_thumb_url = body.thumb_base64
         ? savePhotoOptional_(prefix, body.identifier + ' - thumb', body.thumb_base64, 'image/jpeg', user.name)
         : '';
-      var blob = Utilities.newBlob(
-        Utilities.base64Decode(body.photo_base64),
-        body.photo_mime || 'image/jpeg', 'product.jpg'
-      );
-      // Only the SKU that creates a listing needs a MAIN_IMAGE; every other
-      // one is a variation and needs only the attribute image. Uploading just
-      // what is needed halves the calls on the common path.
-      attributeImageUri = ttUploadImage_(prefix, blob, 'ATTRIBUTE_IMAGE');
-      if (!body.listing_id) imageUri = ttUploadImage_(prefix, blob, 'MAIN_IMAGE');
-      else if (!imageUri) imageUri = attributeImageUri;
+      var photoBytes = Utilities.base64Decode(body.photo_base64);
+      var photoMime = body.photo_mime || 'image/jpeg';
+      var blob = Utilities.newBlob(photoBytes, photoMime, 'product.jpg');
+      /**
+       * Independent TikTok calls go out together, in one round trip.
+       *
+       * The push made them strictly in sequence — upload the image, THEN
+       * read the product, THEN edit it — though the first two need nothing
+       * from each other. They are now sent as one parallel batch, and only
+       * the edit, which needs both answers, waits.
+       *
+       * Errors surface exactly as before: the image answer is read first, so
+       * a failed upload still reports TS-PRD-01, and a failed read TS-PRD-02.
+       *
+       * Only the SKU that creates a listing needs a MAIN_IMAGE; every other
+       * one is a variation and needs only the attribute image.
+       */
+      if (body.listing_id) {
+        var appended = appendAssets_(prefix, blob, String(body.listing_id));
+        attributeImageUri = appended.attributeImageUri;
+        prefetchedSnapshot = appended.snapshot;
+        if (!imageUri) imageUri = attributeImageUri;
+      } else {
+        var fresh = newListingAssets_(prefix, photoBytes, photoMime);
+        attributeImageUri = fresh.attributeImageUri;
+        imageUri = fresh.imageUri;
+      }
     }
 
     var addition = {
@@ -3576,15 +3986,43 @@ function pushSku_(body, user) {
     };
 
     return body.listing_id
-      ? addVariation_(body, user, prefix, shop, addition, photoUrl)
+      ? addVariation_(body, user, prefix, shop, addition, photoUrl, prefetchedSnapshot)
       : startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl);
   }
 }
 
+/**
+ * What an append needs from TikTok before it can edit: the uploaded image,
+ * and the product as it stands. One round trip for both.
+ */
+function appendAssets_(prefix, blob, listingId) {
+  var both = ttFetchAll_([
+    ttImageRequest_(prefix, blob, 'ATTRIBUTE_IMAGE'),
+    ttProductRequest_(prefix, listingId, true)
+  ]);
+  // Image first, so a failed upload still reports TS-PRD-01 as it always did.
+  var attributeImageUri = ttImageFrom_(both[0]);
+  return { attributeImageUri: attributeImageUri, snapshot: ttProductFrom_(both[1], listingId) };
+}
+
+/**
+ * A new listing uploads the photo twice, for two uses. One round trip for both,
+ * and two blobs so the parallel requests never share one.
+ */
+function newListingAssets_(prefix, photoBytes, photoMime) {
+  var ups = ttFetchAll_([
+    ttImageRequest_(prefix, Utilities.newBlob(photoBytes, photoMime, 'product.jpg'), 'ATTRIBUTE_IMAGE'),
+    ttImageRequest_(prefix, Utilities.newBlob(photoBytes, photoMime, 'product.jpg'), 'MAIN_IMAGE')
+  ]);
+  return { attributeImageUri: ttImageFrom_(ups[0]), imageUri: ttImageFrom_(ups[1]) };
+}
+
 /** Add a variation to the listing this stream is already using. */
-function addVariation_(body, user, prefix, shop, addition, photoUrl) {
+function addVariation_(body, user, prefix, shop, addition, photoUrl, prefetched) {
   var listingId = String(body.listing_id);
-  var snapshot = ttGetProduct_(prefix, listingId);
+  // Already read in parallel with the image upload when a photo came with the
+  // push; read here only when it did not.
+  var snapshot = prefetched || ttGetProduct_(prefix, listingId);
 
   /**
    * Has this identifier already been added?
@@ -6385,10 +6823,63 @@ function datedExportFolder_(date) {
 }
 
 /** Product Photos/YYYY-MM-DD/{shop}, created as needed. */
+/**
+ * Where a shop's photos go today, found once rather than on every save.
+ *
+ * Finding it took three Drive round trips — open the Photos root, search for
+ * today's folder by name, search for the shop's folder inside it — and a push
+ * saves TWO files there (the photo and its thumbnail), so it searched for the
+ * same folder twice. Roughly eight Drive calls a push, in a row, before TikTok
+ * was contacted at all.
+ *
+ * "Painting Matters, 23 Sep" does not move, so its id is kept: for the rest of
+ * this execution in memory, and across executions in the script cache for six
+ * hours. A later push opens the folder by id — one call — and the thumbnail
+ * that follows reuses it for none.
+ *
+ * If the remembered folder has been permanently deleted, opening it fails and
+ * it is looked up again, so a stale id costs one retry, never a lost photo. A
+ * folder MOVED or renamed keeps its id and keeps receiving that day's photos
+ * wherever it now is — the file is still saved and its link still works.
+ *
+ * The key names the Photos root as well as the shop and the day. The cache
+ * outlives a re-paste, so without the root a changed PHOTOS_FOLDER_ID would
+ * go on filing under the old tree for the rest of the day while the app's
+ * Photos link pointed at the new one.
+ * Folder creation stays inside the push lock (pushSku is a write action), so
+ * two phones cannot race to create the same day's folder.
+ */
+var PHOTO_FOLDER_TTL_S = 6 * 3600;
+var PHOTO_FOLDER_MEMO_ = {};
+
 function datedPhotoFolder_(shopId, date) {
+  var day = sgtDate_(date);
+  var key = 'photofolder:' + PHOTOS_FOLDER_ID + ':' + shopId + ':' + day;
+  if (PHOTO_FOLDER_MEMO_[key]) return PHOTO_FOLDER_MEMO_[key];
+
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var id = cache.get(key);
+    if (id) {
+      try {
+        var known = DriveApp.getFolderById(id);
+        PHOTO_FOLDER_MEMO_[key] = known;
+        return known;
+      } catch (e) {
+        // Deleted or moved since it was remembered. Look it up again below.
+      }
+    }
+  } catch (e) {
+    // No cache: resolve it the long way, which is always correct.
+  }
+
   var root = DriveApp.getFolderById(PHOTOS_FOLDER_ID);
-  var day = childFolder_(root, sgtDate_(date));
-  return childFolder_(day, shopId);
+  var dayFolder = childFolder_(root, day);
+  var shopFolder = childFolder_(dayFolder, shopId);
+  PHOTO_FOLDER_MEMO_[key] = shopFolder;
+  try { if (cache) cache.put(key, shopFolder.getId(), PHOTO_FOLDER_TTL_S); } catch (e) { /* best effort */ }
+  return shopFolder;
 }
 
 /**
@@ -7210,7 +7701,11 @@ function handle_(e, method) {
         // app, so a folder can be moved without a redeploy — and so the
         // "Data sheet" row in the app opens the real thing instead of a
         // guess at its URL.
-        links: driveLinks_()
+        links: driveLinks_(),
+        // The shop list rides along for anyone allowed to see it, so a first
+        // sign-in is one round trip rather than whoami THEN shops. The same
+        // rule as the `shops` action: approved people only.
+        shops: canList_(user) ? shopsForClient_() : undefined
       });
     }
 
@@ -7469,7 +7964,7 @@ function route_(action, params, body, user) {
       ));
 
     case 'users':
-      if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
+      if (!isAdminNow_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(usersForClient_());
 
     /**
@@ -7489,7 +7984,7 @@ function route_(action, params, body, user) {
      * admin role gets past the line above.
      */
     case 'setRole':
-      if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
+      if (!isAdminNow_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(setRole_(params.email || body.email, params.role || body.role, user));
 
     default:
@@ -7527,6 +8022,20 @@ function shopsForClient_() {
   });
 }
 
+/**
+ * Is this person an admin according to the Sheet as it is NOW?
+ *
+ * Sign-in reads roles from a copy up to a minute old (usersForAuth_), which
+ * is fine for listing and wrong for granting power. A demoted admin acting
+ * inside that minute could call setRole on themselves — and setRole writes
+ * the Sheet, so the reversal would be permanent — or block everyone else.
+ * The two admin actions are rare, so they pay for a fresh read.
+ */
+function isAdminNow_(user) {
+  var fresh = findIn_(usersForAuth_(true), user && user.email);
+  return isAdmin_(fresh);
+}
+
 /** Change someone's role. Admins only, and the owner cannot be demoted. */
 function setRole_(email, role, actor) {
   var target = String(email || '').trim().toLowerCase();
@@ -7552,8 +8061,10 @@ function setRole_(email, role, actor) {
     if (String(sh.getRange(i, 1).getValue()).toLowerCase() === target) {
       sh.getRange(i, 3).setValue(role);
       sh.getRange(i, 6).setValue(actor.email);
-      // Written outside Sheet.gs, so it clears the request read cache itself.
-      invalidateRead_(TAB_USERS);
+      // Written outside Sheet.gs, so it retires every cache over the tab
+      // itself — including sign-in's cross-request copy, so a block or an
+      // approval takes effect on the very next request, not a minute later.
+      tabChanged_(TAB_USERS);
       logEvent_(actor.name, 'set_role', '', target + ' -> ' + role, 'ok');
       return { email: target, role: role };
     }
@@ -7573,4 +8084,4 @@ function json_(obj, status) {
 // ======================================================= build stamp
 
 /** Which paste is running. Served by `ping` and printed by checkSetup. */
-var BACKEND_BUILD = 'e1ebe90 2026-09-23';
+var BACKEND_BUILD = '13c953f 2026-09-23';

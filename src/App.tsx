@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { ApiError, api, SignedOutMeanwhile } from './lib/api'
+import { ApiError, api, SignedOutMeanwhile, type Me } from './lib/api'
 import { getSessionToken, hasCredential, hasLiveSession, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetBoot, readBoot, rememberMe, rememberShops } from './lib/boot-cache'
 import { forgetAccount } from './auth/google'
@@ -270,6 +270,18 @@ export default function App() {
     void forgetAccount()
   }
 
+  /**
+   * Signed in on the sign-in screen: remember them now, as a reopen would.
+   *
+   * Only the startup check used to remember anybody, so after a real sign-in
+   * the NEXT open still waited the full round trip — every morning, and after
+   * every hand-over on a shared phone. Only the open after that was fast.
+   */
+  const signedIn = useCallback((me: Me) => {
+    rememberMe(getSessionToken(), me)
+    setUser(me)
+  }, [])
+
   if (checkingSession) {
     return (
       <div className="min-h-screen flex items-center justify-center text-faint text-sm">
@@ -278,7 +290,7 @@ export default function App() {
     )
   }
 
-  if (!user) return <SignIn onSignedIn={setUser} />
+  if (!user) return <SignIn onSignedIn={signedIn} />
 
   const shop = shops.find((s) => s.shop_id === shopId) ?? null
 

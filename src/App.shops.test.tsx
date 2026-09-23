@@ -40,7 +40,8 @@ vi.mock('./lib/script-api', async (orig) => {
 vi.mock('./auth/google', () => ({ forgetAccount: () => Promise.resolve() }))
 vi.mock('./lib/pwa', () => ({ useAppUpdate: () => ({ available: false, apply: () => {} }) }))
 vi.mock('./offline/queue', () => ({ allDrafts: async () => [], pendingCount: () => 0, reviveOrphanedUploads: async () => 0 }))
-vi.mock('./auth/SignIn', () => ({ default: () => <div>SIGNIN</div> }))
+let signInCb: ((me: unknown) => void) | null = null
+vi.mock('./auth/SignIn', () => ({ default: (p: { onSignedIn: (me: unknown) => void }) => { signInCb = p.onSignedIn; return <div>SIGNIN</div> } }))
 let liveProps: { shop?: { shop_id: string } } | null = null
 vi.mock('./live-listing/LiveListing', () => ({ default: (p: { shop?: { shop_id: string } }) => { liveProps = p; return <div>LIVE</div> } }))
 vi.mock('./orders/Orders', () => ({ default: () => <div>ORDERS</div> }))
@@ -81,6 +82,22 @@ describe('shops on a first sign-in', () => {
     const el = await boot()
     expect(el.textContent).toContain('LIVE')
     expect(calls).toEqual(['whoami', 'shops'])
+  })
+
+  it('a sign-in on the sign-in screen is remembered, so the next open is instant', async () => {
+    // Only the startup check remembered anybody, so the first reopen after a
+    // real sign-in still waited the whole round trip.
+    setSessionToken(null)
+    const el = await boot()
+    expect(el.textContent).toContain('SIGNIN')
+    const me = {
+      email: 'a@x.com', name: 'A', picture: null, role: 'lister', approved: true, admin: false, shops: SHOPS,
+    }
+    setSessionToken(tok('a@x.com'))              // what SignIn's own whoami did
+    await act(async () => { signInCb!(me) })
+    const saved = JSON.parse(localStorage.getItem('tikshop.boot') ?? 'null')
+    expect(saved?.me?.email).toBe('a@x.com')
+    expect(saved?.shops?.[0]?.shop_id).toBe('HZ')
   })
 
   it('remembers them once, not inside the person as well', async () => {

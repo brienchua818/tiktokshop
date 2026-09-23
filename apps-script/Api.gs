@@ -453,7 +453,7 @@ function route_(action, params, body, user) {
       ));
 
     case 'users':
-      if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
+      if (!isAdminNow_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(usersForClient_());
 
     /**
@@ -473,7 +473,7 @@ function route_(action, params, body, user) {
      * admin role gets past the line above.
      */
     case 'setRole':
-      if (!isAdmin_(user)) return json_({ error: 'Admins only.' }, 403);
+      if (!isAdminNow_(user)) return json_({ error: 'Admins only.' }, 403);
       return json_(setRole_(params.email || body.email, params.role || body.role, user));
 
     default:
@@ -509,6 +509,20 @@ function shopsForClient_() {
       daily_listing_cap: Number(prop_(s.id + '_DAILY_CAP') || 1000)
     };
   });
+}
+
+/**
+ * Is this person an admin according to the Sheet as it is NOW?
+ *
+ * Sign-in reads roles from a copy up to a minute old (usersForAuth_), which
+ * is fine for listing and wrong for granting power. A demoted admin acting
+ * inside that minute could call setRole on themselves — and setRole writes
+ * the Sheet, so the reversal would be permanent — or block everyone else.
+ * The two admin actions are rare, so they pay for a fresh read.
+ */
+function isAdminNow_(user) {
+  var fresh = findIn_(usersForAuth_(true), user && user.email);
+  return isAdmin_(fresh);
 }
 
 /** Change someone's role. Admins only, and the owner cannot be demoted. */

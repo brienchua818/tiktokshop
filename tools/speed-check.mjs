@@ -129,13 +129,22 @@ async function timeToUsable({ remembered, spike = false, shopsWithWhoami = false
  * deleted — every real phone would have waited forty seconds on every launch
  * while this said "clean". Found by the speed review, 23 Sep.
  */
+let issued = 0
+function freshSession(n) {
+  const body = Buffer.from(JSON.stringify({ e: 'brienchua@sheldonglobal.com', n: 'Brien Chua', x: Date.now() + 12 * 3600_000, i: n })).toString('base64url')
+  return `${body}.stub${n}`
+}
+
 async function roundTrip() {
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true })
   let slow = false
   await context.route('**script.google.com/**', async (route) => {
     const action = new URL(route.request().url()).searchParams.get('action') ?? ''
     if (slow && SLOW.has(action)) await new Promise((r) => setTimeout(r, SLOW_MS))
-    const body = REPLIES[action]
+    // The real backend issues a NEW session on every whoami, so the memory
+    // must follow it to the new token; answering with the same one would not
+    // test that.
+    const body = action === 'whoami' ? { ...REPLIES.whoami, session_token: freshSession(++issued) } : REPLIES[action]
     await route.fulfill({
       status: 200, contentType: 'application/json',
       body: JSON.stringify(body === undefined ? { _status: 200 } : body),

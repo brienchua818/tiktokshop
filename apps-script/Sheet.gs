@@ -538,9 +538,8 @@ function listSkusFromSheet_(listingId) {
   });
 }
 
-/** Already-pushed SKUs today, for the daily allowance figure. */
 /**
- * How many products this shop pushed today, Singapore time.
+ * How many products this shop created today, Singapore time.
  *
  * It compared `String(r.pushed_at)` against today's date, and that could not
  * work twice over. `pushed_at` is written as a UTC ISO string, and Sheets turns
@@ -572,11 +571,33 @@ function pushedToday_(shopId) {
     // No cache: count it, as before.
   }
 
-  var n = readAll_(TAB_SKUS).filter(function (r) {
-    if (String(r.shop_id) !== String(shopId) || String(r.status) !== 'pushed') return false;
-    var iso = isoOf_(r.pushed_at);
-    if (!iso) return false;
-    return Utilities.formatDate(new Date(iso), 'Asia/Singapore', 'yyyy-MM-dd') === today;
+  /**
+   * Products CREATED today, not variation rows.
+   *
+   * Every variation appended to a listing writes its own row, so counting rows
+   * counted a 100-variation stream on one product as 100 "uploads" — and at a
+   * probation cap of 100 the listing screen would announce that further
+   * pushes will be rejected while they were still succeeding. TikTok's
+   * wording is "product listings per day" (error 12052093); whether a
+   * variation added by partial edit counts is not stated anywhere we have
+   * found, so this counts what the words say and never raises a false alarm.
+   * If TikTok does count variations, its own refusal still names the cap.
+   *
+   * A product counts on the day its first row was pushed. A row since marked
+   * removed still counts: an upload spent is not refunded.
+   */
+  var firstPush = {};
+  readAll_(TAB_SKUS).forEach(function (r) {
+    if (String(r.shop_id) !== String(shopId)) return;
+    var st = String(r.status);
+    if (st !== 'pushed' && st !== 'removed') return;
+    var at = Date.parse(isoOf_(r.pushed_at));
+    if (isNaN(at)) return;
+    var id = String(r.listing_id || r.tiktok_product_id || '');
+    if (!(id in firstPush) || at < firstPush[id]) firstPush[id] = at;
+  });
+  var n = Object.keys(firstPush).filter(function (id) {
+    return Utilities.formatDate(new Date(firstPush[id]), 'Asia/Singapore', 'yyyy-MM-dd') === today;
   }).length;
 
   try { if (cache) cache.put(key, String(n), 300); } catch (e) { /* best effort */ }

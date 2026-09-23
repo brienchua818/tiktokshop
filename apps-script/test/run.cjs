@@ -89,6 +89,11 @@ const sandbox = `
     }
   };
   var DriveApp = {}, Session = {};
+  // Just enough for route_ to answer: the JSON it would have sent.
+  var ContentService = {
+    MimeType: { JSON: 'json' },
+    createTextOutput: function (t) { return { text: t, setMimeType: function () { return this } } }
+  };
   // A cache with the shapes the real one has: getAll/putAll, and the ability
   // for a test to evict a chunk, which is the case that must read as a miss.
   var CacheService = { getScriptCache: function () {
@@ -143,7 +148,7 @@ ${src}
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     withVariantImages_, touchLastSeen_, LAST_SEEN_TTL_S,
     findUser_, usersForAuth_, invalidateUsersCache_, USERS_CACHE_TTL_S, usersVersion_,
-    setRole_, resolveUser_, registerOnce_, tabChanged_, usersAll_,
+    setRole_, resolveUser_, registerOnce_, tabChanged_, usersAll_, route_, isAdminNow_,
     __sheetReal: sheet_, __spreadsheetApp: SpreadsheetApp,
     __setPhotosRoot: function (id) { PHOTOS_FOLDER_ID = id },
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
@@ -3522,6 +3527,38 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     gs.__spreadsheetApp.flush = () => {}
   })
 
+  check('a demoted admin cannot use the minute-old copy to promote themselves back', () => {
+    // Demoted by hand in the Sheet; sign-in's copy still says admin. setRole
+    // writes the Sheet, so without a fresh check the reversal is permanent.
+    installUsers()
+    gs.__setSheetImpl(bufferedUsersSheet)
+    gs.__spreadsheetApp.flush = flushUsers
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('rogue@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    eq(gs.findUser_('rogue@sheldonglobal.com').role, 'admin')        // cached as admin
+    userRows[1][2] = 'lister'                                          // Brien's hand edit
+    freshRequest()
+    const stale = gs.findUser_('rogue@sheldonglobal.com')
+    eq(stale.role, 'admin', 'the premise: sign-in still sees the old role')
+    const rogue = { email: 'rogue@sheldonglobal.com', name: 'rogue', role: stale.role }
+    const self = JSON.parse(gs.route_('setRole', {}, { email: 'rogue@sheldonglobal.com', role: 'admin' }, rogue).text)
+    const other = JSON.parse(gs.route_('setRole', {}, { email: 'anthea@sheldonglobal.com', role: 'blocked' }, rogue).text)
+    const list = JSON.parse(gs.route_('users', {}, {}, rogue).text)
+    eq([self._status, other._status, list._status], [403, 403, 403])
+    eq(userRows.map((r) => r[2]), ['admin', 'lister', 'lister'], 'nothing was written')
+    gs.__spreadsheetApp.flush = () => {}
+  })
+
+  check('a real admin can still change roles', () => {
+    installUsers()
+    gs.__setSheetImpl(bufferedUsersSheet)
+    gs.__spreadsheetApp.flush = flushUsers
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    const brien = { email: 'brienchua@sheldonglobal.com', name: 'Brien', role: 'admin' }
+    const r = JSON.parse(gs.route_('setRole', {}, { email: 'anthea@sheldonglobal.com', role: 'blocked' }, brien).text)
+    eq(r.role, 'blocked')
+    gs.__spreadsheetApp.flush = () => {}
+  })
+
   check('two first sign-ins for the same newcomer register them once', () => {
     // The hedged whoami sends a second request on a slow first sign-in. Both
     // used to look, both see nobody, and both append — a second row setRole
@@ -4104,7 +4141,7 @@ console.log('\nthe daily upload count sees every push made today')
       setValues: () => {}, setValue: () => {}, setFontWeight() { return this },
     }),
   })
-  const SKU_COLS = ['shop_id', 'status', 'pushed_at']
+  const SKU_COLS = ['shop_id', 'listing_id', 'status', 'pushed_at']
   const count = (fn) => {
     const realNow = Date.now
     const RealDate = Date
@@ -4146,6 +4183,30 @@ console.log('\nthe daily upload count sees every push made today')
     eq(count(() => gs.pushedToday_('PM')), 1)
   })
 
+  check('a stream of variations on one product is one upload, not one each', () => {
+    // Counting rows would announce "further pushes will be rejected" at a
+    // probation cap of 100 while pushes were still going through.
+    rows = [1, 2, 3, 4, 5].map((n) => ({ shop_id: 'PM', listing_id: 'P1', status: 'pushed', pushed_at: '2026-09-23T0' + n + ':00:00.000Z' }))
+    eq(count(() => gs.pushedToday_('PM')), 1)
+  })
+
+  check('variations added today to a product created yesterday are not an upload today', () => {
+    rows = [
+      { shop_id: 'PM', listing_id: 'P1', status: 'pushed', pushed_at: '2026-09-22T05:00:00.000Z' },
+      { shop_id: 'PM', listing_id: 'P1', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' },
+    ]
+    eq(count(() => gs.pushedToday_('PM')), 0)
+  })
+
+  check('a product whose first variation was later removed still counts', () => {
+    // An upload spent is not refunded.
+    rows = [
+      { shop_id: 'PM', listing_id: 'P1', status: 'removed', pushed_at: '2026-09-23T02:00:00.000Z' },
+      { shop_id: 'PM', listing_id: 'P2', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' },
+    ]
+    eq(count(() => gs.pushedToday_('PM')), 2)
+  })
+
   check('the count is not recomputed from the whole tab on every open', () => {
     rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' }]
     count(() => {
@@ -4158,10 +4219,10 @@ console.log('\nthe daily upload count sees every push made today')
   })
 
   check('any push starts a fresh count, so the cache is never behind a write', () => {
-    rows = [{ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' }]
+    rows = [{ shop_id: 'PM', listing_id: 'P1', status: 'pushed', pushed_at: '2026-09-23T03:00:00.000Z' }]
     count(() => {
       eq(gs.pushedToday_('PM'), 1)
-      rows.push({ shop_id: 'PM', status: 'pushed', pushed_at: '2026-09-23T04:00:00.000Z' })
+      rows.push({ shop_id: 'PM', listing_id: 'P2', status: 'pushed', pushed_at: '2026-09-23T04:00:00.000Z' })
       gs.bumpSkuVersion_()          // what every SKU write does
       gs.invalidateRead_()
       eq(gs.pushedToday_('PM'), 2)

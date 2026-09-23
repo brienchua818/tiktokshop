@@ -78,7 +78,10 @@ function withScriptLockOptional_(timeoutMs, fn) {
   if (HELD_) return fn();
 
   var lock = LockService.getScriptLock();
-  if (!lock.tryLock(timeoutMs || 5000)) return undefined;
+  // `== null`, not `||`: zero means "do not wait at all", and `0 || 5000` is
+  // 5000. Written that way first, it silently turned every no-wait caller into
+  // a five-second wait — the exact stall the zero was there to prevent.
+  if (!lock.tryLock(timeoutMs == null ? 5000 : timeoutMs)) return undefined;
 
   HELD_ = true;
   try {

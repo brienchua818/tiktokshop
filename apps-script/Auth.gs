@@ -251,13 +251,40 @@ function resolveUser_(identity) {
   };
 }
 
+/** How long a "last seen" stays fresh before it is written again. */
+var LAST_SEEN_TTL_S = 3600;
+
 function touchLastSeen_(email) {
-  // Best effort: skipped rather than blocking a livestream push to record a
-  // timestamp. See Lock.gs for why this does not take the lock directly.
-  withScriptLockOptional_(5000, function () {
+  /**
+   * Once an hour per person, and never waiting for anyone.
+   *
+   * This ran on EVERY authenticated request — every push, every listing
+   * refresh, every stock change, every sign-in — and it waited up to FIVE
+   * SECONDS for the script lock (`withScriptLockOptional_(5000, ...)`). The
+   * script lock is held by every write and by the background sync every
+   * minute. So during a broadcast, one phone pushing a variation made every
+   * other request on every phone sit behind it for up to five seconds, purely
+   * to record a timestamp nobody reads while the stream is on.
+   *
+   * Now: a cache key says whether this person was recorded in the last hour.
+   * If so, nothing happens at all — no lock, no read, no write. If not, the
+   * lock is TRIED, not waited for; if another write holds it, this is skipped
+   * and tried again on the next request. A "last seen" that is an hour stale,
+   * or one request late, costs nothing. A five-second stall on air does.
+   */
+  var key = 'seen:' + String(email || '').toLowerCase();
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    if (cache.get(key)) return;
+  } catch (e) {
+    // No cache means paying for the write, not skipping it.
+  }
+
+  var recorded = withScriptLockOptional_(0, function () {
     var sh = sheet_(TAB_USERS);
     var last = sh.getLastRow();
-    if (last < 2) return;
+    if (last < 2) return false;
     var emails = sh.getRange(2, 1, last - 1, 1).getValues();
     var target = String(email).toLowerCase();
     for (var i = 0; i < emails.length; i++) {
@@ -265,10 +292,24 @@ function touchLastSeen_(email) {
         sh.getRange(i + 2, 5).setValue(new Date().toISOString());
         // Written outside Sheet.gs, so it clears the request read cache itself.
         invalidateRead_(TAB_USERS);
-        return;
+        return true;
       }
     }
+    return false;
   });
+
+  /**
+   * Remembered whenever the lock was obtained — row found or not.
+   *
+   * `withScriptLockOptional_` returns undefined ONLY when the lock was
+   * refused, so that is the one case retried. Caching only on a matched row
+   * meant a person absent from the Users tab — or an empty tab — tried the
+   * lock again on every single request, for ever: the stall this exists to
+   * remove, reintroduced by the guard meant to prevent it.
+   */
+  if (recorded !== undefined && cache) {
+    try { cache.put(key, '1', LAST_SEEN_TTL_S); } catch (e) { /* best effort */ }
+  }
 }
 
 /**

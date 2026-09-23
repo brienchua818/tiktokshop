@@ -31,7 +31,7 @@ const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\
 
 // Apps Script globals. Stubbed only as far as the loaded functions touch them;
 // a test that needs more should stub more rather than reach for the real thing.
-const lockState = { held: false, refused: false, acquisitions: 0 }
+const lockState = { held: false, refused: false, acquisitions: 0, waits: [] }
 const cacheState = { store: {} }
 const sandbox = `
   var SpreadsheetApp = { flush: function () {} };
@@ -106,7 +106,8 @@ const sandbox = `
   } };
   var LockService = { getScriptLock: function () {
     return {
-      tryLock: function () {
+      tryLock: function (ms) {
+        LOCK_STATE.waits.push(ms)
         LOCK_STATE.acquisitions++
         if (LOCK_STATE.refused) return false
         LOCK_STATE.held = true
@@ -133,7 +134,7 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
-    withVariantImages_,
+    withVariantImages_, touchLastSeen_, LAST_SEEN_TTL_S,
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
     summaryHeader_, summaryRow_, summaryTotalRow_, summaryOrderCount_,
@@ -3321,6 +3322,63 @@ check('it reports which variations it filled, for the log', () => {
   eq(gs.withVariantImages_(skus, SNAP_IMG, 'P'), ['test 1', 'B2'])
   eq(skus[1].sales_attributes[0].sku_img.uri, 'has-one', 'the one that had a photo is untouched')
 })
+
+
+
+// ---------------------------------------------------------------------------
+// "Last seen" must never make anybody wait.
+//
+// It ran on EVERY authenticated request and waited up to five seconds for the
+// script lock — which every push, every stock change and the one-minute
+// background sync all hold. So one phone pushing a variation stalled every
+// other request on every phone, for a timestamp nobody reads on air.
+// ---------------------------------------------------------------------------
+console.log('\nlast seen costs nothing on the hot path')
+
+check('a zero timeout means do not wait, not the five-second default', () => {
+  // `timeoutMs || 5000` turned 0 into 5000. The one number that meant "never
+  // wait" silently became the longest wait in the file.
+  lockState.waits = []; lockState.refused = false
+  gs.withScriptLockOptional_(0, () => 'ran')
+  eq(lockState.waits, [0])
+})
+
+check('an omitted timeout still defaults to five seconds', () => {
+  lockState.waits = []
+  gs.withScriptLockOptional_(undefined, () => 'ran')
+  eq(lockState.waits, [5000])
+})
+
+check('last seen never asks for a wait', () => {
+  cacheState.store = {}
+  lockState.waits = []; lockState.refused = false
+  gs.touchLastSeen_('anthea@sheldonglobal.com')
+  lockState.waits.forEach((w) => eq(w, 0, 'last seen must not wait for the lock'))
+})
+
+check('a person recorded in the last hour costs no lock at all', () => {
+  cacheState.store = {}
+  lockState.refused = false
+  gs.touchLastSeen_('wenxuan@sheldonglobal.com')  // the first one may write
+  lockState.waits = []; lockState.acquisitions = 0
+  gs.touchLastSeen_('wenxuan@sheldonglobal.com')  // every one after must not
+  gs.touchLastSeen_('wenxuan@sheldonglobal.com')
+  eq(lockState.acquisitions, 0, 'no lock taken for a person already recorded this hour')
+  eq(lockState.waits, [], 'and none even tried')
+})
+
+check('a busy lock skips the write and tries again next time', () => {
+  // Remembered only once it landed, so a refused lock is not mistaken for a
+  // recorded visit and the next request gets its turn.
+  cacheState.store = {}
+  lockState.refused = true
+  gs.touchLastSeen_('brien@sheldonglobal.com')
+  eq(Object.keys(cacheState.store).some((k) => k.indexOf('seen:brien') === 0), false,
+    'a skipped write must not be cached as done')
+  lockState.refused = false
+})
+
+check('the freshness window is an hour', () => eq(gs.LAST_SEEN_TTL_S, 3600))
 
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

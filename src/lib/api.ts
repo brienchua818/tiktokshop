@@ -454,6 +454,12 @@ export type Me = SignedInUser & {
  *   uniformly slow    ~20s    the first still lands; nothing is thrown away
  *   backend down      51s     two attempts, then it says so (was 78s)
  *
+ * The 51s assumes each request is one send. `call` itself re-sends in two
+ * rare cases — a reply lost on Google's redirect, and a request that arrived
+ * without its credential — and each re-send gets a fresh timeout, so a read
+ * unlucky enough to hit those on a dead backend can take about 85s. Still
+ * bounded, never a hang: every send has its own timer.
+ *
  * Only for READS. A read changes nothing, so running it twice costs one extra
  * execution and nothing else — and only in the rare case it is already slow.
  * Writes never come through here.

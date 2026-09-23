@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { retryRead, LIGHT_READ, HEAVY_READ, type ReadPlan } from './api'
-import { ScriptError } from './script-api'
+import { ScriptError, setIdToken } from './script-api'
 
 /**
  * The reads that gate the app must survive a slow Apps Script.
@@ -132,6 +132,23 @@ describe('retryRead', () => {
     expect((r.e as ScriptError).code).toBe('SESSION_EXPIRED')
     expect(r.at).toBeLessThan(10_000)
     expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('a verdict on one credential does not end a twin sent with another', async () => {
+    // The session was dropped from the hedge in its last minute, so the hedge
+    // went with only a stale Google token and was refused. The original,
+    // which carried the session, is about to answer — and renew it.
+    setIdToken('google-token-a')
+    const { read } = scripted([
+      { after: 12_000, ok: 'renewed' },
+      { after: 700, fail: new ScriptError(401, 'expired', 'TOKEN_REJECTED') },
+    ])
+    const p = retryRead(read)
+    setTimeout(() => setIdToken('google-token-b'), 4_000)   // differs by the time the hedge goes
+    const r = await timed(p)
+    setIdToken(null)
+    expect(r.ok).toBe(true)
+    expect(r.v).toBe('renewed')
   })
 
   it('a trip refusal is reported if its twin fails too, and is not retried', async () => {

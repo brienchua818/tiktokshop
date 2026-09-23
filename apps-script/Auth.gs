@@ -252,10 +252,15 @@ function usersVersion_() {
  * The Users rows, from the cache unless `fresh`. The version is read BEFORE the
  * rows, so whatever is saved under it is at least as new as that version.
  */
+/** The Users version this execution's memo was read under. Per execution, never shared. */
+var USERS_MEMO_VERSION_ = null;
+
 function usersForAuth_(fresh) {
   var key = null;
+  var version = null;
   try {
-    key = USERS_CACHE_KEY + ':v' + usersVersion_();
+    version = usersVersion_();
+    key = USERS_CACHE_KEY + ':v' + version;
     if (!fresh) {
       var hit = CacheService.getScriptCache().get(key);
       if (hit) return JSON.parse(hit);
@@ -263,12 +268,15 @@ function usersForAuth_(fresh) {
   } catch (e) {
     // A cache that cannot be read means reading the Sheet, as before.
   }
-  // Always a real read, never this request's memo. The memo can predate the
-  // version just read: sign-in looks users up twice (the owner, then the
-  // person), and a block landing between the two would otherwise be saved
-  // under the NEW version from rows read BEFORE it — undone for a minute.
-  invalidateRead_(TAB_USERS);
+  // This request's memo only if it is at least as new as the version just
+  // read. Sign-in looks users up twice (the owner, then the person); a block
+  // landing between the two would otherwise be saved under the NEW version
+  // from rows read BEFORE it, and undone for a minute. Dropping the memo on
+  // every miss fixed that but doubled the Sheet reads whenever the cache
+  // cannot store its copy, so it is dropped only when it is actually older.
+  if (fresh || !key || USERS_MEMO_VERSION_ !== version) invalidateRead_(TAB_USERS);
   var rows = usersAll_();
+  USERS_MEMO_VERSION_ = key ? version : null;
   if (key) {
     try {
       CacheService.getScriptCache().put(key, JSON.stringify(rows), USERS_CACHE_TTL_S);

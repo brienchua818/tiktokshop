@@ -317,6 +317,23 @@ export interface CallOptions {
  * `action` goes in the query string because the router reads it from there;
  * everything else goes in the body.
  */
+/**
+ * The credentials a call sent right now would carry.
+ *
+ * One definition, used by `call` and by anything that needs to know whether
+ * two requests carried the same identity — two requests seconds apart can
+ * differ, because the session is dropped from a request in its last minute.
+ */
+export function credentialsToSend(): { session: string | null; token: string | null } {
+  return { session: hasLiveSession() ? getSessionToken() : null, token: getIdToken() }
+}
+
+/** A comparable stamp of what a call sent now would carry. */
+export function credentialStamp(): string {
+  const c = credentialsToSend()
+  return `${c.session ?? ''}|${c.token ?? ''}`
+}
+
 export async function call<T>(action: string, options: CallOptions = {}): Promise<T> {
   if (!BASE) {
     throw new ScriptError(
@@ -330,8 +347,9 @@ export async function call<T>(action: string, options: CallOptions = {}): Promis
   // Sending both when both exist costs nothing and lets the backend fall back
   // if the session was invalidated (secret rotated) while the Google token is
   // still good.
-  const session = options.anonymous ? null : hasLiveSession() ? getSessionToken() : null
-  const token = options.anonymous ? undefined : getIdToken()
+  const carried = options.anonymous ? null : credentialsToSend()
+  const session = carried ? carried.session : null
+  const token = carried ? carried.token ?? undefined : undefined
   if (!options.anonymous && !token && !session) {
     throw new ScriptError(401, 'Sign in with Google to continue.', 'NO_CREDENTIAL_ON_DEVICE')
   }

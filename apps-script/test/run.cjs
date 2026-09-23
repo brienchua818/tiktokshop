@@ -104,7 +104,10 @@ const sandbox = `
         keys.forEach(function (k) { if (CACHE_STATE.store[k] !== undefined) out[k] = CACHE_STATE.store[k] });
         return out;
       },
-      put: function (k, v, ttl) { CACHE_STATE.store[k] = v; (CACHE_STATE.ttl = CACHE_STATE.ttl || {})[k] = ttl },
+      put: function (k, v, ttl) {
+        if (CACHE_STATE.failPut && CACHE_STATE.failPut(k)) throw new Error('Argument too large: value');
+        CACHE_STATE.store[k] = v; (CACHE_STATE.ttl = CACHE_STATE.ttl || {})[k] = ttl
+      },
       putAll: function (map) { Object.keys(map).forEach(function (k) { CACHE_STATE.store[k] = map[k] }) },
       remove: function (k) { delete CACHE_STATE.store[k] }
     }
@@ -3549,6 +3552,24 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     gs.usersForAuth_()
     freshRequest()
     eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked')
+  })
+
+  check('a cache that cannot store the copy costs one Sheet read per request, not two', () => {
+    // The fallback promised "correct, just not faster" — not slower than
+    // before there was a cache at all.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    cacheState.failPut = (k) => k.indexOf('users:') === 0
+    CACHE.store['seen:anthea@sheldonglobal.com'] = '1'
+    try {
+      const perRequest = []
+      for (let i = 0; i < 3; i++) {
+        freshRequest(); userReads = 0
+        eq(gs.resolveUser_({ email: 'anthea@sheldonglobal.com', name: 'Anthea' }).role, 'lister')
+        perRequest.push(userReads)
+      }
+      eq(perRequest, [1, 1, 1])
+    } finally { cacheState.failPut = null }
   })
 
   check('the role is flushed to the Sheet before the cache is retired', () => {

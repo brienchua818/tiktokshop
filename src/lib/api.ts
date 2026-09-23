@@ -1,5 +1,5 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
-import { call, credentialEpoch, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
+import { call, credentialEpoch, credentialStamp, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
 import { onToken, promptSilently } from '../auth/google'
 
 /**
@@ -494,8 +494,12 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
     let lastError: unknown = null
     let refusal: unknown = null
     let hedgeTimer: ReturnType<typeof setTimeout> | null = null
+    /** What each request still out was sent with, by launch number. */
+    const outWith = new Map<number, string>()
 
-    const done = (ok: boolean, value: unknown) => {
+    const done = (id: number, ok: boolean, value: unknown) => {
+      const sentWith = outWith.get(id)
+      outWith.delete(id)
       if (settled) return
       if (ok) {
         settled = true
@@ -514,15 +518,21 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
        * the refusal is reported only if it does not.
        *
        * Every other refusal is a verdict — an expired session, an account
-       * awaiting approval — and asking twice cannot change it. Waiting for a
-       * stuck twin would only make the person hear it later.
+       * awaiting approval — and asking twice with the SAME credential cannot
+       * change it, so it is final at once. But the two requests do not always
+       * carry the same one: a session in its last minute is left off the
+       * later request, and a Google token can be renewed between the two. A
+       * verdict on one credential says nothing about the other, so while a
+       * twin sent with a different credential is still out, it may land.
        */
       if (value instanceof ScriptError && !value.isRetryable) {
         if (hedgeTimer) {
           clearTimeout(hedgeTimer)
           hedgeTimer = null
         }
-        if (!TRIP_REFUSALS.has(String(value.code ?? '')) || failures >= started) {
+        const twinDiffers = [...outWith.values()].some((w) => w !== sentWith)
+        const verdict = !TRIP_REFUSALS.has(String(value.code ?? '')) && !twinDiffers
+        if (verdict || failures >= started) {
           settled = true
           reject(value)
           return
@@ -548,10 +558,11 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
     }
 
     const launch = (timeoutMs: number) => {
-      started++
+      const id = started++
+      outWith.set(id, credentialStamp())
       read(timeoutMs).then(
-        (v) => done(true, v),
-        (e: unknown) => done(false, e),
+        (v) => done(id, true, v),
+        (e: unknown) => done(id, false, e),
       )
     }
 

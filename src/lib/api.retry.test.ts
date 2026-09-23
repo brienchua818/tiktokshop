@@ -83,8 +83,9 @@ describe('retryRead', () => {
     ])
     const r = await timed(retryRead(read))
     expect(r.v).toBe('ok')
-    // 1s to fail + 0.5s to succeed — not 8s for the hedge timer.
-    expect(r.at).toBeLessThan(3_000)
+    // 1s to fail + 0.5s to succeed — not 8s for the hedge timer, and not
+    // the 1s pause a whole new attempt would cost either.
+    expect(r.at).toBeLessThan(2_000)
   })
 
   it('does not retry a 401, and surfaces it immediately', async () => {
@@ -102,14 +103,83 @@ describe('retryRead', () => {
     expect(read).toHaveBeenCalledTimes(1)
   })
 
-  it('a refusal on the hedge is final too, not waited on', async () => {
+  /**
+   * Several 401s describe the trip, not the person. One of those on the hedge
+   * used to fail a read the original request was about to answer.
+   */
+  it.each(['CREDENTIAL_LOST_IN_TRANSIT', 'GOOGLE_UNREACHABLE'])(
+    'a %s on the hedge does not throw away the original, which answers',
+    async (code) => {
+      const { read } = scripted([
+        { after: 12_000, ok: 'original' },
+        { after: 500, fail: new ScriptError(401, 'transient', code) },
+      ])
+      const r = await timed(retryRead(read))
+      expect(r.ok).toBe(true)
+      expect(r.v).toBe('original')
+      expect(r.at).toBeLessThan(13_000)
+    },
+  )
+
+  it('a refusal is reported once nothing can still succeed, and is not retried', async () => {
     const { read } = scripted([
       { after: 60_000, fail: timeout() },
       { after: 100, fail: new ScriptError(401, 'expired', 'SESSION_EXPIRED') },
     ])
     const r = await timed(retryRead(read))
     expect((r.e as ScriptError).code).toBe('SESSION_EXPIRED')
-    expect(r.at).toBeLessThan(10_000)
+    // A refusal outranks the timeout that came with it, and ends the read:
+    // no third request.
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('a refusal on the only request in flight is final at once', async () => {
+    const { read } = scripted([{ after: 100, fail: new ScriptError(401, 'expired', 'SESSION_EXPIRED') }])
+    const r = await timed(retryRead(read))
+    expect(r.at).toBeLessThan(1_000)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('after a refusal no hedge is sent', async () => {
+    // The first request is refused before the hedge is due: asking again
+    // cannot change a verdict on the credential.
+    const { read } = scripted([{ after: 3_000, fail: new ScriptError(403, 'pending', 'AWAITING_APPROVAL') }])
+    await timed(retryRead(read))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('each request is given the time the plan says', async () => {
+    // Pinned because the deadlines are the whole promise of the table above:
+    // a mutant with a 1s budget passed every other test here.
+    const { read, deadlines } = scripted([{ after: 60_000, fail: timeout() }, { after: 500, ok: 'fresh' }])
+    await timed(retryRead(read))
+    expect(deadlines[0]).toBe(LIGHT_READ.deadlineMs)
+    expect(deadlines[1]).toBe(LIGHT_READ.deadlineMs - LIGHT_READ.hedgeMs)
+  })
+
+  it('a fast failure relaunches with the full budget, not the hedge remainder', async () => {
+    const { read, deadlines } = scripted([
+      { after: 1_000, fail: new ScriptError(502, 'bad gateway', 'NOT_JSON') },
+      { after: 500, ok: 'ok' },
+    ])
+    await timed(retryRead(read))
+    expect(deadlines[1]).toBe(LIGHT_READ.deadlineMs)
+  })
+
+  it('no hedge is sent once the first request has answered', async () => {
+    const { read } = scripted([{ after: 5_000, ok: 'ok' }])
+    await timed(retryRead(read))
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('a hedge in flight does not end the attempt when the original fails', async () => {
+    // Original fails at 10s (after the hedge went out at 8s); the hedge lands at 14s.
+    const { read } = scripted([{ after: 10_000, fail: timeout() }, { after: 6_000, ok: 'hedge' }])
+    const r = await timed(retryRead(read))
+    expect(r.v).toBe('hedge')
+    expect(read).toHaveBeenCalledTimes(2)
   })
 
   it('a dead backend gives up well inside the old 78 seconds', async () => {
@@ -122,6 +192,8 @@ describe('retryRead', () => {
     const r = await timed(retryRead(deadlined))
     expect(r.ok).toBe(false)
     expect(r.at).toBeLessThan(78_000)
+    // And it really waited: two full attempts plus the pause between them.
+    expect(r.at).toBeGreaterThanOrEqual(2 * LIGHT_READ.deadlineMs)
   })
 
   it('the heavy read hedges later, so honest work is not doubled', () => {

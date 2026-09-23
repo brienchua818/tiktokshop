@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
-import { ApiError, api } from './lib/api'
+import { ApiError, api, SignedOutMeanwhile } from './lib/api'
 import { getSessionToken, hasCredential, hasLiveSession, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetBoot, readBoot, rememberMe, rememberShops } from './lib/boot-cache'
 import { forgetAccount } from './auth/google'
@@ -99,6 +99,8 @@ export default function App() {
         setUser(me.approved ? me : null)
       })
       .catch((e: unknown) => {
+        // Asked for by whoever signed out since. Nothing of theirs may land.
+        if (e instanceof SignedOutMeanwhile) return
         /**
          * Only sign out when the credential is actually dead.
          *
@@ -167,6 +169,7 @@ export default function App() {
         setShopId(valid?.shop_id ?? null)
       })
       .catch((e: unknown) => {
+        if (e instanceof SignedOutMeanwhile) return
         /**
          * A failed shops call is not "you have no shops".
          *

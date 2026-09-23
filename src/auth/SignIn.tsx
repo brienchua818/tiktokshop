@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api, ApiError, type Me } from '../lib/api'
+import { api, ApiError, SignedOutMeanwhile, type Me } from '../lib/api'
 import { setIdToken } from '../lib/script-api'
 import {
   isConfigured,
@@ -69,6 +69,7 @@ export default function SignIn({ onSignedIn }: { onSignedIn: (user: Me) => void 
           setPendingApproval(me.email)
         })
         .catch((e: unknown) => {
+          if (e instanceof SignedOutMeanwhile) return
           /**
            * Keep the credential unless it is the credential that is wrong.
            *

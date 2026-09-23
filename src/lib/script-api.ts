@@ -142,7 +142,18 @@ let idToken: string | null = null
 
 const TOKEN_KEY = 'tikshop.id_token'
 
+/**
+ * Moves on every time a credential is thrown away — a sign-out, or a dead
+ * session being dropped. A reply that was asked for under an older value was
+ * asked for by somebody who is no longer here, and must not sign them back in.
+ */
+let epoch = 0
+export function credentialEpoch(): number {
+  return epoch
+}
+
 export function setIdToken(token: string | null): void {
+  if (!token) epoch++
   idToken = token
   try {
     if (token) sessionStorage.setItem(TOKEN_KEY, token)
@@ -198,6 +209,7 @@ const SESSION_KEY = 'tikshop.session'
 let sessionToken: string | null = null
 
 export function setSessionToken(token: string | null): void {
+  if (!token) epoch++
   sessionToken = token
   try {
     if (token) localStorage.setItem(SESSION_KEY, token)

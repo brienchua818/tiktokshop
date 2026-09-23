@@ -53,6 +53,13 @@ function verifyIdToken_(idToken) {
       'Could not reach Google to check your sign-in. Try again in a moment.');
   }
 
+  // A 5xx is Google having a bad moment, not a verdict on the token. Reported
+  // as TOKEN_REJECTED it signed the phone out — the app treats that code as a
+  // dead credential — over an outage that clears in seconds.
+  if (res.getResponseCode() >= 500) {
+    return refuse_('GOOGLE_UNREACHABLE',
+      'Could not reach Google to check your sign-in. Try again in a moment.');
+  }
   if (res.getResponseCode() !== 200) {
     return refuse_('TOKEN_REJECTED',
       'Your Google sign-in has expired. Sign in again.');

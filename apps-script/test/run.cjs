@@ -639,6 +639,12 @@ check('Google being unreachable is not reported as a bad sign-in', () => {
   eq(gs.verifyIdToken_('t').code, 'GOOGLE_UNREACHABLE')
 })
 
+check('Google answering 5xx is an outage, not a rejected sign-in', () => {
+  // TOKEN_REJECTED signs the phone out; a Google blip must not.
+  auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, status: 503, body: 'Service Unavailable' })
+  eq(gs.verifyIdToken_('t').code, 'GOOGLE_UNREACHABLE')
+})
+
 check('an unparseable response is its own case', () => {
   auth({ props: { GOOGLE_CLIENT_ID: CLIENT }, body: 'not json' })
   eq(gs.verifyIdToken_('t').code, 'TOKEN_UNREADABLE')

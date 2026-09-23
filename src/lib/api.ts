@@ -1,5 +1,5 @@
 import type { Shop, Listing, ExtractedFields, SignedInUser } from '../types'
-import { call, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
+import { call, credentialEpoch, getIdToken, ScriptError, setIdToken, setSessionToken, tokenNeedsRenewal } from './script-api'
 import { onToken, promptSilently } from '../auth/google'
 
 /**
@@ -477,6 +477,7 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
     let failures = 0
     let started = 0
     let lastError: unknown = null
+    let refusal: unknown = null
     let hedgeTimer: ReturnType<typeof setTimeout> | null = null
 
     const done = (ok: boolean, value: unknown) => {
@@ -487,16 +488,31 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
         resolve(value as T)
         return
       }
-      // A refusal is final whichever request carried it: a 401 does not
-      // become a 200 by asking twice, and the person should hear it now.
+      failures++
+      /**
+       * A refusal ends the attempt — but not while its twin is still out.
+       *
+       * It used to be final at once, whichever request carried it, and that
+       * threw away answers. Several 401s describe the TRIP, not the person:
+       * CREDENTIAL_LOST_IN_TRANSIT ("your session is still good"), and
+       * GOOGLE_UNREACHABLE. One of those on the hedge used to fail a read the
+       * original request was about to answer. So a refusal stops any further
+       * hedge, and is reported once nothing else can still succeed. A real
+       * refusal is carried by both requests, so it still arrives promptly.
+       */
       if (value instanceof ScriptError && !value.isRetryable) {
-        settled = true
-        if (hedgeTimer) clearTimeout(hedgeTimer)
-        reject(value)
+        refusal = value
+        if (hedgeTimer) {
+          clearTimeout(hedgeTimer)
+          hedgeTimer = null
+        }
+        if (failures >= started) {
+          settled = true
+          reject(refusal)
+        }
         return
       }
       lastError = value
-      failures++
       // Failed before the hedge was due: send it NOW. Waiting out the rest of
       // `hedgeMs` after a fast 5xx would make the quick failure the slow one.
       if (hedgeTimer) {
@@ -505,10 +521,11 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
         launch(plan.deadlineMs)
         return
       }
-      // Only give up once every request that was started has failed.
+      // Only give up once every request that was started has failed. A
+      // refusal among them is the more useful thing to say, and is final.
       if (failures >= started) {
         settled = true
-        reject(lastError)
+        reject(refusal ?? lastError)
       }
     }
 
@@ -548,17 +565,41 @@ export async function retryRead<T>(
   }
 }
 
+/**
+ * The person who asked signed out before the answer came.
+ *
+ * Since the app opens on what it remembered, Sign out can be tapped while the
+ * background `whoami` is still running — for up to a minute on a bad day. Its
+ * reply carries a fresh session for the person who asked, and applying it
+ * signed them straight back in, on a phone that may have been handed to
+ * somebody else. Such a reply is dropped, and callers ignore this error.
+ */
+export class SignedOutMeanwhile extends Error {
+  constructor() {
+    super('Signed out while this was being answered')
+    this.name = 'SignedOutMeanwhile'
+  }
+}
+
+/** Run `read`, and refuse its answer if a credential was thrown away meanwhile. */
+async function forThisPerson<T>(read: () => Promise<T>): Promise<T> {
+  const asked = credentialEpoch()
+  const out = await read()
+  if (credentialEpoch() !== asked) throw new SignedOutMeanwhile()
+  return out
+}
+
 export const api = {
   /** Who the backend thinks you are, and whether you may act yet. */
   me: async () => {
-    const me = await retryRead((timeoutMs) => call<Me>('whoami', { timeoutMs }))
+    const me = await forThisPerson(() => retryRead((timeoutMs) => call<Me>('whoami', { timeoutMs })))
     // The Google token bought this; the session is what every later call
     // uses, so a phone is not sent back to sign in every hour.
     if (me.session_token) setSessionToken(me.session_token)
     return me
   },
 
-  shops: () => retryRead((timeoutMs) => call<Shop[]>('shops', { timeoutMs })),
+  shops: () => forThisPerson(() => retryRead((timeoutMs) => call<Shop[]>('shops', { timeoutMs }))),
 
   listings: (shopId: string) =>
     retryRead((timeoutMs) => call<Listing[]>('listings', { body: { shop_id: shopId }, timeoutMs })),

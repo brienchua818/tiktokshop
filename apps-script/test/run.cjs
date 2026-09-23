@@ -71,6 +71,11 @@ const sandbox = `
       if (pattern === 'yyyy-MM-dd') return y + '-' + mo + '-' + d
       if (pattern === 'yyyy-MM-dd HHmm') return y + '-' + mo + '-' + d + ' ' + h + mi
       if (pattern === 'yyyy-MM-dd HH:mm') return y + '-' + mo + '-' + d + ' ' + h + ':' + mi
+      // The Log tab's timestamp. Missing, it made logEvent_ throw before it
+      // reached its write in EVERY test — so nothing on that path was tested.
+      if (pattern === 'yyyy-MM-dd HH:mm:ss') {
+        return y + '-' + mo + '-' + d + ' ' + h + ':' + mi + ':' + p(sgt.getUTCSeconds())
+      }
       throw new Error('unexpected pattern: ' + pattern)
     },
     // Apps Script returns a byte array of SIGNED bytes, which is why ttSign_
@@ -166,7 +171,7 @@ ${src}
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
     ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
-    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S
+    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_
   };
 `
 
@@ -3736,6 +3741,66 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(up.url.indexOf('use_case=ATTRIBUTE_IMAGE') > 0, true)
     // The live snapshot is the wrong one during a stream — see ttGetProduct_.
     eq(rd.url.indexOf('return_under_review_version=true') > 0, true)
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Writing a log line never waits for anybody.
+//
+// logEvent_ went through appendRows_, which takes the script lock for up to
+// thirty seconds. Reads that log a warning hold no lock, and some warn on
+// every call — so a listing refresh during a push could wait half a minute to
+// write one line. Sheet.appendRow is atomic, so a single row needs no lock.
+// ---------------------------------------------------------------------------
+console.log('\nlogging takes no lock')
+
+{
+  const appended = []
+  const logSheet = () => ({
+    appendRow: (row) => appended.push(row),
+    getLastRow: () => appended.length + 1,
+    getRange: () => ({ getValues: () => [], setValues: () => {}, setValue: () => {}, setFontWeight() { return this } }),
+  })
+  const install = () => {
+    gs.__setSheetImpl(logSheet)
+    appended.length = 0
+    lockState.waits = []
+    lockState.acquisitions = 0
+    lockState.refused = false
+  }
+
+  check('a log line is actually written', () => {
+    // Guards against the vacuous version: before the formatDate fix this
+    // threw before the write, and every test of this path passed on nothing.
+    install()
+    gs.logEvent_('brien', 'add_variation', 'HZ', 'A7', 'ok')
+    eq(appended.length, 1, 'the row must reach the sheet')
+    eq(appended[0][2], 'add_variation')
+  })
+
+  check('a log line takes no lock at all', () => {
+    install()
+    gs.logEvent_('brien', 'add_variation', 'HZ', 'A7', 'ok')
+    eq(lockState.waits, [], 'no tryLock, so nothing can make it wait')
+    eq(lockState.acquisitions, 0)
+  })
+
+  check('a warning takes no lock either', () => {
+    install()
+    gs.warn_('TS-ORD-27', '3 order line(s) carry no creation time')
+    eq(lockState.waits, [])
+    eq(appended.length, 1)
+  })
+
+  check('a log line still lands while another write holds the lock', () => {
+    // The case that used to wait up to thirty seconds and then give up.
+    install()
+    lockState.refused = true
+    gs.logEvent_('system', 'warn', '', 'during a push', 'warn')
+    eq(appended.length, 1, 'written regardless of who holds the lock')
+    lockState.refused = false
   })
 }
 

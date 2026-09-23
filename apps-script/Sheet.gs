@@ -325,15 +325,34 @@ function readAll_(name) {
  * replaced had no notion of a user at all.
  */
 function logEvent_(actor, action, shop, detail, result) {
+  /**
+   * One row, appended atomically, without the script lock.
+   *
+   * This went through appendRows_, which takes the script lock for up to
+   * THIRTY seconds — because appendRows_ finds the last row and writes after
+   * it, and two writers doing that at once could overwrite each other. Inside
+   * a push that cost nothing (the lock is re-entrant), but READS that log a
+   * warning hold no lock, and several warn on every call: TS-ORD-27 fires on
+   * every refresh of a listing with undated order lines. So a listing refresh
+   * during somebody else's push could wait up to half a minute to write one
+   * log line, then give up silently.
+   *
+   * `Sheet.appendRow` is documented by Google as atomic for exactly this
+   * case: "This operation is atomic; it prevents issues where a user asks for
+   * the last row, and then writes to that row, and an intervening mutation
+   * occurs between getting the last row and writing to it." So a single log
+   * line needs no lock at all. The Log tab is never read by the app, so there
+   * is no read cache to clear.
+   */
   try {
-    appendRows_(TAB_LOG, [[
+    sheet_(TAB_LOG).appendRow([
       Utilities.formatDate(new Date(), 'Asia/Singapore', 'yyyy-MM-dd HH:mm:ss'),
       actor || 'unknown',
       action,
       shop || '',
       String(detail || '').slice(0, 500),
       result || ''
-    ]]);
+    ]);
   } catch (e) {
     // Logging must never break the thing it is logging.
     console.error('log failed: ' + e);

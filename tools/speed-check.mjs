@@ -122,6 +122,56 @@ async function timeToUsable({ remembered, spike = false }) {
   return usable
 }
 
+/**
+ * The same as REMEMBERED, but nothing is planted: the app must write its own
+ * memory on a normal visit, and the NEXT visit must open on it. The case
+ * above seeds `tikshop.boot` by hand, so it passed with the app's two writes
+ * deleted — every real phone would have waited forty seconds on every launch
+ * while this said "clean". Found by the speed review, 23 Sep.
+ */
+async function roundTrip() {
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true })
+  let slow = false
+  await context.route('**script.google.com/**', async (route) => {
+    const action = new URL(route.request().url()).searchParams.get('action') ?? ''
+    if (slow && SLOW.has(action)) await new Promise((r) => setTimeout(r, SLOW_MS))
+    const body = REPLIES[action]
+    await route.fulfill({
+      status: 200, contentType: 'application/json',
+      body: JSON.stringify(body === undefined ? { _status: 200 } : body),
+    }).catch(() => {})
+  })
+  await context.addInitScript((tok) => {
+    // Only when missing, so the reload keeps whatever the app itself stored.
+    if (!localStorage.getItem('tikshop.session')) localStorage.setItem('tikshop.session', tok)
+    if (!localStorage.getItem('tikshop.shop')) localStorage.setItem('tikshop.shop', 'HZ')
+    if (!sessionStorage.getItem('speed.seeded')) {
+      localStorage.removeItem('tikshop.boot')
+      sessionStorage.setItem('speed.seeded', '1')
+    }
+  }, session)
+  const page = await context.newPage()
+  await page.goto(`http://localhost:${PORT}/live-listing`)
+  await page.waitForSelector('text=I12 Clearance Sale', { timeout: 30_000 })
+  // Give the background whoami/shops a moment to land and be remembered.
+  await page.waitForFunction(() => {
+    try { const b = JSON.parse(localStorage.getItem('tikshop.boot') || 'null'); return Boolean(b && b.me && b.shops) } catch { return false }
+  }, null, { timeout: 10_000 }).catch(() => {})
+  const stored = await page.evaluate(() => Boolean(localStorage.getItem('tikshop.boot')))
+  slow = true
+  const t0 = Date.now()
+  await page.reload()
+  let usable = -1
+  try {
+    await page.waitForSelector('text=I12 Clearance Sale', { timeout: SLOW_MS * 2 + 10_000 })
+    usable = Date.now() - t0
+  } catch {
+    usable = -1
+  }
+  await context.close()
+  return { usable, stored }
+}
+
 let failed = 0
 function report(label, ms, ok, why) {
   console.log(`${ok ? 'OK  ' : 'FAIL'} ${label.padEnd(12)} ${ms < 0 ? 'never usable' : (ms / 1000).toFixed(2) + 's'}  ${why}`)
@@ -131,6 +181,10 @@ function report(label, ms, ok, why) {
 const remembered = await timeToUsable({ remembered: true })
 report('remembered', remembered, remembered >= 0 && remembered < BUDGET_MS,
   `backend answers in ${SLOW_MS / 1000}s; budget ${BUDGET_MS / 1000}s`)
+
+const trip = await roundTrip()
+report('round trip', trip.usable, trip.stored && trip.usable >= 0 && trip.usable < BUDGET_MS,
+  `app stores its own memory (${trip.stored ? 'yes' : 'NO'}), then reopens on it against a ${SLOW_MS / 1000}s backend; budget ${BUDGET_MS / 1000}s`)
 
 const first = await timeToUsable({ remembered: false })
 report('first run', first, first >= SLOW_MS,

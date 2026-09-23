@@ -99,7 +99,7 @@ const sandbox = `
         keys.forEach(function (k) { if (CACHE_STATE.store[k] !== undefined) out[k] = CACHE_STATE.store[k] });
         return out;
       },
-      put: function (k, v) { CACHE_STATE.store[k] = v },
+      put: function (k, v, ttl) { CACHE_STATE.store[k] = v; (CACHE_STATE.ttl = CACHE_STATE.ttl || {})[k] = ttl },
       putAll: function (map) { Object.keys(map).forEach(function (k) { CACHE_STATE.store[k] = map[k] }) },
       remove: function (k) { delete CACHE_STATE.store[k] }
     }
@@ -168,7 +168,7 @@ ${src}
     // is an assertion too.
     __setDriveApp: function (d) { DriveApp = d },
     __setUrlFetch: function (u) { UrlFetchApp = u },
-    ttFetch_, appendAssets_, newListingAssets_,
+    ttFetch_, appendAssets_, newListingAssets_, pushSku_,
     // Guarded so the suite still LOADS against code that predates the split,
     // which is how the golden URL below was proven identical to the old one.
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
@@ -3590,7 +3590,17 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     eq(Boolean(gs.findUser_('new@sheldonglobal.com')), true)
   })
 
-  check('the cache is short-lived', () => eq(gs.USERS_CACHE_TTL_S <= 60, true))
+  check('the copy sign-in saves is short-lived', () => {
+    // What is actually passed to the cache, not just the constant: a literal
+    // six hours in usersForAuth_ passed the old version of this.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin')]
+    cacheState.ttl = {}
+    gs.findUser_('brienchua@sheldonglobal.com')
+    const keys = Object.keys(cacheState.ttl).filter((k) => k.indexOf('users:auth') === 0)
+    eq(keys.length > 0, true, 'nothing was cached')
+    keys.forEach((k) => eq(cacheState.ttl[k] > 0 && cacheState.ttl[k] <= 60, true, k + ' kept for ' + cacheState.ttl[k] + 's'))
+  })
 }
 
 
@@ -3892,6 +3902,31 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(up.url.indexOf('use_case=ATTRIBUTE_IMAGE') > 0, true)
     // The live snapshot is the wrong one during a stream — see ttGetProduct_.
     eq(rd.url.indexOf('return_under_review_version=true') > 0, true)
+  })
+
+  check('a real push with a photo reads the product once, in the same batch as the upload', () => {
+    // Through pushSku_ itself. The tests above call the helpers directly, so
+    // putting the push back on the sequential path — or having addVariation_
+    // ignore the product it was handed and read it again — left them green.
+    const emptyTab = () => ({
+      getLastRow: () => 1, getLastColumn: () => 1,
+      getRange: () => ({ getValues: () => [[]], setValues() { return this }, setValue() { return this }, setFontWeight() { return this }, clearContent() { return this } }),
+      appendRow: () => {},
+    })
+    gs.__setSheetImpl(emptyTab)
+    gs.__setDriveApp({ getFolderById: () => { throw new Error('Service error: Drive') } })
+    gs.invalidateRead_()
+    const body = {
+      shop_id: 'HZ', listing_id: 'P1', identifier: 'A7', variant_name: 'Blue',
+      price: 10, stock: 3, photo_base64: 'AAAA', photo_mime: 'image/jpeg',
+    }
+    run(() => { try { gs.pushSku_(body, { email: 'b@x', name: 'Brien' }) } catch (e) { /* later steps are not under test */ } })
+    const reads = sent.filter((x) => x.url.indexOf('/products/P1?') > 0 && x.url.indexOf('partial_edit') < 0)
+    const upload = sent.find((x) => x.url.indexOf('/images/upload') > 0)
+    eq(Boolean(upload), true, 'the push must reach the upload')
+    eq(upload.batched, true, 'the upload must go in the batch')
+    eq(reads.length, 1, 'the product was read ' + reads.length + ' times')
+    eq(reads[0].batched, true, 'and that read went in the same batch')
   })
 }
 

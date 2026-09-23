@@ -173,7 +173,7 @@ ${src}
     // is an assertion too.
     __setDriveApp: function (d) { DriveApp = d },
     __setUrlFetch: function (u) { UrlFetchApp = u },
-    ttFetch_, appendAssets_, newListingAssets_, pushSku_, productVersions_,
+    ttFetch_, appendAssets_, newListingAssets_, pushSku_, productVersions_, listingState_,
     // Guarded so the suite still LOADS against code that predates the split,
     // which is how the golden URL below was proven identical to the old one.
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
@@ -3510,6 +3510,47 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     gs.__spreadsheetApp.flush = () => {}
   })
 
+  /** Another execution's setRole: rows changed, flushed, version bumped — with its OWN memo, not ours. */
+  const blockElsewhere = (row) => {
+    userRows[row][2] = 'blocked'
+    authState.props.USERS_VERSION = String(Number(authState.props.USERS_VERSION || 0) + 1)
+  }
+
+  check('a block landing between the two lookups of one sign-in stays blocked', () => {
+    // Sign-in looks up the owner, then the person. The first lookup memoised
+    // the rows; a block landing in between must not be saved under the new
+    // version from those older rows.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    gs.findUser_('brienchua@sheldonglobal.com')     // this request's first lookup
+    blockElsewhere(1)
+    gs.findUser_('anthea@sheldonglobal.com')        // this request's second lookup
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked', 'the next request must see the block')
+  })
+
+  check('the version is read before the rows, through the real usersForAuth_', () => {
+    // The block lands while this request's Sheet read is under way. Its copy
+    // must be saved under the OLD version, where nobody will look.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    let fired = false
+    gs.__setSheetImpl(() => ({
+      getLastRow: () => userRows.length + 1,
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => {
+          const snap = userRows.map((row) => row.slice(c - 1, c - 1 + nc))
+          if (!fired) { fired = true; blockElsewhere(1) }
+          return snap
+        },
+        getValue: () => '', setValue: () => {}, setValues: () => {}, setFontWeight() { return this },
+      }),
+    }))
+    gs.usersForAuth_()
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked')
+  })
+
   check('the role is flushed to the Sheet before the cache is retired', () => {
     // Otherwise the first reader of the new version can still read the old
     // role out of a Sheet whose write is sitting in the buffer.
@@ -3994,6 +4035,29 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(sent.filter((x) => !x.batched).length, 2)
   })
 
+  check('a listing refresh reads both versions in ONE round trip, through listingState_ itself', () => {
+    // The helper test above passes even if listingState_ stops using it.
+    const SKU_HEAD = ['sku_id', 'listing_id', 'shop_id', 'identifier', 'status', 'pushed_at']
+    gs.__setHeaders('SKUs', SKU_HEAD)
+    const tab = (name) => ({
+      getLastRow: () => (name === 'SKUs' ? 2 : 1), getLastColumn: () => SKU_HEAD.length,
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => (name === 'SKUs'
+          ? (r === 1 ? [SKU_HEAD] : [['s1', 'P1', 'HZ', 'A1', 'pushed', '2026-09-23T03:00:00.000Z']])
+          : [[]]),
+        setValues() { return this }, setValue() { return this }, setFontWeight() { return this }, clearContent() { return this },
+      }),
+      appendRow: () => {},
+    })
+    gs.__setSheetImpl(tab)
+    gs.invalidateRead_()
+    cacheState.store = {}
+    run(() => { try { gs.listingState_('P1') } catch (e) { /* later steps are not under test */ } })
+    const reads = sent.filter((x) => x.url.indexOf('/products/P1?') > 0)
+    eq(reads.length, 2, 'read ' + reads.length + ' times')
+    eq(reads.every((x) => x.batched), true, 'both in one batch')
+  })
+
   check('a real push with a photo reads the product once, in the same batch as the upload', () => {
     // Through pushSku_ itself. The tests above call the helpers directly, so
     // putting the push back on the sequential path — or having addVariation_
@@ -4103,6 +4167,43 @@ console.log('\nlogging takes no lock')
     lockState.refused = false
     interleave = () => gs.logEvent_('B', 'B line', '', '', 'ok')
     gs.logEvent_('A', 'A line', '', '', 'ok')
+    gs.__spreadsheetApp.openById = realOpen
+    eq(rows.filter((a) => a.endsWith(' line')).sort(), ['A line', 'B line'])
+  })
+
+  check('the second look for the Log tab is taken under the lock', () => {
+    // B arrives at A's re-check. If A holds the lock there, B waits its turn,
+    // as a real execution would; if A does not, B creates the tab first and
+    // A's insert throws — the line lost.
+    const tabs = {}
+    const rows = []
+    let misses = 0, deferred = null
+    const makeTab = (name) => ({
+      getName: () => name, appendRow: (r) => rows.push(r[2]), getLastRow: () => 1, getLastColumn: () => 6,
+      getRange: () => ({ getValues: () => [[]], setValues() { return this }, setFontWeight() { return this }, clearContent() { return this } }),
+      setFrozenRows: () => {},
+    })
+    const runB = () => gs.logEvent_('B', 'B line', '', '', 'ok')
+    const book = {
+      getSheetByName: (n) => {
+        const hit = tabs[n] || null
+        if (n === 'Log' && !hit && ++misses === 2) {
+          if (lockState.held) deferred = runB; else runB()
+        }
+        return hit
+      },
+      insertSheet: (n) => {
+        if (tabs[n]) throw new Error('A sheet with the name "' + n + '" already exists.')
+        tabs[n] = makeTab(n); return tabs[n]
+      },
+      getSheets: () => Object.values(tabs), deleteSheet: () => {},
+    }
+    const realOpen = gs.__spreadsheetApp.openById
+    gs.__spreadsheetApp.openById = () => book
+    gs.__setSheetImpl(gs.__sheetReal)
+    lockState.refused = false
+    gs.logEvent_('A', 'A line', '', '', 'ok')
+    if (deferred) deferred()
     gs.__spreadsheetApp.openById = realOpen
     eq(rows.filter((a) => a.endsWith(' line')).sort(), ['A line', 'B line'])
   })

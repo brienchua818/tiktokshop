@@ -482,6 +482,9 @@ export const LIGHT_READ: ReadPlan = { hedgeMs: 8_000, deadlineMs: 25_000, attemp
  */
 export const HEAVY_READ: ReadPlan = { hedgeMs: 20_000, deadlineMs: 40_000, attempts: 2 }
 
+/** Refusals about the journey, not the person: the twin may still land. */
+const TRIP_REFUSALS = new Set(['CREDENTIAL_LOST_IN_TRANSIT', 'GOOGLE_UNREACHABLE'])
+
 /** One attempt: the first request, plus a hedge if it is slow. First success wins. */
 function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -502,26 +505,29 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
       }
       failures++
       /**
-       * A refusal ends the attempt — but not while its twin is still out.
+       * A refusal is final at once — unless it is about the trip.
        *
-       * It used to be final at once, whichever request carried it, and that
-       * threw away answers. Several 401s describe the TRIP, not the person:
-       * CREDENTIAL_LOST_IN_TRANSIT ("your session is still good"), and
-       * GOOGLE_UNREACHABLE. One of those on the hedge used to fail a read the
-       * original request was about to answer. So a refusal stops any further
-       * hedge, and is reported once nothing else can still succeed. A real
-       * refusal is carried by both requests, so it still arrives promptly.
+       * Two 401s describe the TRIP, not the person: CREDENTIAL_LOST_IN_TRANSIT
+       * ("your session is still good") and GOOGLE_UNREACHABLE. One of those on
+       * the hedge used to fail a read the original request was about to
+       * answer, so for those the twin still in flight is allowed to land, and
+       * the refusal is reported only if it does not.
+       *
+       * Every other refusal is a verdict — an expired session, an account
+       * awaiting approval — and asking twice cannot change it. Waiting for a
+       * stuck twin would only make the person hear it later.
        */
       if (value instanceof ScriptError && !value.isRetryable) {
-        refusal = value
         if (hedgeTimer) {
           clearTimeout(hedgeTimer)
           hedgeTimer = null
         }
-        if (failures >= started) {
+        if (!TRIP_REFUSALS.has(String(value.code ?? '')) || failures >= started) {
           settled = true
-          reject(refusal)
+          reject(value)
+          return
         }
+        refusal = value
         return
       }
       lastError = value
@@ -596,7 +602,15 @@ export class SignedOutMeanwhile extends Error {
 /** Run `read`, and refuse its answer if a credential was thrown away meanwhile. */
 async function forThisPerson<T>(read: () => Promise<T>): Promise<T> {
   const asked = credentialEpoch()
-  const out = await read()
+  let out: T
+  try {
+    out = await read()
+  } catch (e) {
+    // A refusal is theirs too. A dead-credential answer for the person who
+    // signed out would otherwise sign out whoever signed in after them.
+    if (credentialEpoch() !== asked) throw new SignedOutMeanwhile()
+    throw e
+  }
   if (credentialEpoch() !== asked) throw new SignedOutMeanwhile()
   return out
 }

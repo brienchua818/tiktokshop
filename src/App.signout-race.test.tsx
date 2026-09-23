@@ -23,14 +23,14 @@ const meOf = (email: string, admin: boolean) => ({
   links: { sheet: 'x' }, session_token: tok(email),
 })
 
-const pendingWhoami: Array<{ sentWith: string | null; resolve: (v: unknown) => void }> = []
+const pendingWhoami: Array<{ sentWith: string | null; resolve: (v: unknown) => void; reject: (e: unknown) => void }> = []
 vi.mock('./lib/script-api', async (orig) => {
   const real: any = await orig()
   return {
     ...real,
     call: vi.fn((action: string) => {
       if (action === 'whoami') {
-        return new Promise((resolve) => pendingWhoami.push({ sentWith: real.getSessionToken(), resolve }))
+        return new Promise((resolve, reject) => pendingWhoami.push({ sentWith: real.getSessionToken(), resolve, reject }))
       }
       if (action === 'shops') return Promise.resolve([{ shop_id: 'HZ', brand: 'HOUZE', authorised: true }])
       return new Promise(() => {})
@@ -50,7 +50,7 @@ vi.mock('./more/Users', () => ({ default: () => <div>USERS</div> }))
 vi.mock('./more/About', () => ({ default: () => <div>ABOUT</div> }))
 
 import App from './App'
-import { getSessionToken, setSessionToken } from './lib/script-api'
+import { getSessionToken, ScriptError, setSessionToken } from './lib/script-api'
 import { rememberMe, rememberShops } from './lib/boot-cache'
 
 describe('sign out against a late whoami', () => {
@@ -88,6 +88,25 @@ describe('sign out against a late whoami', () => {
     expect(moreProps?.user?.admin).toBe(false)          // and never A's role
     const boot = JSON.parse(localStorage.getItem('tikshop.boot') ?? 'null')
     expect(boot?.session === aTok).toBe(false)          // nothing of A's remembered
+  })
+
+  it("a late REFUSAL of A's whoami, after B signs in, does not sign B out", async () => {
+    // The failure half of the same race: A's session was dead, the refusal
+    // arrives after the hand-over, and it must not clear B's credentials.
+    const aTok = tok('a@x.com')
+    setSessionToken(aTok)
+    rememberMe(aTok, meOf('a@x.com', true) as any)
+    const el = document.createElement('div'); document.body.appendChild(el)
+    const root = createRoot(el)
+    await act(async () => { root.render(<MemoryRouter initialEntries={['/more']}><App /></MemoryRouter>) })
+    const pending = pendingWhoami[pendingWhoami.length - 1]!
+    await act(async () => { moreProps.onSignOut() })
+    const bMe = meOf('b@x.com', false)
+    setSessionToken(bMe.session_token)
+    await act(async () => { signInCb!(bMe) })
+    await act(async () => { pending.reject(new ScriptError(401, 'dead', 'SESSION_INVALID')) })
+    expect(getSessionToken()).toBe(bMe.session_token)
+    expect(el.textContent).toContain('MORE')
   })
 
   it('A signs out and walks away; the late whoami does not sign A back in', async () => {

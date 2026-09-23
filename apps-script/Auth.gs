@@ -263,7 +263,11 @@ function usersForAuth_(fresh) {
   } catch (e) {
     // A cache that cannot be read means reading the Sheet, as before.
   }
-  if (fresh) invalidateRead_(TAB_USERS);
+  // Always a real read, never this request's memo. The memo can predate the
+  // version just read: sign-in looks users up twice (the owner, then the
+  // person), and a block landing between the two would otherwise be saved
+  // under the NEW version from rows read BEFORE it — undone for a minute.
+  invalidateRead_(TAB_USERS);
   var rows = usersAll_();
   if (key) {
     try {

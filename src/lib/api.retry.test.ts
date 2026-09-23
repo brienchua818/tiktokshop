@@ -121,15 +121,26 @@ describe('retryRead', () => {
     },
   )
 
-  it('a refusal is reported once nothing can still succeed, and is not retried', async () => {
+  it('a verdict on the hedge is final at once, not waited on', async () => {
+    // An expired session does not become valid by waiting for a stuck twin;
+    // waiting only makes the person hear it later.
     const { read } = scripted([
       { after: 60_000, fail: timeout() },
       { after: 100, fail: new ScriptError(401, 'expired', 'SESSION_EXPIRED') },
     ])
     const r = await timed(retryRead(read))
     expect((r.e as ScriptError).code).toBe('SESSION_EXPIRED')
-    // A refusal outranks the timeout that came with it, and ends the read:
-    // no third request.
+    expect(r.at).toBeLessThan(10_000)
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('a trip refusal is reported if its twin fails too, and is not retried', async () => {
+    const { read } = scripted([
+      { after: 12_000, fail: timeout() },
+      { after: 100, fail: new ScriptError(401, 'lost', 'CREDENTIAL_LOST_IN_TRANSIT') },
+    ])
+    const r = await timed(retryRead(read))
+    expect((r.e as ScriptError).code).toBe('CREDENTIAL_LOST_IN_TRANSIT')
     expect(read).toHaveBeenCalledTimes(2)
   })
 

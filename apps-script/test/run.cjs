@@ -171,7 +171,7 @@ ${src}
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
     ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
-    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_, pushedToday_
+    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_, pushedToday_, listListings_
   };
 `
 
@@ -3890,6 +3890,69 @@ console.log('\nthe daily upload count sees every push made today')
       gs.invalidateRead_()
       eq(gs.pushedToday_('PM'), 2)
     })
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// The listing picker is newest first, not ordered by weekday.
+//
+// It sorted on String(created_at). Sheets hands that back as a Date object, so
+// the string was "Wed Sep 23 ..." and the picker sorted by weekday name — the
+// fault fixed for the variation list and left here.
+// ---------------------------------------------------------------------------
+console.log('\nthe listing picker is newest first')
+
+{
+  const COLS = ['listing_id', 'shop_id', 'created_at']
+  let rows = []
+  const listSheet = () => ({
+    getLastRow: () => rows.length + 1,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => rows.map((o) => COLS.slice(c - 1, c - 1 + nc).map((k) => (k in o ? o[k] : ''))),
+      setValues: () => {}, setValue: () => {}, setFontWeight() { return this },
+    }),
+  })
+  const install = () => { gs.__setHeaders('Listings', COLS); gs.__setSheetImpl(listSheet); gs.invalidateRead_() }
+
+  check('Date objects from the Sheet sort by time, not weekday name', () => {
+    install()
+    // Mon 21, Sun 20, Wed 23 Sep. By weekday text: Mon, Sun, Wed. By time: 23, 21, 20.
+    rows = [
+      { listing_id: 'MON', shop_id: 'HZ', created_at: new Date('2026-09-21T03:00:00Z') },
+      { listing_id: 'SUN', shop_id: 'HZ', created_at: new Date('2026-09-20T03:00:00Z') },
+      { listing_id: 'WED', shop_id: 'HZ', created_at: new Date('2026-09-23T03:00:00Z') },
+    ]
+    eq(gs.listListings_('HZ').map((l) => l.listing_id), ['WED', 'MON', 'SUN'])
+  })
+
+  check('a mix of Date objects and ISO strings sorts together', () => {
+    install()
+    rows = [
+      { listing_id: 'A', shop_id: 'HZ', created_at: '2026-09-20T03:00:00.000Z' },
+      { listing_id: 'B', shop_id: 'HZ', created_at: new Date('2026-09-22T03:00:00Z') },
+      { listing_id: 'C', shop_id: 'HZ', created_at: '2026-09-21T03:00:00.000Z' },
+    ]
+    eq(gs.listListings_('HZ').map((l) => l.listing_id), ['B', 'C', 'A'])
+  })
+
+  check('a listing with no usable time sorts last', () => {
+    install()
+    rows = [
+      { listing_id: 'NONE', shop_id: 'HZ', created_at: '' },
+      { listing_id: 'OLD', shop_id: 'HZ', created_at: '2026-09-01T03:00:00.000Z' },
+    ]
+    eq(gs.listListings_('HZ').map((l) => l.listing_id), ['OLD', 'NONE'])
+  })
+
+  check('only the asked shop', () => {
+    install()
+    rows = [
+      { listing_id: 'X', shop_id: 'HZ', created_at: '2026-09-20T03:00:00.000Z' },
+      { listing_id: 'Y', shop_id: 'PM', created_at: '2026-09-21T03:00:00.000Z' },
+    ]
+    eq(gs.listListings_('HZ').map((l) => l.listing_id), ['X'])
   })
 }
 

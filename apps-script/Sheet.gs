@@ -360,10 +360,24 @@ function logEvent_(actor, action, shop, detail, result) {
 }
 
 // ── listings ─────────────────────────────────────────────────────────
+/**
+ * A shop's listings, newest first — by the instant, not by the text.
+ *
+ * This sorted on `String(created_at)`. Sheets turns an ISO string into a Date
+ * object when it is written, so that string was "Wed Sep 23 2026 ..." and the
+ * listing picker was ordered by WEEKDAY NAME — the same fault that once sorted
+ * the variation list, fixed there and left here. `isoOf_` gives one comparable
+ * shape whether the cell holds a Date or a string; a listing with no usable
+ * time sorts last rather than wherever its garbage happened to land.
+ */
 function listListings_(shopId) {
+  var when = function (r) {
+    var t = Date.parse(isoOf_(r.created_at));
+    return isNaN(t) ? -Infinity : t;
+  };
   return readAll_(TAB_LISTINGS)
     .filter(function (r) { return String(r.shop_id) === String(shopId); })
-    .sort(function (a, b) { return String(b.created_at).localeCompare(String(a.created_at)); });
+    .sort(function (a, b) { return when(b) - when(a); });
 }
 
 function addListing_(shopId, listingId, actor, productName) {

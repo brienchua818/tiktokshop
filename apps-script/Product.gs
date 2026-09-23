@@ -285,8 +285,54 @@ function ttGetProductVersion_(prefix, productId, underReview) {
     // to open Seller Center.
     status: r.data.status || '',
     auditReasons: auditReasons_(r.data),
+    /**
+     * The product's own main image, kept so an edit can fill a gap it did not
+     * create. See `withVariantImages_`.
+     */
+    mainImageUri: (((r.data.main_images || [])[0]) || {}).uri || '',
     skus: skus
   };
+}
+
+/**
+ * Every listed variant must carry an image, including ones we did not list.
+ *
+ * TikTok, 12052522: *"a main image URI is missing for one or more listed
+ * product variants. Upload an image with use_case=ATTRIBUTE_IMAGE, set the
+ * returned URI for every listed variant, and retry."* It applies to the WHOLE
+ * payload, and an append has to send every existing SKU back — so one
+ * variation without a photo makes every future append from this app fail.
+ *
+ * A7, HOUZE, 23 Sep: a variation called "test 1" had been added in Seller
+ * Center with no attribute image. Seller Center allowed it; the API will not
+ * round-trip it. The listing was permanently unappendable, and nothing in the
+ * app said why.
+ *
+ * The gap is filled with the PRODUCT'S OWN main image. Brien's call, and the
+ * defensible one: it is the same product, so it is not a wrong picture, where
+ * using the incoming variant's photo would put one product's picture on
+ * another. Logged every time, because it does change what a buyer sees on a
+ * variation somebody else created and there is no way back to "no image".
+ *
+ * Returns the count filled so the caller can report it.
+ */
+function withVariantImages_(skus, mainImageUri, listingId) {
+  var filled = [];
+  skus.forEach(function (sku) {
+    var attribute = (sku.sales_attributes || [])[0];
+    if (!attribute) return;
+    if (attribute.sku_img && attribute.sku_img.uri) return;
+    if (!mainImageUri) return;
+    attribute.sku_img = { uri: mainImageUri };
+    filled.push(attribute.value_name || attribute.value_id || sku.seller_sku || '(unnamed)');
+  });
+  if (filled.length) {
+    warn_('TS-PRD-38', 'On ' + listingId + ', ' + filled.length + ' existing variation(s) had no ' +
+      'photo and TikTok refuses an edit without one on every variant: ' + filled.join(', ') +
+      '. They were given the listing\u2019s own main image so this push could go through. ' +
+      'Set a proper photo in Seller Center if a different one is wanted.');
+  }
+  return filled;
 }
 
 /**
@@ -963,6 +1009,10 @@ function buildRemovePayload_(snapshot, alsoKeep, removeId) {
       'This is a bug — nothing was sent to TikTok.');
   }
 
+  // The same rule applies to a removal: the edit carries every remaining SKU,
+  // so one of them without a photo fails the whole thing.
+  withVariantImages_(skus, snapshot.mainImageUri, String(snapshot.productId || ''));
+
   return { skus: skus, removed: target };
 }
 
@@ -1169,6 +1219,10 @@ function buildAppendPayload_(snapshot, addition, alsoKeep) {
         ' would have been deleted. This is a bug — nothing was sent to TikTok.');
     }
   }
+
+  // Every variant TikTok will see must carry a photo, including ones added in
+  // Seller Center without one. See withVariantImages_ — TikTok 12052522.
+  withVariantImages_(skus, snapshot.mainImageUri, String(snapshot.productId || ''));
 
   return { skus: skus, category_version: CATEGORY_VERSION };
 }

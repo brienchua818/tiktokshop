@@ -133,6 +133,7 @@ ${src}
     normaliseRole_, canList_, isAdmin_, ROLE_ADMIN, ROLE_LISTER, ROLE_PENDING, ROLE_BLOCKED,
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
+    withVariantImages_,
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
     summaryHeader_, summaryRow_, summaryTotalRow_, summaryOrderCount_,
@@ -3235,6 +3236,90 @@ check('the Net cost TOTAL equals the sum of the cost column above it', () => {
   const totalRow = gs.summaryTotalRow_(cols, divisor, totals, 3, rows)
   eq(totalRow.length, header.length)
   eq(totalRow[costCol], Math.round(colSum * 100) / 100, 'the TOTAL must be the column summed')
+})
+
+
+
+// ---------------------------------------------------------------------------
+// Every listed variant must carry a photo — including ones we did not list.
+//
+// TikTok 12052522 applies to the WHOLE payload, and an append sends every
+// existing SKU back. A7, HOUZE, 23 Sep: a variation called "test 1" had been
+// added in Seller Center with no attribute image, which Seller Center allowed
+// and the API will not round-trip. That listing could never be appended to
+// again, and nothing in the app said why.
+// ---------------------------------------------------------------------------
+console.log('\na variant with no photo cannot block the whole listing')
+
+const SNAP_IMG = 'main-img-uri'
+
+check('an existing variation with no photo is given the product\'s main image', () => {
+  const snap = {
+    productId: 'P', title: 't', mainImageUri: SNAP_IMG,
+    skus: [sku({ id: '1' }), sku({ id: '2', valueId: '', valueName: 'test 1', skuImgUri: '' })],
+  }
+  const p = gs.buildAppendPayload_(snap, addition)
+  const byName = {}
+  p.skus.forEach((x) => { byName[x.sales_attributes[0].value_name || x.sales_attributes[0].value_id] = x })
+
+  // Every single variant in the payload carries an image. That is the rule.
+  p.skus.forEach((x, i) => {
+    const img = x.sales_attributes[0].sku_img
+    eq(Boolean(img && img.uri), true, 'variant ' + i + ' must carry a photo')
+  })
+  eq(byName['test 1'].sales_attributes[0].sku_img.uri, SNAP_IMG, "the product's own photo, not another variant's")
+})
+
+check('a variation that already has a photo keeps it', () => {
+  const snap = {
+    productId: 'P', title: 't', mainImageUri: SNAP_IMG,
+    skus: [sku({ id: '1', skuImgUri: 'its-own-photo' })],
+  }
+  const p = gs.buildAppendPayload_(snap, addition)
+  eq(p.skus[0].sales_attributes[0].sku_img.uri, 'its-own-photo')
+})
+
+check('the SKU being added keeps its own photo, never the main image', () => {
+  const snap = {
+    productId: 'P', title: 't', mainImageUri: SNAP_IMG,
+    skus: [sku({ id: '1', skuImgUri: '' })],
+  }
+  const p = gs.buildAppendPayload_(snap, addition)
+  const added = p.skus.filter((x) => !x.id)[0]
+  eq(added.sales_attributes[0].sku_img.uri, 'img-new', 'the new variant is the one photo we do know')
+})
+
+check('a removal carries photos on every remaining variant too', () => {
+  // The same rule: a remove sends every SKU that stays, so one without a photo
+  // fails the whole edit and the variation is never removed.
+  const snap = {
+    productId: 'P', title: 't', mainImageUri: SNAP_IMG,
+    skus: [sku({ id: '1' }), sku({ id: '2', valueId: '', valueName: 'test 1', skuImgUri: '' }), sku({ id: '3' })],
+  }
+  const p = gs.buildRemovePayload_(snap, [], '3')
+  eq(p.skus.length, 2)
+  p.skus.forEach((x, i) => {
+    eq(Boolean(x.sales_attributes[0].sku_img && x.sales_attributes[0].sku_img.uri), true,
+      'remaining variant ' + i + ' must carry a photo')
+  })
+})
+
+check('no main image to borrow leaves the payload untouched rather than inventing one', () => {
+  // Nothing sensible to fill with. The push will be refused by TikTok with its
+  // own message naming the variant, which is better than a fabricated uri.
+  const skus = [{ sales_attributes: [{ value_name: 'test 1' }] }]
+  eq(gs.withVariantImages_(skus, '', 'P'), [])
+  eq(skus[0].sales_attributes[0].sku_img, undefined)
+})
+
+check('it reports which variations it filled, for the log', () => {
+  const skus = [
+    { sales_attributes: [{ value_name: 'test 1' }] },
+    { sales_attributes: [{ value_name: 'ok', sku_img: { uri: 'has-one' } }] },
+    { seller_sku: 'B2', sales_attributes: [{}] },
+  ]
+  eq(gs.withVariantImages_(skus, SNAP_IMG, 'P'), ['test 1', 'B2'])
+  eq(skus[1].sales_attributes[0].sku_img.uri, 'has-one', 'the one that had a photo is untouched')
 })
 
 

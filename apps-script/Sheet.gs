@@ -235,6 +235,9 @@ function appendRows_(name, rows) {
   });
   invalidateRead_(name);
   if (name === TAB_SKUS) bumpSkuVersion_();
+  // Anyone registered, including the seeded owner: sign-in's cached copy of
+  // the Users tab must see them on the next request. See usersForAuth_.
+  if (name === TAB_USERS) invalidateUsersCache_();
 }
 
 /**

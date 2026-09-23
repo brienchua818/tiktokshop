@@ -207,11 +207,67 @@ function shortClient_(id) {
 
 function usersAll_() { return readAll_(TAB_USERS); }
 
-function findUser_(email) {
+/**
+ * The Users tab, as sign-in needs it, without re-reading it on every request.
+ *
+ * `resolveUser_` runs on EVERY authenticated request — every push, refresh and
+ * stock change — and it read the whole Users tab from the Sheet each time:
+ * measured by the latency sweep at 0.3-1.5s per request on sign-in and
+ * 0.2-1.0s on every other call. The tab is small and changes rarely, so it is
+ * kept in the script cache for a minute.
+ *
+ * Three rules keep that safe, and each is load-bearing:
+ *
+ *   1. Changing a role through the app clears this at once (`setRole`), and
+ *      so does registering anyone (`appendRows_`). A block takes effect on the
+ *      very next request, for every phone.
+ *   2. A MISS is never proof of absence. `findUser_` re-reads the Sheet before
+ *      concluding somebody is new, so a person added by hand in the last
+ *      minute is found rather than registered a second time.
+ *   3. The admin Users screen does not use this at all; it reads the Sheet
+ *      fresh, so it always shows the true state.
+ *
+ * The one real limit: a role edited BY HAND in the Sheet, bypassing the app,
+ * can take up to USERS_CACHE_TTL_S to apply. Through the app it is instant.
+ */
+var USERS_CACHE_KEY = 'users:auth';
+var USERS_CACHE_TTL_S = 60;
+
+function usersForAuth_() {
+  try {
+    var hit = CacheService.getScriptCache().get(USERS_CACHE_KEY);
+    if (hit) return JSON.parse(hit);
+  } catch (e) {
+    // A cache that cannot be read means reading the Sheet, as before.
+  }
+  var rows = usersAll_();
+  try {
+    CacheService.getScriptCache().put(USERS_CACHE_KEY, JSON.stringify(rows), USERS_CACHE_TTL_S);
+  } catch (e) {
+    // Too large or unavailable: correct, just not faster.
+  }
+  return rows;
+}
+
+/** Forget the cached Users tab. Called by everything that changes who may do what. */
+function invalidateUsersCache_() {
+  try { CacheService.getScriptCache().remove(USERS_CACHE_KEY); } catch (e) { /* best effort */ }
+}
+
+function findIn_(rows, email) {
   var target = String(email || '').toLowerCase();
-  return usersAll_().filter(function (u) {
+  return rows.filter(function (u) {
     return String(u.email).toLowerCase() === target;
   })[0] || null;
+}
+
+function findUser_(email) {
+  var hit = findIn_(usersForAuth_(), email);
+  if (hit) return hit;
+  // Not in the cached copy is not the same as not in the Sheet: they may have
+  // been added by hand a moment ago. Only a fresh read may say "new".
+  invalidateUsersCache_();
+  return findIn_(usersAll_(), email);
 }
 
 /** Seed the owner as admin, so there is always someone who can approve. */

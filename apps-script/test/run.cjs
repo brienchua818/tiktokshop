@@ -135,6 +135,7 @@ ${src}
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     withVariantImages_, touchLastSeen_, LAST_SEEN_TTL_S,
+    findUser_, usersForAuth_, invalidateUsersCache_, USERS_CACHE_TTL_S,
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
     summaryHeader_, summaryRow_, summaryTotalRow_, summaryOrderCount_,
@@ -3379,6 +3380,96 @@ check('a busy lock skips the write and tries again next time', () => {
 })
 
 check('the freshness window is an hour', () => eq(gs.LAST_SEEN_TTL_S, 3600))
+
+
+
+// ---------------------------------------------------------------------------
+// Sign-in does not re-read the Users tab on every request — safely.
+//
+// resolveUser_ runs on every authenticated request, and read the whole Users
+// tab from the Sheet each time: 0.3-1.5s on sign-in, 0.2-1.0s on every push
+// and refresh. It is now cached for a minute. These pin the rules that make
+// that safe, because this is the code that decides who is allowed in.
+// ---------------------------------------------------------------------------
+console.log('\nthe Users tab is cached for sign-in, and never at the cost of safety')
+
+{
+  const USERS_HEADERS = ['email', 'name', 'role', 'first_seen', 'last_seen', 'approved_by', 'note']
+  let userRows = []
+  let userReads = 0
+  const usersSheet = () => ({
+    getLastRow: () => userRows.length + 1,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => { userReads++; return userRows.map((row) => row.slice(c - 1, c - 1 + nc)) },
+      getValue: () => '',
+      setValue: () => {},
+      setValues: () => {},
+      setFontWeight() { return this },
+    }),
+  })
+  const person = (email, role) => [email, email.split('@')[0], role, '', '', '', '']
+  const freshRequest = () => gs.invalidateRead_()  // each execution starts with no per-request memo
+  const installUsers = () => {
+    gs.__setHeaders('Users', USERS_HEADERS)
+    gs.__setSheetImpl(usersSheet)
+    cacheState.store = {}
+    freshRequest()
+    userReads = 0
+  }
+
+  check('a known person is found without re-reading the Sheet on the next request', () => {
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')
+    const afterFirst = userReads
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')
+    eq(userReads, afterFirst, 'the second and third requests must not touch the Sheet')
+  })
+
+  check('changing who may do what is seen on the very next request', () => {
+    // A block must not wait out the cache.
+    installUsers()
+    userRows = [person('anthea@sheldonglobal.com', 'lister')]
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')
+    userRows = [person('anthea@sheldonglobal.com', 'blocked')]
+    gs.invalidateUsersCache_()   // what setRole and appendRows_ now do
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked')
+  })
+
+  check('a miss in the cache re-reads the Sheet before calling anyone new', () => {
+    // Brien adds someone by hand; the cached copy has not heard of them yet.
+    // Treating that as "new" would register them a second time as pending.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin')]
+    gs.findUser_('brienchua@sheldonglobal.com')      // warms the cache without Judy
+    userRows.push(person('judy@sheldonglobal.com', 'lister'))
+    freshRequest()
+    const judy = gs.findUser_('judy@sheldonglobal.com')
+    eq(Boolean(judy), true, 'a person added by hand must be found, not treated as new')
+    eq(judy.role, 'lister')
+  })
+
+  check('someone genuinely absent is still reported absent', () => {
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin')]
+    eq(gs.findUser_('stranger@example.com'), null)
+  })
+
+  check('registering anyone clears the cached copy', () => {
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin')]
+    gs.usersForAuth_()
+    eq(Object.keys(cacheState.store).includes('users:auth'), true)
+    gs.appendRows_('Users', [person('new@sheldonglobal.com', 'pending')])
+    eq(Object.keys(cacheState.store).includes('users:auth'), false, 'appendRows_ to Users must invalidate')
+  })
+
+  check('the cache is short-lived', () => eq(gs.USERS_CACHE_TTL_S <= 60, true))
+}
 
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')

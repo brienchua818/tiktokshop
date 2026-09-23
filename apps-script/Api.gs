@@ -534,6 +534,9 @@ function setRole_(email, role, actor) {
       sh.getRange(i, 6).setValue(actor.email);
       // Written outside Sheet.gs, so it clears the request read cache itself.
       invalidateRead_(TAB_USERS);
+      // And the cross-request copy sign-in uses, so a block or an approval
+      // takes effect on the very next request rather than a minute later.
+      invalidateUsersCache_();
       logEvent_(actor.name, 'set_role', '', target + ' -> ' + role, 'ok');
       return { email: target, role: role };
     }

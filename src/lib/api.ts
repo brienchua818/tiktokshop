@@ -423,15 +423,126 @@ export type Me = SignedInUser & {
  * again could duplicate it; those belong to the offline queue and are
  * protected by an idempotency key instead.
  */
-export async function retryRead<T>(read: () => Promise<T>, attempts = 3): Promise<T> {
+/**
+ * When to ask a second time, and how long to wait in all.
+ *
+ * Opening the app waited up to 25 seconds per attempt, three attempts over —
+ * 25 + 1 + 25 + 2 + 25 = 78s for ONE read, and sign-in ran two back to back.
+ * That is Brien's one-minute sign-in.
+ *
+ * Measured against the live deployment on 23 Sep, `ping` answers in 1.5-2s
+ * nearly every time and occasionally draws a spike of 11-31s — Google's, not
+ * ours, and independent from one request to the next.
+ *
+ * The first fix abandoned an attempt at eight seconds and started again. The
+ * speed check caught that it was wrong: it rescues a SPIKE, but on a backend
+ * that is uniformly slow — every reply taking twenty seconds, which `whoami`
+ * genuinely does on a bad day — it threw away answers that were about to
+ * arrive, and a first sign-in never finished at all.
+ *
+ * So this HEDGES instead. At `hedgeMs` a second request is sent while the
+ * first is kept alive, and whichever answers first wins:
+ *
+ *   normal            ~2s     one request, no hedge
+ *   one spike         ~8s     the hedge lands while the first is stuck (was ~28s)
+ *   uniformly slow    ~20s    the first still lands; nothing is thrown away
+ *   backend down      51s     two attempts, then it says so (was 78s)
+ *
+ * Only for READS. A read changes nothing, so running it twice costs one extra
+ * execution and nothing else — and only in the rare case it is already slow.
+ * Writes never come through here.
+ */
+export interface ReadPlan {
+  /** Send a second, parallel request if the first has not answered by now. */
+  hedgeMs: number
+  /** How long each attempt may take in all. */
+  deadlineMs: number
+  /** Attempts in total, each hedged. */
+  attempts: number
+}
+
+export const LIGHT_READ: ReadPlan = { hedgeMs: 8_000, deadlineMs: 25_000, attempts: 2 }
+
+/**
+ * `listingState` reads TikTok twice — the live product and the one under
+ * review — plus the Sheet and the sales index, so a healthy answer can take a
+ * while on a big listing. It hedges later, so honest work is not doubled up.
+ */
+export const HEAVY_READ: ReadPlan = { hedgeMs: 20_000, deadlineMs: 40_000, attempts: 2 }
+
+/** One attempt: the first request, plus a hedge if it is slow. First success wins. */
+function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    let failures = 0
+    let started = 0
+    let lastError: unknown = null
+    let hedgeTimer: ReturnType<typeof setTimeout> | null = null
+
+    const done = (ok: boolean, value: unknown) => {
+      if (settled) return
+      if (ok) {
+        settled = true
+        if (hedgeTimer) clearTimeout(hedgeTimer)
+        resolve(value as T)
+        return
+      }
+      // A refusal is final whichever request carried it: a 401 does not
+      // become a 200 by asking twice, and the person should hear it now.
+      if (value instanceof ScriptError && !value.isRetryable) {
+        settled = true
+        if (hedgeTimer) clearTimeout(hedgeTimer)
+        reject(value)
+        return
+      }
+      lastError = value
+      failures++
+      // Failed before the hedge was due: send it NOW. Waiting out the rest of
+      // `hedgeMs` after a fast 5xx would make the quick failure the slow one.
+      if (hedgeTimer) {
+        clearTimeout(hedgeTimer)
+        hedgeTimer = null
+        launch(plan.deadlineMs)
+        return
+      }
+      // Only give up once every request that was started has failed.
+      if (failures >= started) {
+        settled = true
+        reject(lastError)
+      }
+    }
+
+    const launch = (timeoutMs: number) => {
+      started++
+      read(timeoutMs).then(
+        (v) => done(true, v),
+        (e: unknown) => done(false, e),
+      )
+    }
+
+    launch(plan.deadlineMs)
+    hedgeTimer = setTimeout(() => {
+      hedgeTimer = null
+      if (settled) return
+      launch(Math.max(1_000, plan.deadlineMs - plan.hedgeMs))
+      // If the first already failed while we waited, the hedge is now the
+      // only one in flight and its outcome decides.
+    }, plan.hedgeMs)
+  })
+}
+
+export async function retryRead<T>(
+  read: (timeoutMs: number) => Promise<T>,
+  plan: ReadPlan = LIGHT_READ,
+): Promise<T> {
   for (let n = 1; ; n++) {
     try {
-      return await read()
+      return await hedged(read, plan)
     } catch (e: unknown) {
       // A timeout or a 5xx is worth asking again. A 401 or a 403 is not, and
       // retrying only delays saying so.
       const retryable = e instanceof ScriptError ? e.isRetryable : true
-      if (n >= attempts || !retryable) throw e
+      if (n >= plan.attempts || !retryable) throw e
       await new Promise((r) => setTimeout(r, n * 1_000))
     }
   }
@@ -440,17 +551,17 @@ export async function retryRead<T>(read: () => Promise<T>, attempts = 3): Promis
 export const api = {
   /** Who the backend thinks you are, and whether you may act yet. */
   me: async () => {
-    const me = await retryRead(() => call<Me>('whoami'))
+    const me = await retryRead((timeoutMs) => call<Me>('whoami', { timeoutMs }))
     // The Google token bought this; the session is what every later call
     // uses, so a phone is not sent back to sign in every hour.
     if (me.session_token) setSessionToken(me.session_token)
     return me
   },
 
-  shops: () => retryRead(() => call<Shop[]>('shops')),
+  shops: () => retryRead((timeoutMs) => call<Shop[]>('shops', { timeoutMs })),
 
   listings: (shopId: string) =>
-    retryRead(() => call<Listing[]>('listings', { body: { shop_id: shopId } })),
+    retryRead((timeoutMs) => call<Listing[]>('listings', { body: { shop_id: shopId }, timeoutMs })),
 
   /**
    * The shop's live products on TikTok, so a stream can be picked from a list.
@@ -507,7 +618,10 @@ export const api = {
      * Two covers the random slow response, which is what this is; a genuinely
      * slow backend needs fixing, not asking again.
      */
-    retryRead(() => call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs: 40_000 }), 2),
+    retryRead(
+      (timeoutMs) => call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs }),
+      HEAVY_READ,
+    ),
 
   /**
    * The variations taken off a listing. Asked for only when that tab is opened.

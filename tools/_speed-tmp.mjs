@@ -28,7 +28,7 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const PORT = 4179
+const PORT = 4187
 const DIST = new URL('../dist', import.meta.url).pathname
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png' }
 

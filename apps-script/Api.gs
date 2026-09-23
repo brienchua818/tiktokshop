@@ -190,7 +190,11 @@ function handle_(e, method) {
         // app, so a folder can be moved without a redeploy — and so the
         // "Data sheet" row in the app opens the real thing instead of a
         // guess at its URL.
-        links: driveLinks_()
+        links: driveLinks_(),
+        // The shop list rides along for anyone allowed to see it, so a first
+        // sign-in is one round trip rather than whoami THEN shops. The same
+        // rule as the `shops` action: approved people only.
+        shops: canList_(user) ? shopsForClient_() : undefined
       });
     }
 

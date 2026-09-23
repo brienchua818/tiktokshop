@@ -73,7 +73,7 @@ const SLOW = new Set(['whoami', 'shops'])
 
 const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' })
 
-async function timeToUsable({ remembered, spike = false }) {
+async function timeToUsable({ remembered, spike = false, shopsWithWhoami = false }) {
   const context = await browser.newContext({ viewport: { width: 393, height: 852 }, isMobile: true, hasTouch: true })
   const seen = {}
   await context.route('**script.google.com/**', async (route) => {
@@ -87,7 +87,7 @@ async function timeToUsable({ remembered, spike = false }) {
     } else if (SLOW.has(action)) {
       await new Promise((r) => setTimeout(r, SLOW_MS))
     }
-    const body = REPLIES[action]
+    const body = action === 'whoami' && shopsWithWhoami ? { ...REPLIES.whoami, shops: SHOPS } : REPLIES[action]
     await route.fulfill({
       status: 200, contentType: 'application/json',
       body: JSON.stringify(body === undefined ? { _status: 200 } : body),
@@ -189,6 +189,15 @@ report('round trip', trip.usable, trip.stored && trip.usable >= 0 && trip.usable
 const first = await timeToUsable({ remembered: false })
 report('first run', first, first >= SLOW_MS,
   `must WAIT for the backend (proves the harness can see a slow start)`)
+
+/**
+ * The same first run against the new backend, which sends the shops with
+ * whoami. One slow round trip instead of two: it must wait for whoami, and
+ * must NOT then wait for a second call.
+ */
+const firstNew = await timeToUsable({ remembered: false, shopsWithWhoami: true })
+report('first run+', firstNew, firstNew >= SLOW_MS && firstNew < SLOW_MS + 5_000,
+  `shops ride on whoami: one ${SLOW_MS / 1000}s wait, not two`)
 
 /**
  * The case Brien actually hit: a first sign-in where Google's first reply

@@ -155,18 +155,36 @@ export default function App() {
      */
     let cancelled = false
 
+    const apply = (rows: Shop[]) => {
+      setShops(rows)
+      shopsFromMemory.current = false
+      rememberShops(getSessionToken(), rows)
+      // Remember the last shop across sessions: the team works one brand at
+      // a time and re-picking it every morning is friction for nothing.
+      const remembered = localStorage.getItem('tikshop.shop')
+      const valid = rows.find((s) => s.shop_id === remembered) ?? rows[0]
+      setShopId(valid?.shop_id ?? null)
+    }
+
+    /**
+     * Already here, if the backend sent them with whoami — which saves a
+     * whole round trip on a first sign-in, the one case with nothing
+     * remembered to show meanwhile. An older backend does not send them, and
+     * then they are asked for, exactly as before. Only ever FRESH: the
+     * remembered copy of a person carries no shops (see rememberMe), so a
+     * remembered list is never re-saved here as if the backend had just said it.
+     */
+    const sent = (user as { shops?: Shop[] }).shops
+    if (sent && sent.length) {
+      apply(sent)
+      return
+    }
+
     api
       .shops()
       .then((rows) => {
         if (cancelled) return
-        setShops(rows)
-        shopsFromMemory.current = false
-        rememberShops(getSessionToken(), rows)
-        // Remember the last shop across sessions: the team works one brand at
-        // a time and re-picking it every morning is friction for nothing.
-        const remembered = localStorage.getItem('tikshop.shop')
-        const valid = rows.find((s) => s.shop_id === remembered) ?? rows[0]
-        setShopId(valid?.shop_id ?? null)
+        apply(rows)
       })
       .catch((e: unknown) => {
         if (e instanceof SignedOutMeanwhile) return

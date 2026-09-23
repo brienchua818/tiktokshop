@@ -401,6 +401,12 @@ export type Me = SignedInUser & {
   /** A session this backend issued, good for a working day. Stored by `me()`. */
   session_token?: string
   session_expires_at?: string
+  /**
+   * The shops, for anyone approved to see them. Sent with whoami so a first
+   * sign-in is one round trip, not whoami THEN shops. Absent from a backend
+   * older than this field, and the app then asks for them separately.
+   */
+  shops?: Shop[]
 }
 
 /**

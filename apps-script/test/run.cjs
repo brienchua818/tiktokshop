@@ -168,7 +168,7 @@ ${src}
     // is an assertion too.
     __setDriveApp: function (d) { DriveApp = d },
     __setUrlFetch: function (u) { UrlFetchApp = u },
-    ttFetch_, appendAssets_, newListingAssets_, pushSku_,
+    ttFetch_, appendAssets_, newListingAssets_, pushSku_, productVersions_,
     // Guarded so the suite still LOADS against code that predates the split,
     // which is how the golden URL below was proven identical to the old one.
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
@@ -3902,6 +3902,59 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(up.url.indexOf('use_case=ATTRIBUTE_IMAGE') > 0, true)
     // The live snapshot is the wrong one during a stream — see ttGetProduct_.
     eq(rd.url.indexOf('return_under_review_version=true') > 0, true)
+  })
+
+  check("a listing's two versions are read in ONE round trip", () => {
+    const out = run(() => gs.productVersions_('HZ', 'P1'))
+    const reads = sent.filter((x) => x.url.indexOf('/products/P1?') > 0)
+    eq(reads.length, 2)
+    eq(reads.every((x) => x.batched), true, 'both in the batch')
+    eq(reads.some((x) => x.url.indexOf('return_under_review_version=true') > 0), true)
+    eq(reads.some((x) => x.url.indexOf('return_under_review_version=false') > 0), true)
+    eq(out.pending.productId, 'P1')
+    eq(out.buyable.productId, 'P1')
+  })
+
+  check('the version under review is first, whichever order the batch comes back in', () => {
+    // fetchAll answers in request order; this pins that the two are not swapped.
+    const tagged = {
+      fetch: () => { throw new Error('not expected') },
+      fetchAll: (batch) => batch.map((b) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({
+        code: 0, data: { id: 'P1', status: b.url.indexOf('return_under_review_version=true') > 0 ? 'UNDER_REVIEW' : 'ACTIVATE', skus: [] },
+      }) })),
+    }
+    const out = run(() => { gs.__setUrlFetch(tagged); return gs.productVersions_('HZ', 'P1') })
+    eq(out.pending.status, 'UNDER_REVIEW')
+    eq(out.buyable.status, 'ACTIVATE')
+  })
+
+  check('a product with no live version still opens, with nothing buyable', () => {
+    const noLive = {
+      fetch: () => { throw new Error('not expected') },
+      fetchAll: (batch) => batch.map((b) => b.url.indexOf('return_under_review_version=false') > 0
+        ? { getResponseCode: () => 200, getContentText: () => '{"code":12052700,"message":"no live version"}' }
+        : reply(PRODUCT)),
+    }
+    const out = run(() => { gs.__setUrlFetch(noLive); return gs.productVersions_('HZ', 'P1') })
+    eq(out.pending.productId, 'P1')
+    eq(out.buyable, null)
+  })
+
+  check('an unreadable product still reports TS-PRD-02', () => {
+    let code = ''
+    try { run(() => gs.productVersions_('HZ', 'P1'), 'product') } catch (e) { code = gs.codeOf_(e) }
+    eq(code, 'TS-PRD-02')
+  })
+
+  check('a batch that fails outright falls back to one at a time', () => {
+    const broken = {
+      fetch: (url) => { sent.push({ url, batched: false }); return reply(PRODUCT) },
+      fetchAll: () => { throw new Error('Address unavailable') },
+    }
+    const out = run(() => { gs.__setUrlFetch(broken); return gs.productVersions_('HZ', 'P1') })
+    eq(out.pending.productId, 'P1')
+    eq(out.buyable.productId, 'P1')
+    eq(sent.filter((x) => !x.batched).length, 2)
   })
 
   check('a real push with a photo reads the product once, in the same batch as the upload', () => {

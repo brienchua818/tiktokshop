@@ -97,9 +97,12 @@ export function rememberMe(session: string | null, me: Me, now: number = Date.no
   }
   const prior = readRaw()
   // The credential is stored on its own already; a copy inside this cache
-  // would only be one more place for it to leak from.
-  const { session_token: _drop, ...safeMe } = me
+  // would only be one more place for it to leak from. Shops are kept once,
+  // below, not inside the person as well: a remembered person with shops in
+  // hand would be taken for a fresh answer, and re-saved as one.
+  const { session_token: _drop, shops: _shops, ...safeMe } = me
   void _drop
+  void _shops
   writeRaw({
     session,
     me: safeMe as Me,

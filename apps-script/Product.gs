@@ -552,6 +552,43 @@ function bySellerSku_(skus) {
   return out;
 }
 
+/**
+ * Both versions of a product, in ONE round trip.
+ *
+ * `listingState` read the version under review, waited for it, then read the
+ * live one — two TikTok calls in a row on every listing tap and every refresh
+ * after a push, though neither needs the other. They now go out together.
+ *
+ * Failures behave exactly as they did one at a time: the version under review
+ * must be readable (TS-PRD-02 if not), and the live one may be missing — a
+ * product never yet approved has none, which is an answer, not an error. A
+ * batch that fails outright (a network error fails every request in it) falls
+ * back to asking one at a time, which is the old path unchanged.
+ */
+function productVersions_(prefix, productId) {
+  var answers = null;
+  try {
+    answers = ttFetchAll_([
+      ttProductRequest_(prefix, productId, true),
+      ttProductRequest_(prefix, productId, false)
+    ]);
+  } catch (e) {
+    answers = null;
+  }
+  var pending = answers
+    ? ttProductFrom_(answers[0], productId)
+    : ttGetProductVersion_(prefix, productId, true);
+  var buyable = null;
+  try {
+    buyable = answers
+      ? ttProductFrom_(answers[1], productId)
+      : ttGetProductVersion_(prefix, productId, false);
+  } catch (e) {
+    warn_('TS-PRD-33', 'No live version for ' + productId + ' (nothing buyable yet): ' + e);
+  }
+  return { pending: pending, buyable: buyable };
+}
+
 function listingState_(listingId) {
   /**
    * Read once.
@@ -589,13 +626,9 @@ function listingState_(listingId) {
    * ("nothing is buyable yet"), not an error worth failing the whole screen
    * over.
    */
-  var live = ttGetProductVersion_(shopId, String(listingId), true);
-  var buyable = null;
-  try {
-    buyable = ttGetProductVersion_(shopId, String(listingId), false);
-  } catch (e) {
-    warn_('TS-PRD-33', 'No live version for ' + listingId + ' (nothing buyable yet): ' + e);
-  }
+  var versions = productVersions_(shopId, String(listingId));
+  var live = versions.pending;
+  var buyable = versions.buyable;
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
   var pendingSkus = bySellerSku_(live.skus);
 

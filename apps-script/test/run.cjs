@@ -25,7 +25,7 @@ const path = require('path')
 const os = require('os')
 
 const DIR = path.join(__dirname, '..')
-const FILES = ['Config.gs', 'Errors.gs', 'Lock.gs', 'Sheet.gs', 'Export.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs']
+const FILES = ['Config.gs', 'Errors.gs', 'Lock.gs', 'Sheet.gs', 'Export.gs', 'Product.gs', 'Auth.gs', 'TikTok.gs', 'Orders.gs', 'Api.gs']
 
 const src = FILES.map((f) => fs.readFileSync(path.join(DIR, f), 'utf8')).join('\n')
 
@@ -142,7 +142,10 @@ ${src}
     skuImageUrl_,
     groupVariationSales_, salesIndex_, salesFor_, UNSOLD_STATUSES,
     withVariantImages_, touchLastSeen_, LAST_SEEN_TTL_S,
-    findUser_, usersForAuth_, invalidateUsersCache_, USERS_CACHE_TTL_S,
+    findUser_, usersForAuth_, invalidateUsersCache_, USERS_CACHE_TTL_S, usersVersion_,
+    setRole_, resolveUser_, registerOnce_, tabChanged_, usersAll_,
+    __sheetReal: sheet_, __spreadsheetApp: SpreadsheetApp,
+    __setPhotosRoot: function (id) { PHOTOS_FOLDER_ID = id },
     emptyTally_, addLine_, addTally_, roundTally_, withLegacyNames_,
     tallyColumns_, tallyHeader_, tallyValues_, netExplainer_, TALLY_COLUMNS,
     summaryHeader_, summaryRow_, summaryTotalRow_, summaryOrderCount_,
@@ -3447,15 +3450,107 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     eq(userReads, afterFirst, 'the second and third requests must not touch the Sheet')
   })
 
-  check('changing who may do what is seen on the very next request', () => {
-    // A block must not wait out the cache.
+  /**
+   * A Users tab that behaves like the real one where it matters here: values
+   * written with setValue sit in a buffer until SpreadsheetApp.flush(), as
+   * Apps Script's do, and setRole_ finds its row with getValue.
+   */
+  const pending = []
+  const bufferedUsersSheet = () => ({
+    getLastRow: () => userRows.length + 1,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => { userReads++; return userRows.map((row) => row.slice(c - 1, c - 1 + (nc || 1))) },
+      getValue: () => (userRows[r - 2] || [])[c - 1],
+      setValue: (v) => { pending.push(() => { userRows[r - 2][c - 1] = v }) },
+      setValues: (vals) => { vals.forEach((row) => pending.push(() => { userRows.push(row.slice()) })) },
+      setFontWeight() { return this },
+    }),
+  })
+  const flushUsers = () => { while (pending.length) pending.shift()() }
+
+  check('a block made through setRole is seen on the very next request', () => {
+    // Through the real setRole_, not a stand-in for what it is supposed to call.
     installUsers()
-    userRows = [person('anthea@sheldonglobal.com', 'lister')]
-    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')
-    userRows = [person('anthea@sheldonglobal.com', 'blocked')]
-    gs.invalidateUsersCache_()   // what setRole and appendRows_ now do
+    gs.__setSheetImpl(bufferedUsersSheet)
+    gs.__spreadsheetApp.flush = flushUsers
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'lister')     // warms the cache
+    gs.setRole_('anthea@sheldonglobal.com', 'blocked', { email: 'brienchua@sheldonglobal.com', name: 'Brien' })
     freshRequest()
     eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked')
+    gs.__spreadsheetApp.flush = () => {}
+  })
+
+  check('a sign-in that read the tab just before a block cannot undo it', () => {
+    // The race the review reproduced: a request misses the cache, reads the
+    // OLD rows, and saves them AFTER setRole has cleared the cache. Clearing a
+    // key cannot stop that; a version the stale copy was not saved under can.
+    installUsers()
+    gs.__setSheetImpl(bufferedUsersSheet)
+    gs.__spreadsheetApp.flush = flushUsers
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    const racerVersion = gs.usersVersion_()                        // the racer reads the version…
+    const stale = JSON.stringify(gs.usersAll_())                    // …and the old rows
+    gs.setRole_('anthea@sheldonglobal.com', 'blocked', { email: 'brienchua@sheldonglobal.com', name: 'Brien' })
+    CACHE.store['users:auth:v' + racerVersion] = stale               // …then saves them, late
+    CACHE.store['users:auth'] = stale                                // (and under the old, unversioned key)
+    freshRequest()
+    eq(gs.findUser_('anthea@sheldonglobal.com').role, 'blocked', 'the late stale copy must be unreachable')
+    gs.__spreadsheetApp.flush = () => {}
+  })
+
+  check('the role is flushed to the Sheet before the cache is retired', () => {
+    // Otherwise the first reader of the new version can still read the old
+    // role out of a Sheet whose write is sitting in the buffer.
+    installUsers()
+    gs.__setSheetImpl(bufferedUsersSheet)
+    const order = []
+    gs.__spreadsheetApp.flush = () => { order.push('flush'); flushUsers() }
+    const realProps = authState.props
+    authState.props = new Proxy({}, { set: (t, k, v) => { if (k === 'USERS_VERSION') order.push('bump'); t[k] = v; return true } })
+    userRows = [person('brienchua@sheldonglobal.com', 'admin'), person('anthea@sheldonglobal.com', 'lister')]
+    gs.setRole_('anthea@sheldonglobal.com', 'blocked', { email: 'brienchua@sheldonglobal.com', name: 'Brien' })
+    const bump = order.indexOf('bump')
+    eq(bump > 0 && order.slice(0, bump).includes('flush'), true, 'order was ' + JSON.stringify(order))
+    authState.props = realProps
+    gs.__spreadsheetApp.flush = () => {}
+  })
+
+  check('two first sign-ins for the same newcomer register them once', () => {
+    // The hedged whoami sends a second request on a slow first sign-in. Both
+    // used to look, both see nobody, and both append — a second row setRole
+    // can never reach. The look that decides must be taken under the lock.
+    installUsers()
+    userRows = [person('brienchua@sheldonglobal.com', 'admin')]
+    const newcomer = { email: 'new.staff@sheldonglobal.com', name: 'New Staff' }
+    const appendSheet = () => ({
+      getLastRow: () => userRows.length + 1,
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => { const snap = userRows.map((row) => row.slice(c - 1, c - 1 + nc)); onRead(); return snap },
+        getValue: () => '', setValue: () => {},
+        setValues: (vals) => { vals.forEach((row) => userRows.push(row.slice())) },
+        setFontWeight() { return this },
+      }),
+    })
+    gs.__setSheetImpl(appendSheet)
+    // Dry run: how many reads does a first sign-in take outside the lock?
+    let unlocked = 0
+    let onRead = () => { if (!lockState.held) unlocked++ }
+    const before = userRows.length
+    gs.resolveUser_(newcomer)
+    const decisive = unlocked
+    userRows.length = before
+    // Real run: the other request runs start to finish during the LAST read
+    // this one takes without the lock — the read that says "absent".
+    cacheState.store = {}; freshRequest()
+    let seen = 0, fired = false
+    onRead = () => {
+      if (lockState.held || fired) return
+      if (++seen === decisive) { fired = true; freshRequest(); gs.resolveUser_(newcomer) }
+    }
+    gs.resolveUser_(newcomer)
+    const rows = userRows.filter((r) => r[0] === newcomer.email)
+    eq(rows.length, 1, 'registered ' + rows.length + ' times')
   })
 
   check('a miss in the cache re-reads the Sheet before calling anyone new', () => {
@@ -3477,13 +3572,16 @@ console.log('\nthe Users tab is cached for sign-in, and never at the cost of saf
     eq(gs.findUser_('stranger@example.com'), null)
   })
 
-  check('registering anyone clears the cached copy', () => {
+  check('registering anyone retires the cached copy', () => {
     installUsers()
     userRows = [person('brienchua@sheldonglobal.com', 'admin')]
-    gs.usersForAuth_()
-    eq(Object.keys(cacheState.store).includes('users:auth'), true)
+    gs.findUser_('brienchua@sheldonglobal.com')
+    const v = gs.usersVersion_()
     gs.appendRows_('Users', [person('new@sheldonglobal.com', 'pending')])
-    eq(Object.keys(cacheState.store).includes('users:auth'), false, 'appendRows_ to Users must invalidate')
+    userRows.push(person('new@sheldonglobal.com', 'pending'))
+    eq(gs.usersVersion_() > v, true, 'appendRows_ to Users must move the version on')
+    freshRequest(); userReads = 0
+    eq(Boolean(gs.findUser_('new@sheldonglobal.com')), true)
   })
 
   check('the cache is short-lived', () => eq(gs.USERS_CACHE_TTL_S <= 60, true))
@@ -3565,6 +3663,29 @@ console.log('\nthe photo folder is found once, not on every save')
 
   check('the remembered folder expires within the working day', () =>
     eq(gs.PHOTO_FOLDER_TTL_S <= 6 * 3600, true))
+
+  check("tomorrow's push does not reuse today's folder", () => {
+    // The TTL cannot promise this — six hours from 11pm is 5am — so the day
+    // must be in the key.
+    installDrive()
+    const today = gs.datedPhotoFolder_('PM', new Date('2026-09-23T15:00:00Z'))   // 11pm SGT
+    newExecution()
+    const tomorrow = gs.datedPhotoFolder_('PM', new Date('2026-09-23T17:00:00Z')) // 1am SGT, next day
+    eq(today.getId() === tomorrow.getId(), false, 'both resolved to ' + today.getId())
+    eq(tomorrow.getId().indexOf('2026-09-24') >= 0, true, tomorrow.getId())
+  })
+
+  check('a changed Photos root is used at once, not after the cache expires', () => {
+    // The cache outlives a re-paste; the root must be part of what it names.
+    installDrive()
+    const at = new Date('2026-09-23T06:00:00Z')
+    gs.__setPhotosRoot('ROOT_OLD')
+    gs.datedPhotoFolder_('PM', at)
+    newExecution()
+    gs.__setPhotosRoot('ROOT_NEW')
+    const f = gs.datedPhotoFolder_('PM', at)
+    eq(f.getId().indexOf('ROOT_NEW') === 0, true, 'filed under ' + f.getId())
+  })
 }
 
 
@@ -3663,6 +3784,30 @@ console.log('\nthe signed TikTok request is byte-for-byte what it was')
     ]) })
     eq(out[0].code, 0, 'the throttled one was retried and succeeded')
     eq(sent.filter((x) => x.retried).length, 1, 'retried exactly once, and only that one')
+  })
+
+  check('the retry goes to the request that was throttled, and its answer lands in its own slot', () => {
+    // The test above always throttles the first request and answers every URL
+    // alike, so it passes whichever request is retried. Retrying the wrong
+    // one is not harmless: in a push, the image-upload answer would be read
+    // as the PRODUCT, whose SKU list would then be empty — and a partial edit
+    // deletes every SKU it does not list.
+    const retried = []
+    const answerFor = (url) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ code: 0, data: { url: url.split('?')[0] } }) })
+    const throttling = {
+      fetch: (url) => { retried.push(url.split('?')[0]); return answerFor(url) },
+      fetchAll: (batch) => batch.map((b) => b.url.indexOf('/products/2?') > 0
+        ? { getResponseCode: () => 429, getContentText: () => '{"code":36009002}' }
+        : answerFor(b.url)),
+    }
+    const out = withTikTok(() => { gs.__setUrlFetch(throttling); return gs.ttFetchAll_([
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/1', {}, null),
+      gs.ttRequest_('HZ', 'get', '/product/202309/products/2', {}, null),
+    ]) })
+    eq(retried.length, 1)
+    eq(retried[0].endsWith('/products/2'), true, 'retried ' + retried[0])
+    eq(out[0].data.url.endsWith('/products/1'), true, 'first slot holds the first answer')
+    eq(out[1].data.url.endsWith('/products/2'), true, 'second slot holds the retried answer')
   })
 }
 
@@ -3792,6 +3937,43 @@ console.log('\nlogging takes no lock')
     gs.warn_('TS-ORD-27', '3 order line(s) carry no creation time')
     eq(lockState.waits, [])
     eq(appended.length, 1)
+  })
+
+  check('two executions that both find the Log tab missing both keep their line', () => {
+    // Through the real sheet_. Execution B runs in full in the gap between A
+    // looking for the tab and A creating it. Creating it without the lock made
+    // A's insert throw "already exists", and logEvent_ swallowed A's line.
+    const tabs = {}
+    const rows = []
+    let interleave = null
+    const makeTab = (name) => ({
+      getName: () => name,
+      appendRow: (r) => rows.push(r[2]),
+      getLastRow: () => 1, getLastColumn: () => 6,
+      getRange: () => ({ getValues: () => [gs.HEADERS_LOG || ['time', 'actor', 'action', 'shop', 'detail', 'result']], setValues() { return this }, setFontWeight() { return this }, clearContent() { return this } }),
+      setFrozenRows: () => {},
+    })
+    const book = {
+      getSheetByName: (n) => {
+        const hit = tabs[n] || null
+        if (n === 'Log' && interleave) { const go = interleave; interleave = null; go() }
+        return hit
+      },
+      insertSheet: (n) => {
+        if (tabs[n]) throw new Error('A sheet with the name "' + n + '" already exists.')
+        tabs[n] = makeTab(n); return tabs[n]
+      },
+      getSheets: () => Object.values(tabs),
+      deleteSheet: () => {},
+    }
+    const realOpen = gs.__spreadsheetApp.openById
+    gs.__spreadsheetApp.openById = () => book
+    gs.__setSheetImpl(gs.__sheetReal)
+    lockState.refused = false
+    interleave = () => gs.logEvent_('B', 'B line', '', '', 'ok')
+    gs.logEvent_('A', 'A line', '', '', 'ok')
+    gs.__spreadsheetApp.openById = realOpen
+    eq(rows.filter((a) => a.endsWith(' line')).sort(), ['A line', 'B line'])
   })
 
   check('a log line still lands while another write holds the lock', () => {

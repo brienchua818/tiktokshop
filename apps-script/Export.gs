@@ -456,8 +456,15 @@ function datedExportFolder_(date) {
  * hours. A later push opens the folder by id — one call — and the thumbnail
  * that follows reuses it for none.
  *
- * If the remembered folder has been deleted or moved, opening it fails and it
- * is simply looked up again, so a stale id costs one retry, never a lost photo.
+ * If the remembered folder has been permanently deleted, opening it fails and
+ * it is looked up again, so a stale id costs one retry, never a lost photo. A
+ * folder MOVED or renamed keeps its id and keeps receiving that day's photos
+ * wherever it now is — the file is still saved and its link still works.
+ *
+ * The key names the Photos root as well as the shop and the day. The cache
+ * outlives a re-paste, so without the root a changed PHOTOS_FOLDER_ID would
+ * go on filing under the old tree for the rest of the day while the app's
+ * Photos link pointed at the new one.
  * Folder creation stays inside the push lock (pushSku is a write action), so
  * two phones cannot race to create the same day's folder.
  */
@@ -466,7 +473,7 @@ var PHOTO_FOLDER_MEMO_ = {};
 
 function datedPhotoFolder_(shopId, date) {
   var day = sgtDate_(date);
-  var key = 'photofolder:' + shopId + ':' + day;
+  var key = 'photofolder:' + PHOTOS_FOLDER_ID + ':' + shopId + ':' + day;
   if (PHOTO_FOLDER_MEMO_[key]) return PHOTO_FOLDER_MEMO_[key];
 
   var cache = null;

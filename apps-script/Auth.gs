@@ -218,9 +218,12 @@ function usersAll_() { return readAll_(TAB_USERS); }
  *
  * Three rules keep that safe, and each is load-bearing:
  *
- *   1. Changing a role through the app clears this at once (`setRole`), and
- *      so does registering anyone (`appendRows_`). A block takes effect on the
- *      very next request, for every phone.
+ *   1. The key carries a version, like the SKU slices, and every write to the
+ *      Users tab bumps it AFTER flushing (`tabChanged_`). Clearing the key was
+ *      not enough: a sign-in that read the tab a moment before a block was
+ *      written could put the old row back after the clear, and the block would
+ *      be undone for a minute. A copy saved under an old version is never read
+ *      again, whoever saved it and whenever.
  *   2. A MISS is never proof of absence. `findUser_` re-reads the Sheet before
  *      concluding somebody is new, so a person added by hand in the last
  *      minute is found rather than registered a second time.
@@ -232,26 +235,53 @@ function usersAll_() { return readAll_(TAB_USERS); }
  */
 var USERS_CACHE_KEY = 'users:auth';
 var USERS_CACHE_TTL_S = 60;
+var USERS_VERSION_KEY = 'USERS_VERSION';
 
-function usersForAuth_() {
+function usersVersion_() {
+  return Number(PropertiesService.getScriptProperties().getProperty(USERS_VERSION_KEY) || 0);
+}
+
+/**
+ * The Users rows, from the cache unless `fresh`. The version is read BEFORE the
+ * rows, so whatever is saved under it is at least as new as that version.
+ */
+function usersForAuth_(fresh) {
+  var key = null;
   try {
-    var hit = CacheService.getScriptCache().get(USERS_CACHE_KEY);
-    if (hit) return JSON.parse(hit);
+    key = USERS_CACHE_KEY + ':v' + usersVersion_();
+    if (!fresh) {
+      var hit = CacheService.getScriptCache().get(key);
+      if (hit) return JSON.parse(hit);
+    }
   } catch (e) {
     // A cache that cannot be read means reading the Sheet, as before.
   }
+  if (fresh) invalidateRead_(TAB_USERS);
   var rows = usersAll_();
-  try {
-    CacheService.getScriptCache().put(USERS_CACHE_KEY, JSON.stringify(rows), USERS_CACHE_TTL_S);
-  } catch (e) {
-    // Too large or unavailable: correct, just not faster.
+  if (key) {
+    try {
+      CacheService.getScriptCache().put(key, JSON.stringify(rows), USERS_CACHE_TTL_S);
+    } catch (e) {
+      // Too large or unavailable: correct, just not faster.
+    }
   }
   return rows;
 }
 
-/** Forget the cached Users tab. Called by everything that changes who may do what. */
+/**
+ * Retire the cached Users tab. Called, through `tabChanged_`, by everything
+ * that changes who may do what. Flushes first: a role written with setValue
+ * can still be sitting in the write buffer, and a reader that misses the new
+ * version must find the new role in the Sheet, not the old one.
+ */
 function invalidateUsersCache_() {
-  try { CacheService.getScriptCache().remove(USERS_CACHE_KEY); } catch (e) { /* best effort */ }
+  try {
+    SpreadsheetApp.flush();
+    var props = PropertiesService.getScriptProperties();
+    props.setProperty(USERS_VERSION_KEY, String(Number(props.getProperty(USERS_VERSION_KEY) || 0) + 1));
+  } catch (e) {
+    // Best effort: the old copy still expires within USERS_CACHE_TTL_S.
+  }
 }
 
 function findIn_(rows, email) {
@@ -266,17 +296,37 @@ function findUser_(email) {
   if (hit) return hit;
   // Not in the cached copy is not the same as not in the Sheet: they may have
   // been added by hand a moment ago. Only a fresh read may say "new".
-  invalidateUsersCache_();
-  return findIn_(usersAll_(), email);
+  return findIn_(usersForAuth_(true), email);
+}
+
+/**
+ * Add somebody to the Users tab exactly once.
+ *
+ * "Look, then append" was two steps with nothing between them, and two
+ * sign-ins for the same newcomer — which the app's hedged whoami now sends on
+ * a slow first sign-in — both looked, both saw nobody, and both appended. The
+ * second row could never be changed from the app, because setRole edits the
+ * first match. So the look is repeated under the lock, against a fresh read,
+ * and only then does anybody append. This is the first-sign-in path only; a
+ * known person never reaches it.
+ *
+ * @return {boolean} true if this call added the row
+ */
+function registerOnce_(email, row) {
+  return withScriptLock_(30000, function () {
+    if (findIn_(usersForAuth_(true), email)) return false;
+    appendRows_(TAB_USERS, [row]);
+    return true;
+  });
 }
 
 /** Seed the owner as admin, so there is always someone who can approve. */
 function ensureOwner_() {
   if (findUser_(OWNER_EMAIL)) return;
-  appendRows_(TAB_USERS, [[
+  registerOnce_(OWNER_EMAIL, [
     OWNER_EMAIL, 'Brien Chua', ROLE_ADMIN,
     new Date().toISOString(), '', 'system', 'Seeded owner'
-  ]]);
+  ]);
 }
 
 /**
@@ -291,12 +341,18 @@ function resolveUser_(identity) {
   var found = findUser_(identity.email);
 
   if (!found) {
-    appendRows_(TAB_USERS, [[
+    var added = registerOnce_(identity.email, [
       identity.email, identity.name, ROLE_PENDING,
       new Date().toISOString(), new Date().toISOString(), '', 'Awaiting approval'
-    ]]);
-    logEvent_(identity.email, 'first_sign_in', '', identity.name + ' — awaiting approval', 'pending');
-    return { email: identity.email, name: identity.name, role: ROLE_PENDING };
+    ]);
+    if (added) {
+      logEvent_(identity.email, 'first_sign_in', '', identity.name + ' — awaiting approval', 'pending');
+      return { email: identity.email, name: identity.name, role: ROLE_PENDING };
+    }
+    // Registered by a concurrent request a moment ago: use that row, whatever
+    // role it now holds, rather than assuming pending.
+    found = findUser_(identity.email);
+    if (!found) return { email: identity.email, name: identity.name, role: ROLE_PENDING };
   }
 
   touchLastSeen_(identity.email);

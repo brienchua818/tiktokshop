@@ -90,21 +90,48 @@ HEADERS[TAB_USERS] = ['email', 'name', 'role', 'first_seen', 'last_seen', 'appro
 function sheet_(name) {
   var ss = ss_();
   var sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
+  if (sh) {
+    ensureHeaders_(name, sh);
+    return sh;
+  }
+  // Creating a tab is decided under the lock, like migrating one. Two
+  // executions that both saw it missing would otherwise both insert it: the
+  // second insert throws "already exists", and when the caller is logEvent_ —
+  // which takes no lock and swallows its own failures — that line is simply
+  // lost. This happens at most once per tab, ever, so the wait costs nothing.
+  return withScriptLock_(30000, function () {
+    var again = ss.getSheetByName(name);
+    if (again) {
+      ensureHeaders_(name, again);
+      return again;
+    }
+    var made = ss.insertSheet(name);
     var headers = HEADERS[name] || [];
     if (headers.length) {
-      sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-      sh.setFrozenRows(1);
+      made.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+      made.setFrozenRows(1);
     }
     // Drop the default "Sheet1" once a real tab exists, so the file does not
     // open on an empty sheet.
     var first = ss.getSheetByName('Sheet1');
     if (first && ss.getSheets().length > 1) ss.deleteSheet(first);
-  } else {
-    ensureHeaders_(name, sh);
-  }
-  return sh;
+    SpreadsheetApp.flush();
+    return made;
+  });
+}
+
+/**
+ * Everything that must happen after a tab's rows change, in one place.
+ *
+ * Each cache over a tab is retired here rather than by whoever wrote: the
+ * request read memo, the SKU slices (by version), and sign-in's copy of the
+ * Users tab (by version). Callers used to repeat the right subset themselves,
+ * and the one that forgot was always the one nobody was looking at.
+ */
+function tabChanged_(name) {
+  invalidateRead_(name);
+  if (name === TAB_SKUS) bumpSkuVersion_();
+  if (name === TAB_USERS) invalidateUsersCache_();
 }
 
 /** Tabs whose header row has been checked this execution. One read each. */
@@ -202,8 +229,7 @@ function ensureHeaders_(name, sh) {
     SpreadsheetApp.flush();
     // The columns themselves moved, so anything read earlier in this request
     // is laid out differently from what is now on the tab.
-    invalidateRead_(name);
-    if (name === TAB_SKUS) bumpSkuVersion_();
+    tabChanged_(name);
     logEvent_('system', 'migrate_headers', '',
       name + ': ' + oldWidth + ' -> ' + want.length + ' columns, ' + out.length + ' rows', 'ok');
   });
@@ -233,11 +259,9 @@ function appendRows_(name, rows) {
     sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
     SpreadsheetApp.flush();
   });
-  invalidateRead_(name);
-  if (name === TAB_SKUS) bumpSkuVersion_();
   // Anyone registered, including the seeded owner: sign-in's cached copy of
   // the Users tab must see them on the next request. See usersForAuth_.
-  if (name === TAB_USERS) invalidateUsersCache_();
+  tabChanged_(name);
 }
 
 /**
@@ -337,12 +361,14 @@ function logEvent_(actor, action, shop, detail, result) {
    * during somebody else's push could wait up to half a minute to write one
    * log line, then give up silently.
    *
-   * `Sheet.appendRow` is documented by Google as atomic for exactly this
-   * case: "This operation is atomic; it prevents issues where a user asks for
-   * the last row, and then writes to that row, and an intervening mutation
-   * occurs between getting the last row and writing to it." So a single log
-   * line needs no lock at all. The Log tab is never read by the app, so there
-   * is no read cache to clear.
+   * `Sheet.appendRow` finds the end and writes in ONE server-side call, so
+   * there is no "read the last row, then write after it" gap for another
+   * writer to fall into. Older revisions of Google's reference said so in as
+   * many words ("This operation is atomic"); the current page no longer
+   * states it, so this rests on long-standing behaviour rather than a
+   * documented guarantee — which is acceptable for a log line and would not
+   * be for business rows, which still go through appendRows_ under the lock.
+   * The Log tab is never read by the app, so there is no read cache to clear.
    */
   try {
     sheet_(TAB_LOG).appendRow([
@@ -642,8 +668,7 @@ function replaceByKey_(tabName, keyField, rows) {
     });
     if (appends.length) appendRows_(tabName, appends);
     SpreadsheetApp.flush();
-    invalidateRead_(tabName);
-    if (tabName === TAB_SKUS) bumpSkuVersion_();
+    tabChanged_(tabName);
     return rows.length;
   }
 
@@ -678,8 +703,7 @@ function replaceByKey_(tabName, keyField, rows) {
     sheet.getRange(all.length + 2, 1, surplus, headers.length).clearContent();
   }
   SpreadsheetApp.flush();
-  invalidateRead_(tabName);
-  if (tabName === TAB_SKUS) bumpSkuVersion_();
+  tabChanged_(tabName);
   return rows.length;
 }
 
@@ -718,8 +742,7 @@ function markSkus_(updates) {
     }
     if (written) {
       SpreadsheetApp.flush();
-      invalidateRead_(TAB_SKUS);
-      bumpSkuVersion_();
+      tabChanged_(TAB_SKUS);
     }
     return written;
   });

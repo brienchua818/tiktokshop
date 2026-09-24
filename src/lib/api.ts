@@ -366,6 +366,8 @@ export interface ExportResult {
   /** Variation photos placed in the workbook, and those that fell back to a link. */
   photos_placed?: number
   photos_missing?: number
+  /** Not fetched because the export stopped fetching photos to save the file in time. */
+  photos_skipped?: number
   listings: number
   units: number
   revenue: number
@@ -472,6 +474,17 @@ export interface ReadPlan {
   /** Attempts in total, each hedged. */
   attempts: number
 }
+
+/**
+ * Wait as long as the backend can possibly run, and no less.
+ *
+ * Google ends an Apps Script run at six minutes. The export waited 240s and
+ * the sync 180s, so on a big window (922 orders, 24 Sep) the phone gave up
+ * while the backend was still working — and told the person to check before
+ * repeating, about a job that might finish a minute later. Waiting past six
+ * minutes buys nothing, because by then the run is over either way.
+ */
+export const LONGEST_RUN_MS = 370_000
 
 export const LIGHT_READ: ReadPlan = { hedgeMs: 8_000, deadlineMs: 25_000, attempts: 2 }
 
@@ -751,7 +764,7 @@ export const api = {
     from_time: string
     to_date: string
     to_time: string
-  }) => call<SyncResult>('syncOrders', { body, timeoutMs: 180_000 }),
+  }) => call<SyncResult>('syncOrders', { body, timeoutMs: LONGEST_RUN_MS }),
 
   /** Per-listing totals inside a date and time window. */
   /**
@@ -788,7 +801,7 @@ export const api = {
     // assignable to Record<string, unknown>, because TypeScript cannot rule out
     // a subtype adding an incompatible field. Spreading produces the plain
     // object the call actually sends.
-    call<ExportResult>('exportOrders', { body: { ...body }, timeoutMs: 240_000 }),
+    call<ExportResult>('exportOrders', { body: { ...body }, timeoutMs: LONGEST_RUN_MS }),
 
   /**
    * Remove one variation from TikTok. Confirmed by the person first — this is

@@ -380,6 +380,89 @@ function variantPhoto_(v, photos) {
 }
 
 /**
+ * How long the export may spend on photos before it stops fetching them.
+ *
+ * Google ends a web-app run at six minutes, and a run that is ended saves
+ * nothing: on 24 Sep a five-day HOUZE export (922 orders, 1,108 items) ran
+ * out of time while still fetching photos, one at a time, and no file was
+ * made at all. The photos are the only part of the export whose cost grows
+ * without limit, so they are the part that stops. Everything after them —
+ * the xlsx conversion and the save — is given the remaining two minutes,
+ * and the workbook is always written. A photo not fetched says so in its
+ * cell, with the code.
+ */
+var EXPORT_PHOTO_BUDGET_MS = 4 * 60 * 1000;
+
+/** Requests per parallel batch. UrlFetchApp.fetchAll has no documented cap; this keeps each batch short. */
+var PHOTO_BATCH = 20;
+
+/**
+ * The quick photos for a listing's variations, fetched in parallel.
+ *
+ * The slow path — open the file, ask Drive for a thumbnail, wait out Drive's
+ * thumbnail lag, fall back to Slides — ran once per variation, in sequence:
+ * seconds each, and minutes on a big stream. Two of the three sources need
+ * none of that when the image is already small enough for Sheets:
+ *
+ *   thumb    the 400 px copy the phone made at push time, read straight
+ *            from Drive
+ *   tiktok   TikTok's own image of the variation, read straight from TikTok
+ *
+ * Those are fetched here, all at once. Whatever does not come back as an
+ * image Sheets will take is left to the slow path in variantPhoto_, which is
+ * unchanged. Returns key -> { blob, source, first } where `first` says the
+ * blob came from the variation's best candidate.
+ */
+function prefetchPhotos_(variations, photos) {
+  var jobs = [];
+  variations.forEach(function (v) {
+    var key = photoKey_(v);
+    var candidates = photoCandidates_(photos[String(v.seller_sku || '')], v);
+    candidates.forEach(function (c, i) {
+      if (c.source === 'thumb' && c.fileId) {
+        jobs.push({ key: key, source: 'thumb', first: i === 0, req: {
+          url: 'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(c.fileId) +
+            '?alt=media&supportsAllDrives=true',
+          headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+          muteHttpExceptions: true
+        } });
+      } else if (c.source === 'tiktok' && c.url) {
+        jobs.push({ key: key, source: 'tiktok', first: i === 0, req: {
+          url: c.url, muteHttpExceptions: true, followRedirects: true
+        } });
+      }
+    });
+  });
+
+  var out = {};
+  for (var at = 0; at < jobs.length; at += PHOTO_BATCH) {
+    var batch = jobs.slice(at, at + PHOTO_BATCH);
+    var answers;
+    try {
+      answers = UrlFetchApp.fetchAll(batch.map(function (j) { return j.req; }));
+    } catch (e) {
+      // One unreachable host fails the whole batch. The slow path still has
+      // every one of these, one at a time, so nothing is lost but time.
+      continue;
+    }
+    answers.forEach(function (res, i) {
+      var job = batch[i];
+      if (res.getResponseCode() !== 200) return;
+      var blob = res.getBlob();
+      if (!sheetsImageFit_(blob.getBytes()).ok) return;
+      var have = out[job.key];
+      // The best candidate wins; otherwise the first usable one is kept.
+      if (!have || (job.first && !have.first)) out[job.key] = { blob: blob, source: job.source, first: job.first };
+    });
+  }
+  return out;
+}
+
+function photoKey_(v) {
+  return String(v.seller_sku || v.sku_id || v.variation || 'variation');
+}
+
+/**
  * Put one variation's photo in its row.
  *
  * Whatever happens in here is recorded (a warn row in the Log tab, with the
@@ -387,9 +470,27 @@ function variantPhoto_(v, photos) {
  * none could be, the cell says so with the code — the reason is in the Log
  * tab and on the cell's note.
  */
-function placePhoto_(sheet, rowIndex, v, photos, brand) {
+function placePhoto_(sheet, rowIndex, v, photos, brand, quick, budget) {
   sheet.setRowHeight(rowIndex, PHOTO_ROW_PX);
-  var photo = variantPhoto_(v, photos);
+  var fast = quick && quick[photoKey_(v)];
+  var photo;
+  if (fast && fast.first) {
+    // The variation's own best picture, already fetched.
+    photo = { blob: fast.blob, code: '', detail: fast.source };
+  } else if (budget && Date.now() > budget.deadline) {
+    if (fast) {
+      // Out of time for the slow path; a lesser picture beats none.
+      photo = { blob: fast.blob, code: '', detail: fast.source };
+    } else {
+      budget.skipped++;
+      photo = { blob: null, code: 'TS-EXP-27',
+        detail: photoKey_(v) + ' — not fetched: the export stopped fetching photos to save the file ' +
+          'within Google\u2019s six-minute limit. Export fewer days, or one listing, for every photo.' };
+    }
+  } else {
+    photo = variantPhoto_(v, photos);
+    if (!photo.blob && fast) photo = { blob: fast.blob, code: '', detail: fast.source };
+  }
   if (photo.blob) {
     try {
       sheet.insertImage(photo.blob, 1, rowIndex, 6, 5).setWidth(PHOTO_PX).setHeight(PHOTO_PX);
@@ -910,6 +1011,7 @@ function itemTotalRow_(cols, divisor, totals, rows) {
 
 function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
                        costDivisor, actor) {
+  var budget = { deadline: Date.now() + EXPORT_PHOTO_BUDGET_MS, skipped: 0 };
   var shop = shopById_(shopId);
   if (!shop) throw fail_('TS-EXP-02', 'Unknown shop: ' + shopId);
 
@@ -1057,8 +1159,9 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       // measured against Sheets' limits first and can only ever degrade to a
       // link in its own cell — never fail the workbook.
       var photos = photoIndex_(l.listing_id);
+      var quick = Date.now() < budget.deadline ? prefetchPhotos_(detail.variations, photos) : {};
       detail.variations.forEach(function (v, i) {
-        if (placePhoto_(s2, h0 + 1 + i, v, photos, shop.brand)) photosPlaced++;
+        if (placePhoto_(s2, h0 + 1 + i, v, photos, shop.brand, quick, budget)) photosPlaced++;
         else photosMissing++;
       });
       // Numbers read best against the top of a tall row's picture.
@@ -1085,7 +1188,8 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
     var file = folder.createFile(blob);
     logEvent_(actor, 'export_orders', shop.brand,
       filename + ' (' + chosen.length + ' listings, ' + photosPlaced + ' photos, ' +
-      photosMissing + ' missing)', 'ok');
+      photosMissing + ' missing' + (budget.skipped ? ', ' + budget.skipped + ' skipped for time' : '') +
+      ')', 'ok');
 
     return {
       url: file.getUrl(),
@@ -1094,6 +1198,7 @@ function exportOrders_(shopId, listingIds, fromDate, fromTime, toDate, toTime,
       folder_url: folder.getUrl(),
       photos_placed: photosPlaced,
       photos_missing: photosMissing,
+      photos_skipped: budget.skipped,
       listings: chosen.length,
       units: summary.total_units,
       revenue: summary.total_revenue,

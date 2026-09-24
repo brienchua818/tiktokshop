@@ -320,6 +320,13 @@ export default function Orders({ shop }: { shop: Shop }) {
                       : ''}
                   </p>
                 )}
+                {exported.photos_skipped ? (
+                  <p className="text-warn">
+                    {exported.photos_skipped} photo{exported.photos_skipped === 1 ? ' was' : 's were'} skipped so the
+                    file could be saved inside Google&rsquo;s six-minute limit. Every figure is complete. For every
+                    photo, export fewer days or one listing at a time.
+                  </p>
+                ) : null}
                 <div className="flex flex-wrap gap-2 pt-1">
                   <a
                     href={exported.url}

@@ -89,6 +89,7 @@ const sandbox = `
     }
   };
   var DriveApp = {}, Session = {};
+  var ScriptApp = { getOAuthToken: function () { return 'oauth-token' } };
   // Just enough for route_ to answer: the JSON it would have sent.
   var ContentService = {
     MimeType: { JSON: 'json' },
@@ -182,7 +183,7 @@ ${src}
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
     ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
-    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, logEvent_, warn_, pushedToday_, listListings_
+    datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, prefetchPhotos_, placePhoto_, EXPORT_PHOTO_BUDGET_MS, PHOTO_BATCH, logEvent_, warn_, pushedToday_, listListings_
   };
 `
 
@@ -4102,6 +4103,95 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(upload.batched, true, 'the upload must go in the batch')
     eq(reads.length, 1, 'the product was read ' + reads.length + ' times')
     eq(reads[0].batched, true, 'and that read went in the same batch')
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// A big export always saves its file.
+//
+// 24 Sep: a five-day HOUZE export (922 orders, 1,108 items) fetched every
+// variation's photo one at a time — seconds each for a Seller Center
+// variation — and Google ended the run at six minutes with no file saved.
+// Photos are now fetched in parallel batches, and once the photo budget is
+// spent the rest are marked in their cells so the workbook is still written.
+// ---------------------------------------------------------------------------
+console.log('\na big export always saves its file')
+
+{
+  const png = pngBytes(300, 300)
+  const blobOf = (bytes) => ({ getBytes: () => bytes })
+  let batches = []
+  let serial = 0
+  let driveTouched = 0
+  const fetcher = {
+    fetch: () => { serial++; return { getResponseCode: () => 200, getBlob: () => blobOf(png), getContentText: () => '{}' } },
+    fetchAll: (reqs) => { batches.push(reqs.map((r) => r.url)); return reqs.map(() => ({ getResponseCode: () => 200, getBlob: () => blobOf(png) })) },
+  }
+  const install = () => {
+    batches = []; serial = 0; driveTouched = 0
+    gs.__setUrlFetch(fetcher)
+    gs.__setDriveApp({ getFileById: () => { driveTouched++; throw new Error('slow path taken') }, getFolderById: () => { driveTouched++; throw new Error('slow path taken') } })
+  }
+  const tiktokVar = (n) => ({ seller_sku: 'B' + n, sku_image: 'https://img.tiktok.example/' + n + '.jpeg' })
+  const cells = []
+  const sheet = {
+    setRowHeight: () => {},
+    insertImage: () => { const o = { setWidth: () => o, setHeight: () => o }; cells.push('image'); return o },
+    getRange: () => { const r = { setValue: (v) => { cells.push(String(v)); return r }, setFontColor: () => r, setNote: () => r }; return r },
+  }
+
+  check('photos are fetched in parallel batches, never one request per variation', () => {
+    install()
+    const vars = Array.from({ length: 45 }, (_, i) => tiktokVar(i))
+    const quick = gs.prefetchPhotos_(vars, {})
+    eq(batches.map((b) => b.length), [20, 20, 5])
+    eq(serial, 0, 'no request sent on its own')
+    eq(Object.keys(quick).length, 45)
+  })
+
+  check("the phone's thumbnail is preferred over TikTok's image, read straight from Drive", () => {
+    install()
+    const v = { seller_sku: 'A1', sku_image: 'https://img.tiktok.example/a1.jpeg' }
+    const quick = gs.prefetchPhotos_([v], { A1: { thumb: 'https://drive.google.com/file/d/THUMB123/view' } })
+    eq(quick.A1.source, 'thumb')
+    eq(batches[0].some((u) => u.indexOf('/drive/v3/files/THUMB123?alt=media') > 0), true)
+  })
+
+  check('an image Sheets would refuse is left to the slow path, not placed', () => {
+    install()
+    gs.__setUrlFetch({ fetch: fetcher.fetch, fetchAll: (reqs) => reqs.map(() => ({ getResponseCode: () => 200, getBlob: () => blobOf(pngBytes(1600, 1600)) })) })
+    eq(Object.keys(gs.prefetchPhotos_([tiktokVar(1)], {})).length, 0)
+  })
+
+  check("a prefetched best picture is placed without the slow path's Drive calls", () => {
+    install(); cells.length = 0
+    const v = tiktokVar(7)
+    const quick = gs.prefetchPhotos_([v], {})
+    eq(gs.placePhoto_(sheet, 5, v, {}, 'HOUZE', quick, { deadline: Date.now() + 60000, skipped: 0 }), true)
+    eq(driveTouched, 0)
+    eq(cells, ['image'])
+  })
+
+  check('past the photo budget, a photo is marked in its cell instead of fetched', () => {
+    install(); cells.length = 0
+    const budget = { deadline: Date.now() - 1, skipped: 0 }
+    const v = { seller_sku: 'C1' }                      // nothing quick for it
+    eq(gs.placePhoto_(sheet, 5, v, { C1: { photo: 'https://drive.google.com/file/d/FULL/view' } }, 'HOUZE', {}, budget), false)
+    eq(driveTouched, 0, 'the slow path must not run once the budget is spent')
+    eq(budget.skipped, 1)
+    eq(cells.some((c) => c.indexOf('TS-EXP-27') >= 0), true, JSON.stringify(cells))
+  })
+
+  check('the photo budget leaves time to convert and save inside six minutes', () => {
+    eq(gs.EXPORT_PHOTO_BUDGET_MS <= 4 * 60 * 1000, true)
+  })
+
+  check('a batch that fails outright costs time, not photos', () => {
+    install()
+    gs.__setUrlFetch({ fetch: fetcher.fetch, fetchAll: () => { throw new Error('Address unavailable') } })
+    eq(Object.keys(gs.prefetchPhotos_([tiktokVar(1)], {})).length, 0)   // the slow path still has it
   })
 }
 

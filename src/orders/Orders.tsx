@@ -54,12 +54,13 @@ export default function Orders({ shop }: { shop: Shop }) {
   const [exporting, setExporting] = useState(false)
   const [exported, setExported] = useState<ExportResult | null>(null)
   /**
-   * Selling price divided by this gives the factory price.
+   * The listings to export. Empty means every listing in the window.
    *
-   * Kept as text, not a number: an input bound to a number turns "1." into 1
-   * mid-typing and the cursor jumps. Parsed once, at the point of use.
+   * Brien, 24 Sep: a five-day window held more listings than one export can
+   * build inside Google's six-minute limit, and he only ever needed a few of
+   * them. Ticking the ones wanted makes the file as small as the question.
    */
-  const [divisor, setDivisor] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -79,6 +80,39 @@ export default function Orders({ shop }: { shop: Shop }) {
     setDetail(null)
     void load()
   }, [load])
+
+  // A tick for a listing no longer in this window would export something
+  // nobody can see on the screen. Keep only the ones still shown.
+  useEffect(() => {
+    if (!summary) return
+    const shown = new Set(summary.listings.map((l) => l.listing_id).filter(Boolean))
+    setSelected((was) => {
+      const kept = new Set([...was].filter((id) => shown.has(id)))
+      return kept.size === was.size ? was : kept
+    })
+  }, [summary])
+
+  const selectable = (summary?.listings ?? []).filter((l) => l.listing_id)
+  const allTicked = selectable.length > 0 && selectable.every((l) => selected.has(l.listing_id))
+
+  function toggle(id: string) {
+    setSelected((was) => {
+      const next = new Set(was)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleAll() {
+    setSelected(allTicked ? new Set() : new Set(selectable.map((l) => l.listing_id)))
+  }
+
+  const exportLabel = exporting
+    ? 'Building…'
+    : selected.size
+      ? `Export ${selected.size} selected`
+      : `Export all ${selectable.length} listing${selectable.length === 1 ? '' : 's'}`
 
   /**
    * Fetch this window from TikTok, then re-read.
@@ -109,11 +143,6 @@ export default function Orders({ shop }: { shop: Shop }) {
   }
 
   async function exportPo() {
-    const d = divisor.trim() ? Number(divisor) : undefined
-    if (d !== undefined && (!Number.isFinite(d) || d <= 0)) {
-      setError('The cost divisor has to be a number greater than zero.')
-      return
-    }
     setExporting(true)
     setError('')
     setExported(null)
@@ -122,7 +151,7 @@ export default function Orders({ shop }: { shop: Shop }) {
         await api.exportOrders({
           shop_id: shop.shop_id,
           ...win,
-          ...(d !== undefined ? { cost_divisor: d } : {}),
+          ...(selected.size ? { listing_ids: [...selected] } : {}),
         }),
       )
     } catch (e: unknown) {
@@ -271,28 +300,17 @@ export default function Orders({ shop }: { shop: Shop }) {
             {/* On an iPad there is no fixed bottom bar, so the export controls
                 live in the flow here instead. Same handler, same state. */}
             <div className="hidden md:flex items-center gap-2 bg-raised border border-line2 rounded-xl p-3">
-              <label className="flex items-center gap-1.5 h-11 px-2.5 rounded-lg bg-sunken border border-line shrink-0">
-                <span className="text-xs text-faint whitespace-nowrap">cost ÷</span>
-                <input
-                  inputMode="decimal"
-                  value={divisor}
-                  onChange={(e) => setDivisor(e.target.value)}
-                  placeholder="1.6"
-                  aria-label="Cost divisor"
-                  className="w-14 bg-transparent text-sm text-fg outline-none"
-                />
-              </label>
               <button
                 onClick={() => void exportPo()}
                 disabled={exporting}
                 className="min-h-11 px-4 rounded-lg bg-ok-solid disabled:opacity-50 text-on-ok text-sm font-semibold flex items-center gap-2"
               >
                 <Icon name="download" size={18} />
-                {exporting ? 'Building…' : 'Export purchase order'}
+                {exportLabel}
               </button>
               <p className="text-xs text-faint flex-1">
-                Factory price = selling price ÷ this number. Blank means selling prices only.
-                Either way the figure is printed in the file.
+                Tick the listings you need for a smaller, faster file. Nothing ticked exports every listing
+                in this window.
               </p>
             </div>
 
@@ -351,12 +369,40 @@ export default function Orders({ shop }: { shop: Shop }) {
             )}
           </div>
 
+          <div className="flex items-center gap-2 px-0.5">
+            <button
+              onClick={toggleAll}
+              className="min-h-11 px-3 -ml-1 inline-flex items-center gap-2 rounded-lg text-[13px] text-fg2"
+            >
+              <Tick on={allTicked} />
+              {allTicked ? 'Clear all' : 'Select all'}
+            </button>
+            <span className="text-xs text-faint">
+              {selected.size ? `${selected.size} of ${selectable.length} selected` : 'None selected: export takes all'}
+            </span>
+          </div>
+
           <ul className="space-y-2">
             {summary.listings.map((l) => (
-              <li key={l.listing_id} className="bg-raised border border-line2 rounded-xl">
+              <li key={l.listing_id || l.product_name} className="bg-raised border border-line2 rounded-xl flex items-start">
+                {l.listing_id ? (
+                  <button
+                    onClick={() => toggle(l.listing_id)}
+                    role="checkbox"
+                    aria-checked={selected.has(l.listing_id)}
+                    aria-label={`Export ${l.product_name || l.listing_id}`}
+                    className="min-h-11 min-w-11 mt-1.5 ml-1.5 inline-flex items-center justify-center shrink-0"
+                  >
+                    <Tick on={selected.has(l.listing_id)} />
+                  </button>
+                ) : (
+                  // No listing id: no sheet of its own to export, so nothing to tick.
+                  <span className="min-w-11 ml-1.5 shrink-0" />
+                )}
+                <div className="flex-1 min-w-0">
                 <button
                   onClick={() => void openDetail(l.listing_id)}
-                  className="w-full text-left px-4 py-3"
+                  className="w-full text-left pl-1 pr-4 py-3"
                 >
                   <div className="flex items-baseline gap-2">
                     <p className="text-sm text-fg font-medium truncate flex-1">
@@ -395,7 +441,7 @@ export default function Orders({ shop }: { shop: Shop }) {
                 </button>
 
                 {openListing === l.listing_id && (
-                  <div className="border-t border-line2 px-4 py-3">
+                  <div className="border-t border-line2 pl-1 pr-4 py-3">
                     {!detail ? (
                       <p className="text-xs text-faint">Loading variations…</p>
                     ) : (
@@ -403,6 +449,7 @@ export default function Orders({ shop }: { shop: Shop }) {
                     )}
                   </div>
                 )}
+                </div>
               </li>
             ))}
           </ul>
@@ -428,8 +475,8 @@ export default function Orders({ shop }: { shop: Shop }) {
 
         It used to sit inside the summary card, which on a phone means
         scrolling past every listing to reach it — and it is the last thing
-        anyone does on this screen. The divisor stays beside it because the
-        number it produces is the whole point of the file.
+        anyone does on this screen. Its label says what it will export: the
+        ticked listings, or all of them.
       */}
       {summary && summary.listings.length > 0 && (
         <div
@@ -437,24 +484,13 @@ export default function Orders({ shop }: { shop: Shop }) {
           style={{ bottom: 'calc(3.5rem + env(safe-area-inset-bottom))' }}
         >
           <div className="max-w-5xl mx-auto flex items-center gap-2">
-            <label className="flex items-center gap-1.5 h-11 px-2.5 rounded-xl bg-sunken border border-line shrink-0">
-              <span className="text-xs text-faint whitespace-nowrap">cost ÷</span>
-              <input
-                inputMode="decimal"
-                value={divisor}
-                onChange={(e) => setDivisor(e.target.value)}
-                placeholder="1.6"
-                aria-label="Cost divisor"
-                className="w-12 bg-transparent text-sm text-fg outline-none"
-              />
-            </label>
             <button
               onClick={() => void exportPo()}
               disabled={exporting}
               className="flex-1 min-h-11 rounded-xl bg-ok-solid disabled:opacity-50 text-on-ok text-[15px] font-semibold flex items-center justify-center gap-2"
             >
               <Icon name="download" size={18} />
-              {exporting ? 'Building…' : 'Export purchase order'}
+              {exportLabel}
             </button>
           </div>
         </div>
@@ -573,6 +609,19 @@ function RangeSheet({
         </p>
       </div>
     </div>
+  )
+}
+
+/** A checkbox mark, drawn to match the app rather than the platform's own. */
+function Tick({ on }: { on: boolean }) {
+  return (
+    <span
+      className={`w-5 h-5 rounded-md border inline-flex items-center justify-center ${
+        on ? 'bg-accent border-accent text-white' : 'bg-sunken border-line'
+      }`}
+    >
+      {on && <Icon name="check" size={14} />}
+    </span>
   )
 }
 

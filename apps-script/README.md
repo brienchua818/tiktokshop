@@ -39,6 +39,29 @@ of dated exports is unusable after a few months of daily streams.
 7. Open `ttAuthorizeUrl('HZ')` once per shop, while signed into that shop.
 8. Run `ttSelfTest()` to confirm all three answer.
 
+## Updating it — keep the same deployment
+
+Paste the new `TikShopBackend.gs` into `Code.gs`, save, then **Deploy → Manage
+deployments → ✏️ Edit → Version: New version → Deploy.**
+
+**Never "New deployment", and never archive the live one.** The `/exec` URL
+belongs to the deployment, not the project. A new deployment is a new URL, and
+two things hold the old one:
+
+- **The app** — `VITE_APPS_SCRIPT_URL` in Netlify, baked in at build time. On
+  24 Sep the live deployment was replaced and archived; every phone got
+  Google's "Sorry, unable to open the file at this time" (404) until the
+  variable was changed AND the site rebuilt. A changed variable alone does
+  nothing until the next build.
+- **Partner Center** — each shop's app Redirect URL (step 6). A stale one does
+  not stop pushes or token refresh (neither redirects); it breaks the next
+  `ttAuthorizeUrl` re-authorisation.
+
+`?action=ping` on the `/exec` URL answers `{"ok":true,"build":"…"}` with no
+sign-in, and is the quickest proof of which build a URL is serving. An archived
+deployment answers "unable to open the file"; a URL that never existed answers
+"the file you have requested does not exist".
+
 > **This must be its own Apps Script project. Do not add it to
 > `Sheldon Delivery API`.**
 >

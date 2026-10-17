@@ -364,4 +364,19 @@ describe('the rest of what the investigation found', () => {
     for (let t = 0; t < 60 && (await allDrafts()).length > 0; t++) await sleep(50)
     expect((await allDrafts()).map((d) => d.identifier)).toEqual([])
   }, 30_000)
+
+  it('opening a listing marks a SKU whose reply was lost as sent, without sending it again', async () => {
+    ctl.pushMs = 30
+    // The push landed but the reply never came home, and retries ran out.
+    const q = await enqueue(draft(1), photo())
+    const { updateDraft } = await import('./queue')
+    await updateDraft(q.draft_id, {
+      status: 'failed', attempts: 5, retryAfter: Number.MAX_SAFE_INTEGER, error: 'No connection: Load failed',
+    })
+    ctl.landed.push('BR1')
+    await mount()
+    for (let t = 0; t < 60 && (await allDrafts()).some((d) => d.status === 'failed'); t++) await sleep(50)
+    expect((await allDrafts()).filter((d) => d.status === 'failed').map((d) => d.identifier)).toEqual([])
+    expect(ctl.pushes).toEqual([])
+  }, 30_000)
 })

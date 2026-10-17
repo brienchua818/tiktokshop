@@ -111,12 +111,20 @@ export default function PhotoBlock({
         </div>
       </div>
 
+      {/*
+        No `capture` attribute, on purpose. `capture` tells the phone to skip
+        the library and open the camera, and iOS obeys it — so "Photos" opened
+        the camera on every iPhone (Brien, 17 Oct). The Camera button is the
+        in-app live camera and never used this input, so nothing is lost: an
+        iPhone now offers its own menu with Photo Library first, and Android
+        opens its picker.
+      */}
       <input
         ref={camera.fileRef}
         type="file"
         accept="image/*"
-        capture="environment"
         hidden
+        data-testid="photo-library-input"
         onChange={(e) => {
           void camera.fromFile(e.target.files?.[0])
           e.target.value = ''

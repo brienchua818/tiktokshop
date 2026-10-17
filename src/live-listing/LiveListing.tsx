@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError, type TikTokProduct } from '../lib/api'
 import type { Listing, Shop } from '../types'
 import ListingDetail from './ListingDetail'
@@ -64,12 +64,22 @@ export default function LiveListing({
     }
   }, [shop.shop_id])
 
+  // The load in progress, whichever started it. "Try again" goes through here
+  // too: it used to drop the cancel, so a slow retry for one brand could land
+  // its listings on the next brand's screen.
+  const cancelLoad = useRef<() => void>(() => {})
+  const reload = useCallback(() => {
+    cancelLoad.current()
+    cancelLoad.current = load()
+  }, [load])
+
   useEffect(() => {
     // Changing brand must clear the selection, or the next screen would show
     // one shop's listing under another shop's credentials.
     setSelected(null)
-    return load()
-  }, [load])
+    reload()
+    return () => cancelLoad.current()
+  }, [reload])
 
   if (selected) {
     return (
@@ -121,7 +131,7 @@ export default function LiveListing({
            there. Offer the retry instead. */
         <div className="py-10 text-center">
           <button
-            onClick={load}
+            onClick={reload}
             className="text-xs px-4 py-2 bg-accent hover:bg-accent-hover text-fg rounded-lg transition-colors"
           >
             Try again

@@ -174,8 +174,12 @@ export function revivable(
 export async function reviveOrphanedUploads(now: number = Date.now()): Promise<number> {
   const orphans = revivable(await allDrafts(), now)
   for (const d of orphans) {
+    // The fifth dead attempt leaves it waiting for a person, and saying so:
+    // 'queued' with five attempts was neither due nor stuck, so it sat under
+    // "N waiting" for good with no Retry button.
+    const spent = d.attempts + 1 >= MAX_AUTO_ATTEMPTS
     await updateDraft(d.draft_id, {
-      status: 'queued' satisfies DraftStatus,
+      status: (spent ? 'failed' : 'queued') satisfies DraftStatus,
       /**
        * The dead attempt still counts.
        *
@@ -188,10 +192,15 @@ export async function reviveOrphanedUploads(now: number = Date.now()): Promise<n
       attempts: d.attempts + 1,
       retryAfter: 0,
       uploading_at: null,
-      error: null,
+      error: spent ? 'The app closed during this upload too many times.' : null,
     })
   }
   return orphans.length
+}
+
+/** One draft as it stands now. */
+export async function getDraft(draftId: string): Promise<QueuedDraft | undefined> {
+  return tx<QueuedDraft | undefined>(STORE, 'readonly', (store) => store.get(draftId))
 }
 
 export async function updateDraft(
@@ -405,9 +414,15 @@ export function pendingCount(drafts: readonly QueuedDraft[]): number {
  * Backoff for a failed push. Grows quickly but caps at five minutes, since a
  * livestream is finite and an item stuck behind a ten-minute wait is
  * effectively lost.
+ *
+ * 5, 15, 45, 135 s: the fifth attempt comes about three and a half minutes
+ * after the first. It was 2, 4, 8, 16 s, which only worked because nothing
+ * retried on time — a retry waited for the next save. Now the sender's
+ * heartbeat retries the moment the wait is over, and at those waits a
+ * thirty-second blip on the backend parked every SKU in the queue.
  */
 export function retryDelayMs(attempts: number): number {
-  return Math.min(2000 * 2 ** Math.max(0, attempts - 1), 300_000)
+  return Math.min(5000 * 3 ** Math.max(0, attempts - 1), 300_000)
 }
 
 /**

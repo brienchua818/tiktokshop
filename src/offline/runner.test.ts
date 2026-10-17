@@ -124,8 +124,8 @@ describe('the heartbeat', () => {
     w.state.fail.add('A1')
     const stop = startQueueRunner(w.deps)
     await new Promise((r) => setTimeout(r, 50))
-    expect(w.state.pushed).toEqual([])               // first attempt failed, retry due in 2 s
-    w.state.now += 2_500                               // the wait runs out
+    expect(w.state.pushed).toEqual([])               // first attempt failed, retry due in 5 s
+    w.state.now += 5_500                               // the wait runs out
     await new Promise((r) => setTimeout(r, 2_300))    // within one heartbeat
     stop()
     expect(w.state.pushed).toEqual(['A1'])
@@ -162,5 +162,83 @@ describe('a push that never finishes', () => {
     await drainQueue(w.deps)
     expect(isDraining()).toBe(false)
     expect(w.state.pushed).toEqual(['A2'])
+  })
+})
+
+describe('a read of the queue that never answers', () => {
+  it('fails the pass instead of holding the sender; the next pass reads again and pushes', async () => {
+    const w = world([draft(1), draft(2)], 1)
+    const realDrafts = w.deps.drafts
+    let first = true
+    w.deps.drafts = () => (first ? ((first = false), new Promise<QueuedDraft[]>(() => {})) : realDrafts())
+    w.deps.readDeadlineMs = 50
+    await expect(drainQueue(w.deps)).rejects.toThrow(/Reading the queue/)
+    expect(isDraining()).toBe(false)
+    await drainQueue(w.deps)
+    expect(w.state.pushed).toEqual(['A1', 'A2'])
+  })
+
+  it('a check for stalled uploads that never answers is skipped, and the pass carries on', async () => {
+    const w = world([draft(1)], 1)
+    w.deps.revive = () => new Promise<number>(() => {})
+    w.deps.readDeadlineMs = 50
+    await drainQueue(w.deps)
+    expect(isDraining()).toBe(false)
+    expect(w.state.pushed).toEqual(['A1'])
+  })
+})
+
+describe('signing out', () => {
+  it('ends the pass after the push in flight; the rest wait for the next person, untouched', async () => {
+    const w = world([draft(1), draft(2), draft(3)], 20)
+    let signedIn = true
+    w.deps.signedIn = () => signedIn
+    const pass = drainQueue(w.deps)
+    await new Promise((r) => setTimeout(r, 5))       // A1 in flight
+    signedIn = false
+    await pass
+    expect(w.state.pushed).toEqual(['A1'])
+    expect([...w.store.values()].map((d) => `${d.identifier}:${d.status}:${d.attempts}`)).toEqual(['A1:pushed:1', 'A2:queued:0', 'A3:queued:0'])
+    signedIn = true
+    await drainQueue(w.deps)
+    expect(w.state.pushed).toEqual(['A1', 'A2', 'A3'])
+  })
+})
+
+describe('with Web Locks', () => {
+  it('a kick while this tab is sending is remembered, not dropped', async () => {
+    let held = false
+    const locks = {
+      request: async (_n: string, _o: unknown, cb: (l: unknown) => unknown) => {
+        if (held) return cb(null)
+        held = true
+        try { return await cb({}) } finally { held = false }
+      },
+    }
+    const nav = navigator as unknown as { locks?: unknown }
+    const had = Object.getOwnPropertyDescriptor(nav, 'locks')
+    Object.defineProperty(nav, 'locks', { value: locks, configurable: true })
+    try {
+      const w = world([draft(1)], 5)
+      const realDrafts = w.deps.drafts
+      let reads = 0
+      w.deps.drafts = async () => {
+        const rows = await realDrafts()
+        // A2 is saved just after the read that finds the queue empty — the
+        // last moment before the pass would end. Its kick gets no lock.
+        if (++reads === 2) {
+          w.store.set('d2', draft(2))
+          kickQueue(w.deps)
+        }
+        return rows
+      }
+      kickQueue(w.deps)
+      await new Promise((r) => setTimeout(r, 50))
+      await idle()
+      expect(w.state.pushed).toEqual(['A1', 'A2'])
+    } finally {
+      if (had) Object.defineProperty(nav, 'locks', had)
+      else delete nav.locks
+    }
   })
 })

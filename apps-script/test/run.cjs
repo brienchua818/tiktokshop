@@ -4322,6 +4322,20 @@ console.log('\na listing renamed on TikTok is renamed in the app')
     eq(sent.length, 0)
   })
 
+  check('a rename saved when a listing opens is not undone by the picker\'s saved answer', () => {
+    install()
+    titles[1001] = 'Old name'
+    withTikTok(() => gs.refreshListingNames_('HZ'))
+    titles[1001] = 'Renamed after the picker last asked'
+    try {
+      withTikTok(() => { try { gs.listingState_('1001') } catch (e) { /* not under test */ } })
+      const out = withTikTok(() => gs.refreshListingNames_('HZ'))
+      eq(out.names.find((n) => n.listing_id === '1001').product_name, 'Renamed after the picker last asked')
+    } finally {
+      titles[1001] = 'New name from Seller Center'
+    }
+  })
+
   check('only the most recent listings are refreshed, so a long history stays cheap', () => {
     install()
     rows = Array.from({ length: gs.LISTING_NAME_REFRESH_MAX + 15 }, (_, i) => ({

@@ -478,15 +478,25 @@ function saveListingNames_(names) {
     var col = HEADERS[TAB_LISTINGS].indexOf('product_name') + 1;
     var sh = sheet_(TAB_LISTINGS);
     var renamed = [];
+    var shops = {};
     rows.forEach(function (r, i) {
       var want = wanted[String(r.listing_id)];
       if (want === undefined || String(r.product_name || '').trim() === want) return;
       sh.getRange(i + 2, col).setValue(want);
+      shops[String(r.shop_id)] = true;
       renamed.push(String(r.listing_id) + ': "' + String(r.product_name || '') + '" -> "' + want + '"');
     });
     if (renamed.length) {
       SpreadsheetApp.flush();
       tabChanged_(TAB_LISTINGS);
+      // The picker's saved answer for these shops is now older than the Sheet,
+      // and would put the old name back over the new one for ten minutes.
+      // Called from refreshListingNames_ this runs before its own put, so the
+      // fresh answer is still saved.
+      try {
+        var cache = CacheService.getScriptCache();
+        Object.keys(shops).forEach(function (s) { cache.remove('listingNames:' + s); });
+      } catch (e) { /* it expires on its own */ }
       logEvent_('system', 'rename_listing', '', renamed.join('; ').slice(0, 480), 'ok');
     }
     return renamed.length;

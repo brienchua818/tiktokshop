@@ -158,9 +158,15 @@ describe('afterAttempt', () => {
 
 describe('retryDelayMs', () => {
   it('grows with each attempt', () => {
-    expect(retryDelayMs(1)).toBe(2000)
-    expect(retryDelayMs(2)).toBe(4000)
-    expect(retryDelayMs(3)).toBe(8000)
+    expect(retryDelayMs(1)).toBe(5000)
+    expect(retryDelayMs(2)).toBe(15_000)
+    expect(retryDelayMs(3)).toBe(45_000)
+  })
+
+  it('spreads five attempts over minutes, not seconds: retries now go the moment the wait ends', () => {
+    let waited = 0
+    for (let a = 1; a < 5; a++) waited += retryDelayMs(a)
+    expect(waited).toBeGreaterThanOrEqual(180_000)
   })
 
   it('caps at five minutes, since a livestream is finite', () => {

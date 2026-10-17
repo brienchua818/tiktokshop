@@ -6,6 +6,7 @@ import {
   afterAttempt,
   allDrafts,
   backfillListingId,
+  getDraft,
   getPhoto,
   MAX_AUTO_ATTEMPTS,
   updateDraft,
@@ -53,12 +54,41 @@ export const PREP_DEADLINE_MS = 30_000
 /** The deadline in force. A field rather than the constant so a test can shorten it. */
 export const prepTiming = { deadlineMs: PREP_DEADLINE_MS }
 
+/**
+ * How long a push that reached nobody waits before it goes again.
+ *
+ * A connection that failed outright, or a device with nobody signed in, is no
+ * verdict on the SKU, so it costs none of the five automatic attempts —
+ * otherwise a few minutes of factory Wi-Fi with no uplink parks every SKU in
+ * the queue, each needing its own Retry tap mid-broadcast. Ten seconds keeps
+ * the phone from re-encoding every photo on every heartbeat while it waits.
+ */
+export const UNREACHED_RETRY_MS = 10_000
+
 export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const late = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${what} took longer than ${Math.round(ms / 1000)} s. It will try again.`)), ms)
   })
   return Promise.race([work, late]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * Record a failed attempt, unless another attempt has settled the SKU since.
+ *
+ * A push the sender's watchdog gave up on can still be running, and be sent
+ * again beside it. If the second lands first, the first one's failure must
+ * not turn a SKU that is live back into a failed one.
+ */
+async function recordFailure(draft: QueuedDraft, patch: Partial<QueuedDraft>): Promise<void> {
+  const now = await getDraft(draft.draft_id)
+  if (!now || now.settled) return
+  await updateDraft(draft.draft_id, patch)
+}
+
+/** Still working on it: keeps `revivable` from taking a live push for a dead one. */
+function stillUploading(draft: QueuedDraft): Promise<unknown> {
+  return updateDraft(draft.draft_id, { uploading_at: Date.now() })
 }
 
 /**
@@ -101,6 +131,10 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
       thumbBase64 = undefined
     }
 
+    // Stamped again at each long step — here, before the 120 s request, and
+    // before the check of what landed — so no live step outlasts the 150 s
+    // after which `revivable` would call the push dead.
+    await stillUploading(draft)
     const result = await api.pushDraft({
       shop_id: draft.shop_id,
       // Omitted for the first SKU of a stream, which creates the listing.
@@ -148,8 +182,8 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // Losing the race for the listing's lease is not this SKU's fault, so it
     // goes back to the queue without consuming an attempt.
     if (api_error?.code === 'LISTING_BUSY') {
-      await updateDraft(
-        draft.draft_id,
+      await recordFailure(
+        draft,
         afterAttempt(draft, {
           ok: false,
           error: api_error.message,
@@ -165,11 +199,25 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // creating a second listing is visible in the seller's shop, so it waits
     // for a person to accept it.
     if (api_error?.isListingFull) {
-      await updateDraft(draft.draft_id, {
+      await recordFailure(draft, {
         status: 'failed',
         error: `${LISTING_FULL_MARKER} ${api_error.message}`,
         attempts: MAX_AUTO_ATTEMPTS,
         retryAfter: Number.MAX_SAFE_INTEGER,
+      })
+      return
+    }
+
+    // Signed out mid-pass, or a session the backend no longer takes. Nothing
+    // reached TikTok and it is not this SKU's doing: it was parked as a
+    // rejection, so signing out mid-stream left every waiting SKU needing its
+    // own Retry. It waits, says why, and goes once someone is signed in.
+    if (api_error?.isAuthError) {
+      await recordFailure(draft, {
+        status: 'failed',
+        error: api_error.message,
+        retryAfter: Date.now() + UNREACHED_RETRY_MS,
+        settled: false,
       })
       return
     }
@@ -189,6 +237,7 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
      */
     if (api_error?.isOutcomeUnknown && draft.listing_id) {
       try {
+        await stillUploading(draft)
         const live = await api.listingState(draft.listing_id)
         // "Recorded by the backend", not "shown by TikTok": a variation just
         // added is under review and absent from TikTok's read for minutes.
@@ -212,13 +261,18 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // A connection failure is retryable; a rejection from TikTok is not, and
     // retrying it would burn part of the shop's daily listing allowance.
     const retryable = api_error ? api_error.isRetryable : true
-    await updateDraft(
-      draft.draft_id,
-      afterAttempt(draft, {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        retryable,
-      }),
+    const next = afterAttempt(draft, {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      retryable,
+    })
+    // The connection failed outright ("No connection", no code — a timeout is
+    // coded and still counts). Any copy that did reach the backend is caught
+    // by the idempotency key, so going again costs nothing.
+    const unreached = api_error?.status === 0 && api_error.code === undefined
+    await recordFailure(
+      draft,
+      unreached ? { ...next, attempts: draft.attempts, retryAfter: Date.now() + UNREACHED_RETRY_MS } : next,
     )
   }
 }

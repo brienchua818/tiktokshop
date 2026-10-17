@@ -104,6 +104,7 @@ import DraftQueue from '../live-listing/DraftQueue'
 import { startQueueRunner, isDraining, onQueueChange as onSenderChange } from './runner'
 import { prepTiming } from './push'
 import { allDrafts, enqueue, removeDraft, resetDevice, type QueuedDraft } from './queue'
+import { setIdToken } from '../lib/script-api'
 import type { Draft } from '../types'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -199,6 +200,8 @@ beforeEach(async () => {
   root?.unmount()
   root = null
   await wipe()
+  // Signed in, as App only starts the sender for a signed-in person.
+  setIdToken('test-id-token')
   ctl.inflight = 0
   ctl.peak = 0
   ctl.thumbHangs = false

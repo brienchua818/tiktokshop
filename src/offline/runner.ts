@@ -1,5 +1,6 @@
 import { allDrafts, nextBatch, reviveOrphanedUploads, type QueuedDraft } from './queue'
-import { pushOne } from './push'
+import { PREP_DEADLINE_MS, pushOne, withDeadline } from './push'
+import { hasCredential } from '../lib/script-api'
 
 /**
  * The queue's one sender: a single loop for the whole app, not a screen effect.
@@ -44,10 +45,18 @@ import { pushOne } from './push'
 export interface RunnerDeps {
   /** Overrides PUSH_WATCHDOG_MS; for tests. */
   watchdogMs?: number
+  /** Overrides READ_DEADLINE_MS; for tests. */
+  readDeadlineMs?: number
   drafts: () => Promise<QueuedDraft[]>
   push: (draft: QueuedDraft) => Promise<void>
   revive: (now: number) => Promise<number>
   online: () => boolean
+  /**
+   * False once nobody is signed in. A push without a credential is refused,
+   * so the pass stops rather than walk the rest of the queue into refusals.
+   * Absent means signed in.
+   */
+  signedIn?: () => boolean
   now: () => number
 }
 
@@ -56,6 +65,7 @@ const defaults: RunnerDeps = {
   push: pushOne,
   revive: reviveOrphanedUploads,
   online: () => typeof navigator === 'undefined' || navigator.onLine !== false,
+  signedIn: hasCredential,
   now: () => Date.now(),
 }
 
@@ -64,15 +74,27 @@ export const HEARTBEAT_MS = 2_000
 /**
  * The longest one push may hold the sender before it moves on.
  *
- * A push is bounded inside — a 120 s network deadline, a bounded check of
- * what landed, 30 s for each step on the phone — so this should never fire.
- * It exists because "should never" is how the queue stopped last time. Past
- * every legitimate path (about 205 s), the sender stops waiting and carries
- * on; the row stays marked uploading, so its listing is skipped until
- * `reviveOrphanedUploads` frees it, and its retry carries the same
- * idempotency key, so nothing can land twice.
+ * A push is bounded inside — a 120 s network deadline, an 80 s check of what
+ * landed, 30 s for each step on the phone — so this should never fire. It
+ * exists because "should never" is how the queue stopped last time. Past
+ * every legitimate path, the sender stops waiting and carries on with other
+ * listings. The row is freed by `reviveOrphanedUploads` once its last stamp
+ * is stale and sent again on a later pass, under the same idempotency key so
+ * it cannot land twice; if the abandoned push wakes up and fails after that
+ * retry has gone through, its failure is not written over the result.
  */
 export const PUSH_WATCHDOG_MS = 300_000
+
+/**
+ * The longest the sender waits for its own read of the queue.
+ *
+ * The same WebKit IndexedDB stall the photo read is guarded against can hit
+ * these reads, and they run every two seconds, so one is often in flight when
+ * the phone switches to TikTok. A read that never answered held the sender —
+ * and its Web Lock — until the app was killed. Now it is a failed pass, and
+ * the next heartbeat reads again on a fresh connection.
+ */
+export const READ_DEADLINE_MS = PREP_DEADLINE_MS
 
 /** Rounds per pass before yielding; a backstop against a loop that cannot end. */
 const MAX_ROUNDS = 1_000
@@ -122,23 +144,29 @@ export async function drainQueue(deps: RunnerDeps = defaults): Promise<number> {
   // pass, so one stuck listing cannot be picked straight back up in a tight
   // loop; the next pass, a heartbeat later, tries it again.
   const abandoned = new Set<string>()
+  const readMs = deps.readDeadlineMs ?? READ_DEADLINE_MS
+  const signedIn = deps.signedIn ?? (() => true)
+  const live = () => deps.online() && signedIn()
   try {
     do {
       again = false
-      if (!deps.online()) break
-      revived += await deps.revive(deps.now()).catch(() => 0)
-      for (let round = 0; round < MAX_ROUNDS && deps.online(); round++) {
-        const drafts = (await deps.drafts()).filter((d) => !abandoned.has(d.stream_id))
-        const batch = nextBatch(drafts, deps.now())
+      if (!live()) break
+      revived += await withDeadline(deps.revive(deps.now()), readMs, 'Checking for stalled uploads').catch(() => 0)
+      for (let round = 0; round < MAX_ROUNDS && live(); round++) {
+        const all = await withDeadline(deps.drafts(), readMs, 'Reading the queue')
+        const batch = nextBatch(all.filter((d) => !abandoned.has(d.stream_id)), deps.now())
         if (!batch.length) break
         for (const draft of batch) {
+          // Signing out mid-pass ends it after the push in flight, as leaving
+          // the screen did when the sender lived there.
+          if (!live()) break
           const settled = await settleWithin(deps.push(draft), deps.watchdogMs ?? PUSH_WATCHDOG_MS)
           if (settled) pushed++
           else abandoned.add(draft.stream_id)
           notify()
         }
       }
-    } while (again && deps.online())
+    } while (again && live())
   } finally {
     // Cleared however the pass ended — a throw included. This is the line the
     // old loop could skip, and skipping it is what stopped the queue for good.
@@ -169,7 +197,13 @@ export function kickQueue(deps: RunnerDeps = defaults): void {
     // One sending tab per phone. `ifAvailable`: if another tab holds it, that
     // tab is already sending and this one has nothing to add.
     void locks
-      .request('tikshop-queue-sender', { ifAvailable: true }, (lock) => (lock ? pass() : 0))
+      .request('tikshop-queue-sender', { ifAvailable: true }, (lock) => {
+        if (lock) return pass()
+        // Held. If this tab holds it, the pass must go round again for what
+        // prompted this kick; if another tab does, there is nothing to add.
+        if (running) again = true
+        return 0
+      })
       .catch(() => 0)
     return
   }

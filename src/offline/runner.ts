@@ -1,6 +1,5 @@
 import { allDrafts, nextBatch, reviveOrphanedUploads, type QueuedDraft } from './queue'
 import { PREP_DEADLINE_MS, pushOne, withDeadline } from './push'
-import { hasCredential } from '../lib/script-api'
 
 /**
  * The queue's one sender: a single loop for the whole app, not a screen effect.
@@ -51,12 +50,6 @@ export interface RunnerDeps {
   push: (draft: QueuedDraft) => Promise<void>
   revive: (now: number) => Promise<number>
   online: () => boolean
-  /**
-   * False once nobody is signed in. A push without a credential is refused,
-   * so the pass stops rather than walk the rest of the queue into refusals.
-   * Absent means signed in.
-   */
-  signedIn?: () => boolean
   now: () => number
 }
 
@@ -65,7 +58,6 @@ const defaults: RunnerDeps = {
   push: pushOne,
   revive: reviveOrphanedUploads,
   online: () => typeof navigator === 'undefined' || navigator.onLine !== false,
-  signedIn: hasCredential,
   now: () => Date.now(),
 }
 
@@ -101,6 +93,16 @@ const MAX_ROUNDS = 1_000
 
 let running = false
 let again = false
+/**
+ * Bumped when the runner is stopped — which is signing out, since the app
+ * shell runs it only for a signed-in person. A pass in flight ends after its
+ * current push, as it did when leaving the listing screen ended it.
+ *
+ * Not "is there a credential": a session that lapses mid-stream must not stop
+ * the sender without a word. The push says why it cannot go (push.ts) and the
+ * app shell sends the person to sign in.
+ */
+let generation = 0
 const listeners = new Set<() => void>()
 
 /** Be told when the runner has changed the queue (a push finished, an orphan revived). */
@@ -145,8 +147,8 @@ export async function drainQueue(deps: RunnerDeps = defaults): Promise<number> {
   // loop; the next pass, a heartbeat later, tries it again.
   const abandoned = new Set<string>()
   const readMs = deps.readDeadlineMs ?? READ_DEADLINE_MS
-  const signedIn = deps.signedIn ?? (() => true)
-  const live = () => deps.online() && signedIn()
+  const started = generation
+  const live = () => deps.online() && generation === started
   try {
     do {
       again = false
@@ -157,8 +159,7 @@ export async function drainQueue(deps: RunnerDeps = defaults): Promise<number> {
         const batch = nextBatch(all.filter((d) => !abandoned.has(d.stream_id)), deps.now())
         if (!batch.length) break
         for (const draft of batch) {
-          // Signing out mid-pass ends it after the push in flight, as leaving
-          // the screen did when the sender lived there.
+          // Signing out mid-pass ends it after the push in flight.
           if (!live()) break
           const settled = await settleWithin(deps.push(draft), deps.watchdogMs ?? PUSH_WATCHDOG_MS)
           if (settled) pushed++
@@ -226,6 +227,7 @@ export function startQueueRunner(deps: RunnerDeps = defaults): () => void {
   window.addEventListener('focus', kick)
   document.addEventListener('visibilitychange', onVisible)
   return () => {
+    generation++
     clearInterval(timer)
     window.removeEventListener('online', kick)
     window.removeEventListener('focus', kick)

@@ -1,4 +1,5 @@
 import { api, ApiError } from '../lib/api'
+import { credentialEpoch, hasCredential, setIdToken, setSessionToken } from '../lib/script-api'
 import { toBase64 } from '../lib/bytes'
 import { toSquareJpeg } from '../capture/camera'
 import { landed } from '../live-listing/reconcile'
@@ -65,6 +66,13 @@ export const prepTiming = { deadlineMs: PREP_DEADLINE_MS }
  */
 export const UNREACHED_RETRY_MS = 10_000
 
+/**
+ * How long a push the backend refused for a deployment or sign-in fault that
+ * is not a dead credential waits — a misconfigured backend or Google being
+ * unreachable. Every push would fail the same way, so not every ten seconds.
+ */
+export const AUTH_FAULT_RETRY_MS = 60_000
+
 export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const late = new Promise<never>((_, reject) => {
@@ -103,8 +111,15 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
   // Stamped as the push starts, so `revivable` can tell this row from one whose
   // app died mid-flight without having to know when it is being asked.
   await updateDraft(draft.draft_id, { status: 'uploading', uploading_at: Date.now() })
+  // Which credential this push carries, so a refusal of it cannot sign out one
+  // the person has signed in with since.
+  const carried = credentialEpoch()
 
   try {
+    // Nobody signed in: say so now, before the photo is read and encoded for
+    // a request that cannot be sent.
+    if (!hasCredential()) throw new ApiError(401, 'Sign in with Google to continue.', 'NO_CREDENTIAL_ON_DEVICE')
+
     // The photo lives in IndexedDB beside the draft and is encoded here, at
     // push time. One call carries the SKU and its photo together, so there is
     // no half-finished state to reconcile when the connection drops between
@@ -208,15 +223,23 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
       return
     }
 
-    // Signed out mid-pass, or a session the backend no longer takes. Nothing
-    // reached TikTok and it is not this SKU's doing: it was parked as a
-    // rejection, so signing out mid-stream left every waiting SKU needing its
-    // own Retry. It waits, says why, and goes once someone is signed in.
+    // Signed out, or a session the backend no longer takes. Nothing reached
+    // TikTok and it is not this SKU's doing: it was parked as a rejection, so
+    // signing out mid-stream left every waiting SKU needing its own Retry. It
+    // waits, says why, and goes once someone is signed in.
     if (api_error?.isAuthError) {
+      const local = api_error.code === 'NO_CREDENTIAL_ON_DEVICE'
+      // A credential the backend calls dead is dropped, as at app start. The
+      // next try then stops here on the phone instead of re-sending the photo
+      // every ten seconds, and the app shell sends the person to sign in.
+      if (api_error.isCredentialDead && !local && credentialEpoch() === carried) {
+        setIdToken(null)
+        setSessionToken(null)
+      }
       await recordFailure(draft, {
         status: 'failed',
         error: api_error.message,
-        retryAfter: Date.now() + UNREACHED_RETRY_MS,
+        retryAfter: Date.now() + (local || api_error.isCredentialDead ? UNREACHED_RETRY_MS : AUTH_FAULT_RETRY_MS),
         settled: false,
       })
       return

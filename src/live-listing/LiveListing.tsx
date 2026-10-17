@@ -28,6 +28,10 @@ export default function LiveListing({
   const load = useCallback(() => {
     setLoading(true)
     setError('')
+    // A failed load for this brand must not leave the last brand's listings
+    // on screen under this one's name, where picking one would send SKUs to
+    // the wrong shop.
+    setListings([])
     let current = true
     api
       .listings(shop.shop_id)

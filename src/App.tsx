@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
 import { ApiError, api, SignedOutMeanwhile, type Me } from './lib/api'
-import { getSessionToken, hasCredential, hasLiveSession, setIdToken, setSessionToken } from './lib/script-api'
+import { getSessionToken, hasCredential, hasLiveSession, sessionMsLeft, setIdToken, setSessionToken } from './lib/script-api'
 import { forgetBoot, readBoot, rememberMe, rememberShops } from './lib/boot-cache'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
@@ -17,6 +17,11 @@ import About from './more/About'
 import Icon, { type IconName } from './ui/Icon'
 import { apply, readChoice, resolve, store, systemPrefersDark, watchSystem, type ThemeChoice } from './lib/theme'
 import { useAppUpdate } from './lib/pwa'
+
+/** Check in again once the session has less than this left. */
+const SESSION_RENEW_MS = 2 * 3600_000
+/** And no more often than this while it does. */
+const SESSION_RENEW_GAP_MS = 10 * 60_000
 
 export default function App() {
   const [user, setUser] = useState<SignedInUser | null>(null)
@@ -261,6 +266,57 @@ export default function App() {
   useEffect(() => {
     if (!user) return
     return startQueueRunner()
+  }, [user])
+
+  /**
+   * Keep the sign-in alive for as long as the app is open, and say so when it
+   * is gone.
+   *
+   * The backend's session is good for fourteen hours from the last check-in,
+   * and the app only checked in when it opened. A phone or iPad left open
+   * past that was still showing the app, but every call — every push — was
+   * refused: the queue said "N waiting" and nothing moved. Now, in the last
+   * two hours, it checks in again (every check-in hands back a fresh session),
+   * and if the sign-in is gone anyway it goes to the sign-in screen. The
+   * queue is kept, and goes on its own once someone signs in.
+   */
+  useEffect(() => {
+    if (!user) return
+    let renewing = false
+    let lastTry = 0
+    const tick = () => {
+      if (!hasCredential()) {
+        forgetBoot()
+        setUser(null)
+        return
+      }
+      const left = sessionMsLeft()
+      if (renewing || !hasLiveSession() || left > SESSION_RENEW_MS || Date.now() - lastTry < SESSION_RENEW_GAP_MS) return
+      renewing = true
+      lastTry = Date.now()
+      api
+        .me()
+        .then((me) => {
+          rememberMe(getSessionToken(), me)
+          if (!me.approved) setUser(null)
+        })
+        .catch((e: unknown) => {
+          // As at app start: only a credential the backend calls dead is
+          // dropped (the next tick then shows sign-in). A slow or failed
+          // check-in changes nothing — the session it would have replaced is
+          // still good, and the next tick tries again.
+          if (e instanceof ApiError && e.isCredentialDead) {
+            setIdToken(null)
+            setSessionToken(null)
+          }
+        })
+        .finally(() => {
+          renewing = false
+        })
+    }
+    tick()
+    const timer = setInterval(tick, 5_000)
+    return () => clearInterval(timer)
   }, [user])
 
   function chooseShop(id: string) {

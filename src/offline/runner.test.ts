@@ -191,16 +191,16 @@ describe('a read of the queue that never answers', () => {
 describe('signing out', () => {
   it('ends the pass after the push in flight; the rest wait for the next person, untouched', async () => {
     const w = world([draft(1), draft(2), draft(3)], 20)
-    let signedIn = true
-    w.deps.signedIn = () => signedIn
-    const pass = drainQueue(w.deps)
+    const stop = startQueueRunner(w.deps)
     await new Promise((r) => setTimeout(r, 5))       // A1 in flight
-    signedIn = false
-    await pass
+    stop()                                            // what signing out does
+    await idle()
     expect(w.state.pushed).toEqual(['A1'])
     expect([...w.store.values()].map((d) => `${d.identifier}:${d.status}:${d.attempts}`)).toEqual(['A1:pushed:1', 'A2:queued:0', 'A3:queued:0'])
-    signedIn = true
-    await drainQueue(w.deps)
+    const again = startQueueRunner(w.deps)           // the next person signs in
+    await new Promise((r) => setTimeout(r, 100))
+    again()
+    await idle()
     expect(w.state.pushed).toEqual(['A1', 'A2', 'A3'])
   })
 })

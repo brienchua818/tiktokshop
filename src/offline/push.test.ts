@@ -42,8 +42,10 @@ vi.mock('../capture/camera', async (orig) => ({
   },
 }))
 
-import { ApiError } from '../lib/api'
-import { pushOne, UNREACHED_RETRY_MS } from './push'
+import { api, ApiError } from '../lib/api'
+import { getIdToken, hasCredential, setIdToken, setSessionToken } from '../lib/script-api'
+import { AUTH_FAULT_RETRY_MS, pushOne, UNREACHED_RETRY_MS } from './push'
+import { drainQueue } from './runner'
 import {
   allDrafts, enqueue, getDraft, isStuck, MAX_AUTO_ATTEMPTS, PARKED, resetDevice, revivable, updateDraft,
   type QueuedDraft,
@@ -70,6 +72,9 @@ beforeEach(async () => {
   ctl.push = null
   ctl.state = null
   ctl.thumb = null
+  vi.mocked(api.pushDraft).mockClear()
+  setSessionToken(null)
+  setIdToken('google-id-token')                     // signed in
 })
 afterEach(() => {
   vi.restoreAllMocks()
@@ -98,15 +103,59 @@ describe('a failed push', () => {
     expect((await row(q.draft_id)).attempts).toBe(1)
   })
 
-  it('because nobody is signed in waits, says why, and is neither charged nor parked', async () => {
+  it('because nobody is signed in waits, says why, and is neither charged nor parked — and sends nothing', async () => {
     const q = await enqueue(draft(), photo())
-    ctl.push = () => Promise.reject(new ApiError(401, 'Sign in with Google to continue.', 'NO_CREDENTIAL_ON_DEVICE'))
+    setIdToken(null)
+    ctl.push = () => Promise.resolve({ mode: 'variation_added', listing_id: 'L1', product_id: 'L1' })
     await pushOne(await row(q.draft_id))
     const r = await row(q.draft_id)
+    expect(api.pushDraft).not.toHaveBeenCalled()
     expect(r.attempts).toBe(0)
     expect(r.retryAfter).toBeLessThan(PARKED)
     expect(r.error).toMatch(/Sign in/)
     expect(isStuck(r)).toBe(false)
+  })
+
+  it('with a sign-in the backend calls dead drops it, so the photo is not re-sent every ten seconds', async () => {
+    const q = await enqueue(draft(), photo())
+    ctl.push = () => Promise.reject(new ApiError(401, 'Your Google sign-in has expired. Sign in again.', 'TOKEN_REJECTED'))
+    for (let i = 0; i < 5; i++) await pushOne(await row(q.draft_id))
+    expect(api.pushDraft).toHaveBeenCalledTimes(1)
+    expect(hasCredential()).toBe(false)               // the app shell now shows sign-in
+    const r = await row(q.draft_id)
+    expect([r.attempts, isStuck(r)]).toEqual([0, false])
+  })
+
+  it('never drops a sign-in made after the push set out', async () => {
+    const q = await enqueue(draft(), photo())
+    ctl.push = async () => {
+      setIdToken(null)                                // signed out ...
+      setIdToken('the-next-persons-token')            // ... and the next person in
+      throw new ApiError(401, 'Your Google sign-in has expired. Sign in again.', 'TOKEN_REJECTED')
+    }
+    await pushOne(await row(q.draft_id))
+    expect(getIdToken()).toBe('the-next-persons-token')
+  })
+
+  it('refused for a backend fault waits a minute, not ten seconds, and keeps the sign-in', async () => {
+    const q = await enqueue(draft(), photo())
+    ctl.push = () => Promise.reject(new ApiError(401, 'The backend is not set up for this app.', 'CLIENT_ID_MISMATCH'))
+    const before = Date.now()
+    await pushOne(await row(q.draft_id))
+    const r = await row(q.draft_id)
+    expect(r.retryAfter).toBeGreaterThanOrEqual(before + AUTH_FAULT_RETRY_MS)
+    expect(r.attempts).toBe(0)
+    expect(getIdToken()).toBe('google-id-token')
+  })
+
+  it('with the sign-in lapsed, the sender does not stop without a word: each SKU says why', async () => {
+    const q = await enqueue(draft(), photo())
+    setIdToken(null)
+    await drainQueue()
+    const r = await row(q.draft_id)
+    expect(r.status).toBe('failed')
+    expect(r.error).toMatch(/Sign in/)
+    expect(api.pushDraft).not.toHaveBeenCalled()
   })
 
   it('never turns a SKU another attempt has put live back into a failed one', async () => {

@@ -65,4 +65,26 @@ describe('the listing picker', () => {
     expect(el.textContent).not.toContain('HOUZE stream')
     root.unmount()
   })
+
+  it("a brand whose list will not load shows the error, never the last brand's listings", async () => {
+    ctl.listings.mockReset()
+    ctl.listings
+      .mockImplementationOnce(async () => [listing('HZ', 'HOUZE stream')])
+      .mockImplementationOnce(async () => { throw new ApiError(0, 'No connection: Load failed') })
+    const el = document.createElement('div')
+    document.body.appendChild(el)
+    const root = createRoot(el)
+    await act(async () => {
+      root.render(<LiveListing shop={{ shop_id: 'HZ', brand: 'HOUZE' } as never} onQueueChange={() => {}} />)
+    })
+    await tick()
+    expect(el.textContent).toContain('HOUZE stream')
+    await act(async () => {
+      root.render(<LiveListing shop={{ shop_id: 'TM', brand: 'TABLE MATTERS' } as never} onQueueChange={() => {}} />)
+    })
+    await tick()
+    expect(el.textContent).not.toContain('HOUZE stream')
+    expect(el.textContent).toContain('Try again')
+    root.unmount()
+  })
 })

@@ -42,6 +42,8 @@ import { pushOne } from './push'
  */
 
 export interface RunnerDeps {
+  /** Overrides PUSH_WATCHDOG_MS; for tests. */
+  watchdogMs?: number
   drafts: () => Promise<QueuedDraft[]>
   push: (draft: QueuedDraft) => Promise<void>
   revive: (now: number) => Promise<number>
@@ -59,6 +61,19 @@ const defaults: RunnerDeps = {
 
 /** How often the runner looks for due work when nothing has prompted it. */
 export const HEARTBEAT_MS = 2_000
+/**
+ * The longest one push may hold the sender before it moves on.
+ *
+ * A push is bounded inside — a 120 s network deadline, a bounded check of
+ * what landed, 30 s for each step on the phone — so this should never fire.
+ * It exists because "should never" is how the queue stopped last time. Past
+ * every legitimate path (about 205 s), the sender stops waiting and carries
+ * on; the row stays marked uploading, so its listing is skipped until
+ * `reviveOrphanedUploads` frees it, and its retry carries the same
+ * idempotency key, so nothing can land twice.
+ */
+export const PUSH_WATCHDOG_MS = 300_000
+
 /** Rounds per pass before yielding; a backstop against a loop that cannot end. */
 const MAX_ROUNDS = 1_000
 
@@ -103,17 +118,23 @@ export async function drainQueue(deps: RunnerDeps = defaults): Promise<number> {
   running = true
   let pushed = 0
   let revived = 0
+  // Streams whose push outran the watchdog. Left alone for the rest of this
+  // pass, so one stuck listing cannot be picked straight back up in a tight
+  // loop; the next pass, a heartbeat later, tries it again.
+  const abandoned = new Set<string>()
   try {
     do {
       again = false
       if (!deps.online()) break
       revived += await deps.revive(deps.now()).catch(() => 0)
       for (let round = 0; round < MAX_ROUNDS && deps.online(); round++) {
-        const batch = nextBatch(await deps.drafts(), deps.now())
+        const drafts = (await deps.drafts()).filter((d) => !abandoned.has(d.stream_id))
+        const batch = nextBatch(drafts, deps.now())
         if (!batch.length) break
         for (const draft of batch) {
-          await deps.push(draft)
-          pushed++
+          const settled = await settleWithin(deps.push(draft), deps.watchdogMs ?? PUSH_WATCHDOG_MS)
+          if (settled) pushed++
+          else abandoned.add(draft.stream_id)
           notify()
         }
       }
@@ -126,6 +147,18 @@ export async function drainQueue(deps: RunnerDeps = defaults): Promise<number> {
     if (pushed || revived) notify()
   }
   return pushed
+}
+
+/**
+ * Wait for `work`, but no longer than `ms`. True if it finished, false if the
+ * wait ran out. A throw from `work` still throws.
+ */
+function settleWithin(work: Promise<void>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const give = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms)
+  })
+  return Promise.race([work.then(() => true), give]).finally(() => clearTimeout(timer))
 }
 
 /** Ask for a pass soon. Never throws, never waits. */

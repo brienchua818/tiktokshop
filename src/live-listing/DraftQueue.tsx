@@ -137,7 +137,12 @@ export default function DraftQueue({
    * of its own failed request is not evidence.
    */
   async function reconcile(state: ListingState) {
-    const drifted = driftedDrafts(drafts, state)
+    // Read now, not from this render: the check when a listing opens runs
+    // before the screen has loaded its drafts, so the closure's `drafts` was
+    // empty, nothing was ever corrected and pushed drafts — full-size photos
+    // and all — piled up on the phone until somebody tapped refresh.
+    const mine = await allDrafts().then((all) => all.filter((d) => d.listing_id === listingId))
+    const drifted = driftedDrafts(mine, state)
     for (const d of drifted) {
       await updateDraft(d.draft_id, {
         status: 'pushed',
@@ -164,7 +169,7 @@ export default function DraftQueue({
      * the next one.
      */
     const takenOver = draftsTakenOver(
-      drifted.length ? await allDrafts().then((all) => all.filter((d) => d.listing_id === listingId)) : drafts,
+      drifted.length ? await allDrafts().then((all) => all.filter((d) => d.listing_id === listingId)) : mine,
       state,
     )
     for (const d of takenOver) await removeDraft(d.draft_id)
@@ -333,7 +338,16 @@ export default function DraftQueue({
         name={draft.title}
         photo={<Thumbnail draft={draft} fallback={v?.image_url ?? ''} />}
         price={draft.price}
-        stock={v ? <StockState v={v} /> : <span className="text-faint shrink-0">Queued</span>}
+        stock={
+          v ? (
+            <StockState v={v} />
+          ) : (
+            // "Queued" here sat beside a "Sent" badge on every SKU pushed since
+            // the listing was last checked, and made a healthy queue read as a
+            // stuck one. Before TikTok has been asked there is no stock to show.
+            <span className="text-faint shrink-0">{draft.status === 'pushed' ? '—' : 'Queued'}</span>
+          )
+        }
         meta={v ? variantMeta(v) : ''}
         badge={<StatusBadge draft={draft} live={v} />}
         {...(canAdjust && v ? { onOpen: () => setAdjusting(v) } : {})}

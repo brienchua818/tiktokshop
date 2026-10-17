@@ -38,6 +38,30 @@ export const LISTING_FULL_MARKER = '[listing-full]'
 export const EXPORT_THUMB_PX = 400
 
 /**
+ * How long a step on the phone itself may take before the push gives up on it.
+ *
+ * The network call has a deadline; reading the photo from IndexedDB, encoding
+ * it and making the thumbnail did not. If one of those never settles — a
+ * WebKit IndexedDB or image-decode stall after the app comes back from the
+ * background — the push never finished and the queue waited on it for good.
+ * Thirty seconds is far beyond a normal photo (well under a second) and short
+ * enough not to cost a stream. Nothing has been sent at this point, so a
+ * retry is safe.
+ */
+export const PREP_DEADLINE_MS = 30_000
+
+/** The deadline in force. A field rather than the constant so a test can shorten it. */
+export const prepTiming = { deadlineMs: PREP_DEADLINE_MS }
+
+export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${Math.round(ms / 1000)} s. It will try again.`)), ms)
+  })
+  return Promise.race([work, late]).finally(() => clearTimeout(timer))
+}
+
+/**
  * Push one draft, recording the outcome either way.
  *
  * Marking it `uploading` first is what makes the attempt visible to
@@ -55,9 +79,9 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // push time. One call carries the SKU and its photo together, so there is
     // no half-finished state to reconcile when the connection drops between
     // an upload and a push — which on factory Wi-Fi is exactly when it drops.
-    const photo = await getPhoto(draft.draft_id)
+    const photo = await withDeadline(getPhoto(draft.draft_id), prepTiming.deadlineMs, 'Reading the photo from this phone')
     if (!photo) throw new Error('The photo for this SKU is missing from this device.')
-    const photoBase64 = await toBase64(photo)
+    const photoBase64 = await withDeadline(toBase64(photo), prepTiming.deadlineMs, 'Preparing the photo')
 
     // The purchase-order export needs a small copy of this photo — Sheets caps
     // an inserted image at 1,000,000 pixels and the full photo is 2.56M — and
@@ -66,7 +90,13 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // could not be made.
     let thumbBase64: string | undefined
     try {
-      thumbBase64 = await toBase64(await toSquareJpeg(photo, { target: EXPORT_THUMB_PX, quality: 0.8 }))
+      // Bounded as well as caught: a catch handles a failure, not a hang, and
+      // a thumbnail is never worth holding the queue for.
+      thumbBase64 = await withDeadline(
+        toSquareJpeg(photo, { target: EXPORT_THUMB_PX, quality: 0.8 }).then(toBase64),
+        prepTiming.deadlineMs,
+        'Making the export thumbnail',
+      )
     } catch {
       thumbBase64 = undefined
     }

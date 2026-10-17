@@ -44,6 +44,7 @@ const ctl = vi.hoisted(() => ({
   failKind: 'busy' as 'busy' | 'network',
   t0: 0,
   log: [] as string[],
+  thumbHangs: false,
 }))
 
 vi.mock('../lib/api', async (orig) => {
@@ -94,12 +95,14 @@ vi.mock('../lib/api', async (orig) => {
 vi.mock('../capture/camera', async (orig) => ({
   ...(await orig<typeof import('../capture/camera')>()),
   toSquareJpeg: async () => {
+    if (ctl.thumbHangs) return new Promise<Blob>(() => {})
     throw new Error('no canvas in test')
   },
 }))
 
 import DraftQueue from '../live-listing/DraftQueue'
 import { startQueueRunner, isDraining, onQueueChange as onSenderChange } from './runner'
+import { prepTiming } from './push'
 import { allDrafts, enqueue, removeDraft, resetDevice, type QueuedDraft } from './queue'
 import type { Draft } from '../types'
 
@@ -198,6 +201,7 @@ beforeEach(async () => {
   await wipe()
   ctl.inflight = 0
   ctl.peak = 0
+  ctl.thumbHangs = false
   ctl.pushes = []
   ctl.starts = []
   ctl.landed = []
@@ -311,4 +315,53 @@ describe('a failed attempt is retried on its own, without another save', () => {
       expect(ctl.starts.map((x) => x.id)).toEqual(['BR1', 'BR2', 'BR3', 'BR3'])
     }, 30_000)
   }
+})
+
+describe('the rest of what the investigation found', () => {
+  it('a thumbnail that never finishes does not hold the queue: the SKU pushes without it', async () => {
+    ctl.pushMs = 30
+    ctl.thumbHangs = true
+    const was = prepTiming.deadlineMs
+    prepTiming.deadlineMs = 200
+    try {
+      for (let i = 1; i <= 3; i++) await enqueue(draft(i), photo())
+      const el = await mount()
+      for (let t = 0; t < 100 && ctl.pushes.length < 3; t++) await sleep(50)
+      const s = await snapshot(el)
+      expect(s.pushedIds).toEqual(['BR1', 'BR2', 'BR3'])
+    } finally {
+      prepTiming.deadlineMs = was
+    }
+  }, 30_000)
+
+  it('a SKU that has gone up does not read "Queued" while the listing waits to be checked', async () => {
+    ctl.pushMs = 30
+    const el = await mount()
+    for (let i = 1; i <= 3; i++) {
+      await enqueue(draft(i), photo())
+      await handle!.refreshDrafts()
+      await sleep(200)
+    }
+    for (let t = 0; t < 100 && ctl.pushes.length < 3; t++) await sleep(50)
+    await sleep(300)
+    const rows = [...el.querySelectorAll('li')].map((li) => li.textContent ?? '').filter((t) => /BR\d/.test(t))
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      if (/Sent/.test(row)) expect(row).not.toMatch(/Queued/)
+    }
+  }, 30_000)
+
+  it('opening a listing hands pushed SKUs the backend has recorded back to it, photos and all', async () => {
+    ctl.pushMs = 30
+    // Pushed on an earlier visit; the backend has all three.
+    for (let i = 1; i <= 3; i++) {
+      const q = await enqueue(draft(i), photo())
+      const { updateDraft } = await import('./queue')
+      await updateDraft(q.draft_id, { status: 'pushed', settled: true, pushed_at: '2026-10-17T03:00:00.000Z' })
+      ctl.landed.push(`BR${i}`)
+    }
+    await mount()
+    for (let t = 0; t < 60 && (await allDrafts()).length > 0; t++) await sleep(50)
+    expect((await allDrafts()).map((d) => d.identifier)).toEqual([])
+  }, 30_000)
 })

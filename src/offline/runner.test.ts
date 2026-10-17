@@ -152,3 +152,15 @@ describe('the heartbeat', () => {
     expect(isDraining()).toBe(false)
   })
 })
+
+describe('a push that never finishes', () => {
+  it('holds the sender no longer than the watchdog; other listings carry on', async () => {
+    const w = world([draft(1), draft(2, { listing_id: 'L2', stream_id: 'L2' })], 1)
+    const realPush = w.deps.push
+    w.deps.push = (d) => (d.identifier === 'A1' ? new Promise<void>(() => {}) : realPush(d))
+    w.deps.watchdogMs = 50
+    await drainQueue(w.deps)
+    expect(isDraining()).toBe(false)
+    expect(w.state.pushed).toEqual(['A2'])
+  })
+})

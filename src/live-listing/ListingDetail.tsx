@@ -62,6 +62,19 @@ export default function ListingDetail({
    * and a number nobody could see until they scrolled to it.
    */
   const [live, setLive] = useState<ListingState | null>(null)
+  /**
+   * The listing as TikTok names it now.
+   *
+   * The name the app saved when the listing was added is a copy; TikTok's
+   * product read, which this screen makes anyway, is the original. A rename in
+   * Seller Center shows here as soon as the screen has read the product, and
+   * the backend saves it so the list shows it too.
+   */
+  const current = useMemo(
+    () => (live?.title && live.title !== listing.product_name ? { ...listing, product_name: live.title } : listing),
+    [listing, live?.title],
+  )
+  const listingName = current.product_name ?? shop.brand
   const [allowance, setAllowance] = useState<{
     used: number | null
     cap: number
@@ -182,7 +195,7 @@ export default function ListingDetail({
           <Icon name="chevron-right" size={20} className="rotate-180" />
         </button>
         <span className="text-sm font-semibold text-fg truncate min-w-0 flex-1">
-          {listing.product_name ?? shop.brand}
+          {listingName}
         </span>
         <span className="text-xs text-muted shrink-0 whitespace-nowrap">
           {onTikTok === null ? `${drafts.length}` : `${onTikTok}`}/{MAX_SKUS_PER_PRODUCT}
@@ -223,7 +236,7 @@ export default function ListingDetail({
         <div className="min-w-0">
           <SkuForm
             shop={shop}
-            listing={listing}
+            listing={current}
             identifier={formatIdentifier(next.prefix, next.seq)}
             prefix={next.prefix}
             onEditPrefix={() => setEditingPrefix(true)}
@@ -262,7 +275,7 @@ export default function ListingDetail({
         <Sheet title="Bulk add" onClose={() => setBulkOpen(false)}>
           <BulkAdd
             shop={shop}
-            listing={listing}
+            listing={current}
             startIdentifier={formatIdentifier(next.prefix, next.seq)}
             onSaved={async () => {
               await refreshDrafts()

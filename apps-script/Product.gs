@@ -629,6 +629,17 @@ function listingState_(listingId) {
   var versions = productVersions_(shopId, String(listingId));
   var live = versions.pending;
   var buyable = versions.buyable;
+
+  // TikTok's name for it, now. Renamed in Seller Center, the app kept the
+  // name it was added under; it is corrected here, where the product has just
+  // been read anyway. Never allowed to fail the screen.
+  try {
+    var named = {};
+    named[String(listingId)] = live.title;
+    saveListingNames_(named);
+  } catch (e) {
+    warn_('TS-PRD-39', 'Could not update the name of listing ' + listingId + ': ' + e);
+  }
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
   var pendingSkus = bySellerSku_(live.skus);
 

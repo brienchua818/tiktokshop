@@ -28,18 +28,47 @@ export default function LiveListing({
   const load = useCallback(() => {
     setLoading(true)
     setError('')
+    let current = true
     api
       .listings(shop.shop_id)
-      .then(setListings)
-      .catch((e: unknown) => setError(e instanceof ApiError ? e.display : String(e)))
-      .finally(() => setLoading(false))
+      .then((rows) => {
+        if (!current) return
+        setListings(rows)
+        /**
+         * Then TikTok's current names, behind the list rather than in front of
+         * it. A rename in Seller Center used to stay invisible here for good.
+         * A failure changes nothing: the names shown are the saved ones, and
+         * an older backend without this action answers with a refusal that
+         * is simply ignored.
+         */
+        api
+          .listingNames(shop.shop_id)
+          .then(({ names }) => {
+            if (!current || !names?.length) return
+            const fresh = new Map(names.map((n) => [n.listing_id, n.product_name]))
+            setListings((was) =>
+              was.map((l) => {
+                const name = fresh.get(l.listing_id)
+                return name && name !== l.product_name ? { ...l, product_name: name } : l
+              }),
+            )
+          })
+          .catch(() => {
+            /* see above: the saved names stand */
+          })
+      })
+      .catch((e: unknown) => current && setError(e instanceof ApiError ? e.display : String(e)))
+      .finally(() => current && setLoading(false))
+    return () => {
+      current = false
+    }
   }, [shop.shop_id])
 
   useEffect(() => {
     // Changing brand must clear the selection, or the next screen would show
     // one shop's listing under another shop's credentials.
     setSelected(null)
-    load()
+    return load()
   }, [load])
 
   if (selected) {

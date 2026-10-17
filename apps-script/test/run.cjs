@@ -178,6 +178,7 @@ ${src}
     __setDriveApp: function (d) { DriveApp = d },
     __setUrlFetch: function (u) { UrlFetchApp = u },
     ttFetch_, appendAssets_, newListingAssets_, pushSku_, productVersions_, listingState_,
+    saveListingNames_, refreshListingNames_, LISTING_NAME_REFRESH_MAX,
     // Guarded so the suite still LOADS against code that predates the split,
     // which is how the golden URL below was proven identical to the old one.
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
@@ -4192,6 +4193,143 @@ console.log('\na big export always saves its file')
     install()
     gs.__setUrlFetch({ fetch: fetcher.fetch, fetchAll: () => { throw new Error('Address unavailable') } })
     eq(Object.keys(gs.prefetchPhotos_([tiktokVar(1)], {})).length, 0)   // the slow path still has it
+  })
+}
+
+
+
+// ---------------------------------------------------------------------------
+// A listing renamed on TikTok is renamed in the app.
+//
+// Brien, 17 Oct: after renaming a listing in Seller Center, the app kept the
+// name it was added under. The name was copied once and never read again.
+// ---------------------------------------------------------------------------
+console.log('\na listing renamed on TikTok is renamed in the app')
+
+{
+  const COLS = ['listing_id', 'shop_id', 'brand', 'product_name', 'supplier', 'created_at']
+  let rows = []
+  let writes = []
+  const listingsTab = (name) => ({
+    getLastRow: () => (name === 'Listings' ? rows.length + 1 : 1),
+    getLastColumn: () => COLS.length,
+    getRange: (r, c, nr, nc) => ({
+      getValues: () => (name === 'Listings'
+        ? (r === 1 ? [COLS] : rows.map((o) => COLS.slice(c - 1, c - 1 + nc).map((k) => (k in o ? o[k] : ''))))
+        : [[]]),
+      setValue: (v) => { writes.push({ tab: name, row: r, col: c, v }); if (name === 'Listings') rows[r - 2][COLS[c - 1]] = v; return {} },
+      setValues() { return this }, setFontWeight() { return this }, clearContent() { return this },
+    }),
+    appendRow: () => {},
+  })
+  const FIXED_MS = 1_790_000_000_000
+  let sent = []
+  const reply = (body) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(body) })
+  const titles = { 1001: 'New name from Seller Center', 1002: 'Second listing, unchanged' }
+  const tiktok = {
+    fetch: (url) => { sent.push({ url, batched: false }); return reply(answer(url)) },
+    fetchAll: (batch) => batch.map((b) => { sent.push({ url: b.url, batched: true }); return reply(answer(b.url)) }),
+  }
+  const answer = (url) => {
+    const id = (url.match(/products\/(\w+)\?/) || [])[1]
+    if (!titles[id]) return { code: 12052001, message: 'no such product' }
+    return { code: 0, data: { id, title: titles[id], status: 'ACTIVATE', skus: [] } }
+  }
+  const install = () => {
+    gs.__setHeaders('Listings', COLS)
+    gs.__setSheetImpl(listingsTab)
+    gs.invalidateRead_()
+    cacheState.store = {}
+    lockState.refused = false
+    writes = []; sent = []
+    rows = [
+      { listing_id: '1001', shop_id: 'HZ', brand: 'HOUZE', product_name: 'Old name', created_at: '2026-10-02T00:00:00Z' },
+      { listing_id: '1002', shop_id: 'HZ', brand: 'HOUZE', product_name: 'Second listing, unchanged', created_at: '2026-10-01T00:00:00Z' },
+    ]
+  }
+  const withTikTok = (fn) => {
+    const realNow = Date.now
+    Date.now = () => FIXED_MS
+    authState.props = {
+      HZ_APP_KEY: 'k', HZ_APP_SECRET: 's', HZ_ACCESS_TOKEN: 't',
+      HZ_ACCESS_EXPIRES: String(Math.floor(FIXED_MS / 1000) + 30 * 86400), HZ_SHOP_CIPHER: 'c',
+    }
+    gs.__setUrlFetch(tiktok)
+    try { return fn() } finally { Date.now = realNow }
+  }
+
+  check('a changed name is written to its own row, and only that row', () => {
+    install()
+    eq(gs.saveListingNames_({ 1001: 'New name from Seller Center', 1002: 'Second listing, unchanged' }), 1)
+    eq(rows.map((r) => r.product_name), ['New name from Seller Center', 'Second listing, unchanged'])
+    eq(writes.length, 1)
+    eq([writes[0].row, writes[0].col], [2, COLS.indexOf('product_name') + 1])
+  })
+
+  check('a blank title from a failed read never blanks a good name', () => {
+    install()
+    eq(gs.saveListingNames_({ 1001: '', 1002: '   ' }), 0)
+    eq(rows[0].product_name, 'Old name')
+    eq(writes, [])
+  })
+
+  check('nothing changed means no lock and no write', () => {
+    install()
+    lockState.acquisitions = 0
+    gs.saveListingNames_({ 1002: 'Second listing, unchanged' })
+    eq(lockState.acquisitions, 0)
+    eq(writes, [])
+  })
+
+  check('a name is never worth waiting for the lock: busy means try next time', () => {
+    install()
+    lockState.refused = true
+    lockState.waits = []
+    eq(gs.saveListingNames_({ 1001: 'New name from Seller Center' }), 0)
+    eq(writes, [])
+    eq(lockState.waits, [0], 'asked for the lock without waiting')
+    lockState.refused = false
+  })
+
+  check('opening a listing corrects its name from what TikTok just said', () => {
+    install()
+    withTikTok(() => { try { gs.listingState_('1001') } catch (e) { /* the rest of the screen is not under test */ } })
+    eq(rows[0].product_name, 'New name from Seller Center')
+  })
+
+  check('the picker refresh reads every listing in one batch and saves the new names', () => {
+    install()
+    const out = withTikTok(() => gs.refreshListingNames_('HZ'))
+    eq(sent.filter((x) => !x.batched).length, 0, 'no product read on its own')
+    eq(sent.filter((x) => x.batched).length, 2)
+    eq(out.names.find((n) => n.listing_id === '1001').product_name, 'New name from Seller Center')
+    eq(rows[0].product_name, 'New name from Seller Center')
+  })
+
+  check('a listing TikTok cannot read keeps the name it has', () => {
+    install()
+    rows.push({ listing_id: '1009', shop_id: 'HZ', brand: 'HOUZE', product_name: 'Deleted on TikTok', created_at: '2026-09-01T00:00:00Z' })
+    const out = withTikTok(() => gs.refreshListingNames_('HZ'))
+    eq(rows[2].product_name, 'Deleted on TikTok')
+    eq(out.names.some((n) => n.listing_id === '1009'), false)
+  })
+
+  check('reopening the picker within ten minutes does not ask TikTok again', () => {
+    install()
+    withTikTok(() => gs.refreshListingNames_('HZ'))
+    sent = []
+    withTikTok(() => gs.refreshListingNames_('HZ'))
+    eq(sent.length, 0)
+  })
+
+  check('only the most recent listings are refreshed, so a long history stays cheap', () => {
+    install()
+    rows = Array.from({ length: gs.LISTING_NAME_REFRESH_MAX + 15 }, (_, i) => ({
+      listing_id: String(1000 + i), shop_id: 'HZ', brand: 'HOUZE', product_name: 'n',
+      created_at: new Date(Date.parse('2026-10-01T00:00:00Z') - i * 3600e3).toISOString(),
+    }))
+    withTikTok(() => gs.refreshListingNames_('HZ'))
+    eq(sent.length, gs.LISTING_NAME_REFRESH_MAX)
   })
 }
 

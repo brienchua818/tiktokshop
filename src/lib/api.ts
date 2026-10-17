@@ -665,6 +665,20 @@ export const api = {
     retryRead((timeoutMs) => call<Listing[]>('listings', { body: { shop_id: shopId }, timeoutMs })),
 
   /**
+   * TikTok's current names for the shop's listings.
+   *
+   * Asked for after the list has drawn, so a slow TikTok never holds up the
+   * picker. A listing renamed in Seller Center kept its old name in the app
+   * for good before this (Brien, 17 Oct). Not retried: it runs again the next
+   * time the list opens, and the names on screen are correct, only older.
+   */
+  listingNames: (shopId: string) =>
+    call<{ names: { listing_id: string; product_name: string }[]; checked_at: string }>('listingNames', {
+      body: { shop_id: shopId },
+      timeoutMs: 45_000,
+    }),
+
+  /**
    * The shop's live products on TikTok, so a stream can be picked from a list.
    *
    * The alternative is reading a nineteen-digit id off Seller Center and

@@ -442,6 +442,115 @@ function addListing_(shopId, listingId, actor, productName) {
   return row;
 }
 
+/**
+ * Keep the app's listing names in step with TikTok.
+ *
+ * A listing's name was copied from TikTok once, when it was added, and never
+ * read again — so renaming a product in Seller Center left the app showing
+ * the old name for good (Brien, 17 Oct). TikTok is the owner of the name; this
+ * is a copy, refreshed whenever TikTok's answer is in hand anyway.
+ *
+ * `names` is { listing_id: title }. Blank titles are ignored — a failed or
+ * partial read must never blank a name that was fine. Written under the lock
+ * but never WAITING for it: a push mid-stream holds the lock, and a name can
+ * just as well be saved on the next read. Returns how many rows changed.
+ */
+function saveListingNames_(names) {
+  var wanted = {};
+  Object.keys(names || {}).forEach(function (id) {
+    var title = String(names[id] || '').trim();
+    if (id && title) wanted[String(id)] = title;
+  });
+  if (!Object.keys(wanted).length) return 0;
+
+  // Cheap check first, from this request's read: usually nothing has changed.
+  var stale = readAll_(TAB_LISTINGS).some(function (r) {
+    var want = wanted[String(r.listing_id)];
+    return want !== undefined && String(r.product_name || '').trim() !== want;
+  });
+  if (!stale) return 0;
+
+  var changed = withScriptLockOptional_(0, function () {
+    // Positions re-read under the lock, so a row appended meanwhile cannot
+    // shift what is written where.
+    invalidateRead_(TAB_LISTINGS);
+    var rows = readAll_(TAB_LISTINGS);
+    var col = HEADERS[TAB_LISTINGS].indexOf('product_name') + 1;
+    var sh = sheet_(TAB_LISTINGS);
+    var renamed = [];
+    rows.forEach(function (r, i) {
+      var want = wanted[String(r.listing_id)];
+      if (want === undefined || String(r.product_name || '').trim() === want) return;
+      sh.getRange(i + 2, col).setValue(want);
+      renamed.push(String(r.listing_id) + ': "' + String(r.product_name || '') + '" -> "' + want + '"');
+    });
+    if (renamed.length) {
+      SpreadsheetApp.flush();
+      tabChanged_(TAB_LISTINGS);
+      logEvent_('system', 'rename_listing', '', renamed.join('; ').slice(0, 480), 'ok');
+    }
+    return renamed.length;
+  });
+  return changed || 0;
+}
+
+/** Listings whose names are refreshed per call, newest first. */
+var LISTING_NAME_REFRESH_MAX = 40;
+/** How long a shop's refreshed names are trusted before TikTok is asked again. */
+var LISTING_NAME_TTL_S = 600;
+
+/**
+ * Every listing's current name on TikTok, for the listing picker.
+ *
+ * Asked for by the phone AFTER the picker has drawn from the Sheet, so a slow
+ * TikTok never delays opening the app — the names correct themselves a
+ * moment later. Product reads go out in parallel batches; the answer is kept
+ * for ten minutes per shop, so reopening the picker costs nothing. A listing
+ * TikTok cannot read (deleted, or the shop's token lapsed) keeps its name.
+ */
+function refreshListingNames_(shopId) {
+  var shop = shopById_(shopId);
+  if (!shop) throw fail_('TS-SHT-07', 'Unknown shop: ' + shopId);
+
+  var key = 'listingNames:' + shopId;
+  var cache = null;
+  try {
+    cache = CacheService.getScriptCache();
+    var hit = cache.get(key);
+    if (hit) return JSON.parse(hit);
+  } catch (e) {
+    // No cache: ask TikTok, as below.
+  }
+
+  var ids = listListings_(shopId).slice(0, LISTING_NAME_REFRESH_MAX)
+    .map(function (r) { return String(r.listing_id); })
+    .filter(function (id) { return /^\d+$/.test(id); });
+
+  var names = {};
+  for (var at = 0; at < ids.length; at += 20) {
+    var batch = ids.slice(at, at + 20);
+    var answers;
+    try {
+      answers = ttFetchAll_(batch.map(function (id) { return ttProductRequest_(shopId, id, true); }));
+    } catch (e) {
+      warn_('TS-SHT-08', shop.brand + ': could not read listing names from TikTok: ' + e);
+      continue;
+    }
+    answers.forEach(function (r, i) {
+      var title = r && r.code === 0 && r.data ? String(r.data.title || '').trim() : '';
+      if (title) names[batch[i]] = title;
+    });
+  }
+
+  saveListingNames_(names);
+  var out = {
+    names: Object.keys(names).map(function (id) { return { listing_id: id, product_name: names[id] }; }),
+    checked_at: new Date().toISOString()
+  };
+  try { if (cache) cache.put(key, JSON.stringify(out), LISTING_NAME_TTL_S); } catch (e) { /* best effort */ }
+  return out;
+}
+
 // ── SKUs ─────────────────────────────────────────────────────────────
 /**
  * One listing's SKU rows, without reading every SKU ever written.

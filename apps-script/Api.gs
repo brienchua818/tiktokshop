@@ -343,6 +343,11 @@ function route_(action, params, body, user) {
     case 'listingState':
       return json_(listingState_(params.listing_id || body.listing_id));
 
+    // TikTok's current names for the shop's listings, asked for after the
+    // picker has drawn. See refreshListingNames_.
+    case 'listingNames':
+      return json_(refreshListingNames_(params.shop_id || body.shop_id));
+
     case 'skus':
       return json_(listedSkusForClient_(params.listing_id || body.listing_id));
 

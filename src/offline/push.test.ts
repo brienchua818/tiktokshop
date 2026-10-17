@@ -43,7 +43,7 @@ vi.mock('../capture/camera', async (orig) => ({
 }))
 
 import { api, ApiError } from '../lib/api'
-import { getIdToken, hasCredential, setIdToken, setSessionToken } from '../lib/script-api'
+import { getIdToken, getSessionToken, hasCredential, setIdToken, setSessionToken } from '../lib/script-api'
 import { AUTH_FAULT_RETRY_MS, pushOne, UNREACHED_RETRY_MS } from './push'
 import { drainQueue } from './runner'
 import {
@@ -135,6 +135,31 @@ describe('a failed push', () => {
     }
     await pushOne(await row(q.draft_id))
     expect(getIdToken()).toBe('the-next-persons-token')
+  })
+
+  it('never drops a session renewed while the push was out, whatever the old one\'s refusal says', async () => {
+    const session = (msLeft: number, tag: string) =>
+      btoa(JSON.stringify({ e: 'a@x.com', x: Date.now() + msLeft })).replace(/=+$/, '') + '.sig-' + tag
+    const q = await enqueue(draft(), photo())
+    setIdToken(null)
+    setSessionToken(session(90_000, 'old'))
+    const renewed = session(14 * 3600_000, 'new')
+    ctl.push = async () => {
+      setSessionToken(renewed)                        // the app's check-in landed meanwhile
+      throw new ApiError(401, 'Your sign-in has expired after a long day. Sign in again.', 'SESSION_EXPIRED')
+    }
+    await pushOne(await row(q.draft_id))
+    expect(getSessionToken()).toBe(renewed)
+  })
+
+  it('a sign-in lost in transit is tried again as soon as an outage is, not held a minute', async () => {
+    const q = await enqueue(draft(), photo())
+    ctl.push = () => Promise.reject(new ApiError(401, 'Your session is still good, so try again.', 'CREDENTIAL_LOST_IN_TRANSIT'))
+    const before = Date.now()
+    await pushOne(await row(q.draft_id))
+    const r = await row(q.draft_id)
+    expect(r.retryAfter).toBeLessThan(before + AUTH_FAULT_RETRY_MS)
+    expect(getIdToken()).toBe('google-id-token')
   })
 
   it('refused for a backend fault waits a minute, not ten seconds, and keeps the sign-in', async () => {

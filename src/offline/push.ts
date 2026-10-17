@@ -1,5 +1,13 @@
 import { api, ApiError } from '../lib/api'
-import { credentialEpoch, hasCredential, setIdToken, setSessionToken } from '../lib/script-api'
+import {
+  credentialEpoch,
+  credentialsToSend,
+  getIdToken,
+  getSessionToken,
+  hasCredential,
+  setIdToken,
+  setSessionToken,
+} from '../lib/script-api'
 import { toBase64 } from '../lib/bytes'
 import { toSquareJpeg } from '../capture/camera'
 import { landed } from '../live-listing/reconcile'
@@ -72,6 +80,8 @@ export const UNREACHED_RETRY_MS = 10_000
  * unreachable. Every push would fail the same way, so not every ten seconds.
  */
 export const AUTH_FAULT_RETRY_MS = 60_000
+/** The refusals that mean that. Anything else about sign-in is retried as soon as an outage is. */
+const AUTH_FAULTS = new Set(['BACKEND_NOT_CONFIGURED', 'CLIENT_ID_MISMATCH', 'GOOGLE_UNREACHABLE'])
 
 export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -114,6 +124,9 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
   // Which credential this push carries, so a refusal of it cannot sign out one
   // the person has signed in with since.
   const carried = credentialEpoch()
+  // And the credentials themselves, as sent: a renewal or a sign-in replaces
+  // them without moving the epoch.
+  let sent: { session: string | null; token: string | null } | null = null
 
   try {
     // Nobody signed in: say so now, before the photo is read and encoded for
@@ -150,6 +163,7 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
     // before the check of what landed — so no live step outlasts the 150 s
     // after which `revivable` would call the push dead.
     await stillUploading(draft)
+    sent = credentialsToSend()
     const result = await api.pushDraft({
       shop_id: draft.shop_id,
       // Omitted for the first SKU of a stream, which creates the listing.
@@ -232,14 +246,16 @@ export async function pushOne(draft: QueuedDraft): Promise<void> {
       // A credential the backend calls dead is dropped, as at app start. The
       // next try then stops here on the phone instead of re-sending the photo
       // every ten seconds, and the app shell sends the person to sign in.
-      if (api_error.isCredentialDead && !local && credentialEpoch() === carried) {
-        setIdToken(null)
-        setSessionToken(null)
+      // Only what this push sent and the phone still holds: one renewed or
+      // signed in since is good, whatever the old one's refusal says.
+      if (api_error.isCredentialDead && !local && sent && credentialEpoch() === carried) {
+        if (sent.token && getIdToken() === sent.token) setIdToken(null)
+        if (sent.session && getSessionToken() === sent.session) setSessionToken(null)
       }
       await recordFailure(draft, {
         status: 'failed',
         error: api_error.message,
-        retryAfter: Date.now() + (local || api_error.isCredentialDead ? UNREACHED_RETRY_MS : AUTH_FAULT_RETRY_MS),
+        retryAfter: Date.now() + (AUTH_FAULTS.has(String(api_error.code)) ? AUTH_FAULT_RETRY_MS : UNREACHED_RETRY_MS),
         settled: false,
       })
       return

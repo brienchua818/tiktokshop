@@ -104,4 +104,28 @@ describe('the sign-in while the app stays open', () => {
     expect(el.textContent).toContain('SIGNIN')
     root.unmount()
   }, 15_000)
+
+  it('a check-in still out when the session reaches its last minute keeps the person signed in', async () => {
+    const { el, root } = await openFromMemory(tok('a@x.com', 61_500))
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    expect(whoami.length).toBe(2)                     // the check-in is out
+    await act(async () => { await new Promise((r) => setTimeout(r, 5_200)) })
+    expect(el.textContent).toContain('MORE')          // not sent to sign in while it is
+    const fresh = tok('a@x.com', 14 * 3600_000)
+    await act(async () => { whoami[1]!.resolve(meOf('a@x.com', fresh)) })
+    expect(getSessionToken()).toBe(fresh)
+    expect(el.textContent).toContain('MORE')
+    root.unmount()
+  }, 15_000)
+
+  it('a session that ran out is dropped, not left to age out on the phone', async () => {
+    const { el, root } = await openFromMemory(tok('a@x.com', 61_500))
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)) })
+    // A refusal that is not retried, so the check-in is over.
+    await act(async () => { whoami[1]!.reject(new ScriptError(403, 'Waiting for approval.')) })
+    await act(async () => { await new Promise((r) => setTimeout(r, 5_200)) })
+    expect(el.textContent).toContain('SIGNIN')
+    expect(getSessionToken()).toBeNull()
+    root.unmount()
+  }, 15_000)
 })

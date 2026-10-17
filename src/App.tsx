@@ -285,13 +285,19 @@ export default function App() {
     let renewing = false
     let lastTry = 0
     const tick = () => {
+      // A check-in still out may be bringing a fresh session: the sign-in is
+      // not gone until it has answered.
+      if (renewing) return
       if (!hasCredential()) {
+        // Dropped, not left to age out: that moves the credential epoch, so
+        // nothing asked for under it can act on whoever signs in next.
+        setSessionToken(null)
         forgetBoot()
         setUser(null)
         return
       }
       const left = sessionMsLeft()
-      if (renewing || !hasLiveSession() || left > SESSION_RENEW_MS || Date.now() - lastTry < SESSION_RENEW_GAP_MS) return
+      if (!hasLiveSession() || left > SESSION_RENEW_MS || Date.now() - lastTry < SESSION_RENEW_GAP_MS) return
       renewing = true
       lastTry = Date.now()
       api
@@ -305,7 +311,9 @@ export default function App() {
           // dropped (the next tick then shows sign-in). A slow or failed
           // check-in changes nothing — the session it would have replaced is
           // still good, and the next tick tries again.
-          if (e instanceof ApiError && e.isCredentialDead) {
+          // Not the phone's own "nothing to send": that is the session
+          // reaching its last minute, which the next tick handles.
+          if (e instanceof ApiError && e.isCredentialDead && e.code !== 'NO_CREDENTIAL_ON_DEVICE') {
             setIdToken(null)
             setSessionToken(null)
           }

@@ -1,15 +1,11 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, ApiError, type ListingState, type LiveVariant } from '../lib/api'
-import { toBase64 } from '../lib/bytes'
 import {
-  afterAttempt,
-  backfillListingId,
   allDrafts,
+  getPhoto,
   MAX_AUTO_ATTEMPTS,
   isStuck,
   PARKED,
-  nextBatch,
-  getPhoto,
   needsAttention,
   removeDraft,
   retryDraft,
@@ -17,11 +13,11 @@ import {
 } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
-import { toSquareJpeg } from '../capture/camera'
+import { LISTING_FULL_MARKER } from '../offline/push'
+import { kickQueue } from '../offline/runner'
 import {
   draftsTakenOver,
   driftedDrafts,
-  landed,
   mergeRows,
   nameWithoutIdentifier,
   showsOriginalTotal,
@@ -31,22 +27,6 @@ import {
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
-
-/**
- * Marks a draft parked because its listing is full, as opposed to one parked
- * because TikTok refused it.
- *
- * A string marker rather than a status field because the two are the same
- * queue state — out of automatic attempts, waiting for a person — differing
- * only in what the person should do about it.
- */
-export const LISTING_FULL_MARKER = '[listing-full]'
-
-/**
- * Side of the export thumbnail made at push time. 400 px is 160,000 pixels —
- * a sixth of Sheets' cap — and still three times the 128 px it is drawn at.
- */
-export const EXPORT_THUMB_PX = 400
 
 /**
  * The draft queue: what has been built, what has landed, and what has not.
@@ -77,7 +57,9 @@ export default function DraftQueue({
   onDelete: (draftId: string) => void | Promise<void>
 }) {
   const online = useOnlineStatus()
-  const [working, setWorking] = useState(false)
+  // Shown from the data, not from a flag a re-render can strand: a row is
+  // uploading exactly when the sender has marked it so.
+  const working = drafts.some((d) => d.status === 'uploading')
 
   /**
    * What TikTok says about this listing, as of the last refresh.
@@ -276,29 +258,18 @@ export default function DraftQueue({
       })
     : ''
 
-  // Drain the queue whenever the connection returns or new work appears.
-  // A single in-flight guard keeps a reconnect from starting a second pass
-  // over the same items.
+  /**
+   * Nudge the app's sender whenever this listing's queue changes.
+   *
+   * The sender used to live HERE, as an effect guarded by a `working` flag, and
+   * saving the next SKU mid-push tore the effect down with the flag stuck on —
+   * the queue then sat at "queued, N waiting" until the listing was reopened
+   * (Brien, 17 Oct; BRI21–28 reached the backend nineteen hours late). It is
+   * now one loop for the whole app, in offline/runner.ts, that no screen can
+   * stop. This only tells it to look now rather than at its next heartbeat.
+   */
   useEffect(() => {
-    if (!online || working) return
-    const due = nextBatch(drafts)
-    if (due.length === 0) return
-
-    let cancelled = false
-    setWorking(true)
-    void (async () => {
-      for (const draft of due) {
-        if (cancelled) break
-        await pushOne(draft)
-        await onChanged()
-      }
-      if (!cancelled) setWorking(false)
-    })()
-
-    return () => {
-      cancelled = true
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (online) kickQueue()
   }, [online, drafts])
 
   const allStuck = needsAttention(drafts)
@@ -1345,162 +1316,6 @@ function StatusBadge({ draft, live }: { draft: QueuedDraft; live: LiveVariant | 
     )
   }
   return <span className="text-[12px] text-faint">Queued</span>
-}
-
-/**
- * Push one draft, recording the outcome either way.
- *
- * Marking it `uploading` first is what makes the attempt visible to
- * `nextBatch`, so a reconnect firing mid-push cannot pick the same SKU up a
- * second time — nor start a second push on the same stream, which would be a
- * read-modify-write race whose consequence is a deleted variation.
- */
-async function pushOne(draft: QueuedDraft): Promise<void> {
-  // Stamped as the push starts, so `revivable` can tell this row from one whose
-  // app died mid-flight without having to know when it is being asked.
-  await updateDraft(draft.draft_id, { status: 'uploading', uploading_at: Date.now() })
-
-  try {
-    // The photo lives in IndexedDB beside the draft and is encoded here, at
-    // push time. One call carries the SKU and its photo together, so there is
-    // no half-finished state to reconcile when the connection drops between
-    // an upload and a push — which on factory Wi-Fi is exactly when it drops.
-    const photo = await getPhoto(draft.draft_id)
-    if (!photo) throw new Error('The photo for this SKU is missing from this device.')
-    const photoBase64 = await toBase64(photo)
-
-    // The purchase-order export needs a small copy of this photo — Sheets caps
-    // an inserted image at 1,000,000 pixels and the full photo is 2.56M — and
-    // the phone is the only place in the system that can resize an image for
-    // free. Best effort: a SKU must never fail to list because a thumbnail
-    // could not be made.
-    let thumbBase64: string | undefined
-    try {
-      thumbBase64 = await toBase64(await toSquareJpeg(photo, { target: EXPORT_THUMB_PX, quality: 0.8 }))
-    } catch {
-      thumbBase64 = undefined
-    }
-
-    const result = await api.pushDraft({
-      shop_id: draft.shop_id,
-      // Omitted for the first SKU of a stream, which creates the listing.
-      ...(draft.listing_id ? { listing_id: draft.listing_id } : {}),
-      ...(draft.continues_from ? { continues_from: draft.continues_from } : {}),
-      identifier: draft.identifier,
-      title: draft.title,
-      variant_name: draft.variant_name,
-      price: draft.price,
-      stock: draft.stock,
-      weight_kg: draft.weight_kg,
-      photo_base64: photoBase64,
-      photo_mime: photo.type || 'image/jpeg',
-      ...(thumbBase64 ? { thumb_base64: thumbBase64 } : {}),
-      idempotency_key: draft.idempotency_key,
-    })
-
-    // A success with no listing id is not a success. Marking a draft Live
-    // without one loses the only handle we have on the product — and for the
-    // first SKU of a stream it would also lose the id every later SKU needs to
-    // append to, silently splitting the run across separate listings.
-    if (!result?.listing_id) {
-      throw new Error('TikTok accepted the SKU but returned no listing ID.')
-    }
-
-    await updateDraft(
-      draft.draft_id,
-      afterAttempt(draft, {
-        ok: true,
-        tiktokProductId: result.product_id,
-        listingId: result.listing_id,
-      }),
-    )
-
-    // The stream now has a listing. Stamp it onto the siblings still waiting,
-    // so the next one adds a variation instead of creating a second product.
-    if (result.mode === 'listing_created') {
-      for (const sibling of backfillListingId(await allDrafts(), draft.stream_id, result.listing_id)) {
-        await updateDraft(sibling.draft_id, { listing_id: sibling.listing_id })
-      }
-    }
-  } catch (error: unknown) {
-    const api_error = error instanceof ApiError ? error : null
-
-    // Losing the race for the listing's lease is not this SKU's fault, so it
-    // goes back to the queue without consuming an attempt.
-    if (api_error?.code === 'LISTING_BUSY') {
-      await updateDraft(
-        draft.draft_id,
-        afterAttempt(draft, {
-          ok: false,
-          error: api_error.message,
-          retryable: true,
-          contended: true,
-        }),
-      )
-      return
-    }
-
-    // The stream has outgrown one product. Singapore allows 100 variations per
-    // product, so this is expected on a long run rather than a fault — but
-    // creating a second listing is visible in the seller's shop, so it waits
-    // for a person to accept it.
-    if (api_error?.isListingFull) {
-      await updateDraft(draft.draft_id, {
-        status: 'failed',
-        error: `${LISTING_FULL_MARKER} ${api_error.message}`,
-        attempts: MAX_AUTO_ATTEMPTS,
-        retryAfter: Number.MAX_SAFE_INTEGER,
-      })
-      return
-    }
-
-    /**
-     * Ask TikTok before declaring a failure whose outcome is unknown.
-     *
-     * A lost reply is not a failed write. The push may have reached Apps
-     * Script, uploaded the photo, edited the product and only lost the
-     * response on the way home — which is precisely what happened on a real
-     * SKU: the listing showed four variations while the app showed the fourth
-     * as failed. Reporting that as a failure sends someone to Seller Center to
-     * find out, which is the errand this whole screen exists to remove.
-     *
-     * Cheap, and only on the unknown-outcome path: a rejection from TikTok is
-     * a decision and needs no second opinion.
-     */
-    if (api_error?.isOutcomeUnknown && draft.listing_id) {
-      try {
-        const live = await api.listingState(draft.listing_id)
-        // "Recorded by the backend", not "shown by TikTok": a variation just
-        // added is under review and absent from TikTok's read for minutes.
-        // Asking the second question is exactly how B9 read as failed while
-        // the backend had it as pushed since 12:14:17.
-        if (landed(live, draft.identifier)) {
-          await updateDraft(draft.draft_id, {
-            status: 'pushed',
-            error: null,
-            settled: true,
-            listing_id: draft.listing_id,
-          })
-          return
-        }
-      } catch {
-        // The check itself failed. Falls through and is reported as before —
-        // an unanswered question is still better recorded than guessed at.
-      }
-    }
-
-    // A connection failure is retryable; a rejection from TikTok is not, and
-    // retrying it would burn part of the shop's daily listing allowance.
-    const retryable = api_error ? api_error.isRetryable : true
-    await updateDraft(
-      draft.draft_id,
-      afterAttempt(draft, {
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-        retryable,
-      }),
-    )
-  }
 }
 
 /**

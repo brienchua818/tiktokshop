@@ -5,7 +5,8 @@ import { getSessionToken, hasCredential, hasLiveSession, setIdToken, setSessionT
 import { forgetBoot, readBoot, rememberMe, rememberShops } from './lib/boot-cache'
 import { forgetAccount } from './auth/google'
 import { useOnlineStatus } from './hooks/useOnlineStatus'
-import { allDrafts, pendingCount, reviveOrphanedUploads } from './offline/queue'
+import { allDrafts, needsAttention, pendingCount, reviveOrphanedUploads } from './offline/queue'
+import { onQueueChange, startQueueRunner } from './offline/runner'
 import type { Shop, SignedInUser } from './types'
 import SignIn from './auth/SignIn'
 import LiveListing from './live-listing/LiveListing'
@@ -29,6 +30,8 @@ export default function App() {
   const [shopsReload, setShopsReload] = useState(0)
   const [shopId, setShopId] = useState<string | null>(null)
   const [pending, setPending] = useState(0)
+  /** Of those, the ones that stopped and need a person (refused, or out of tries). */
+  const [stuck, setStuck] = useState(0)
   const [theme, setTheme] = useState<ThemeChoice>(readChoice)
   const online = useOnlineStatus()
 
@@ -224,7 +227,13 @@ export default function App() {
     reviveOrphanedUploads()
       .catch(() => 0)
       .then(() => allDrafts())
-      .then((drafts) => setPending(pendingCount(drafts)))
+      .then((drafts) => {
+        // Split, because "N waiting" over SKUs that will never move on their
+        // own is a screen that says the queue is working when it is not.
+        const needYou = needsAttention(drafts).length
+        setStuck(needYou)
+        setPending(pendingCount(drafts) - needYou)
+      })
       .catch(() => {
         /* IndexedDB unavailable (private window): the indicator just stays at 0. */
       })
@@ -235,8 +244,24 @@ export default function App() {
     // Poll rather than subscribe: IndexedDB has no change events, and once a
     // second is cheap next to what the page is already doing.
     const timer = setInterval(refreshPending, 1000)
-    return () => clearInterval(timer)
+    const unsubscribe = onQueueChange(refreshPending)
+    return () => {
+      clearInterval(timer)
+      unsubscribe()
+    }
   }, [refreshPending])
+
+  /**
+   * The queue's sender runs for as long as somebody is signed in, whatever
+   * screen they are on. It used to live inside the listing screen and stop
+   * with it — and stop for good when a save landed mid-push. Not started for
+   * a signed-out phone: a push without a credential would be refused, and a
+   * refusal parks the SKU.
+   */
+  useEffect(() => {
+    if (!user) return
+    return startQueueRunner()
+  }, [user])
 
   function chooseShop(id: string) {
     setShopId(id)
@@ -350,6 +375,15 @@ export default function App() {
               >
                 <span className="w-1.5 h-1.5 rounded-full bg-info" />
                 {pending} waiting
+              </span>
+            )}
+            {stuck > 0 && (
+              <span
+                className="text-xs px-2 h-7 inline-flex items-center gap-1.5 rounded-lg bg-warn-tint text-warn whitespace-nowrap"
+                title="SKUs that stopped and need someone to look: open the listing to see why"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-warn" />
+                {stuck} need{stuck === 1 ? 's' : ''} you
               </span>
             )}
           </div>

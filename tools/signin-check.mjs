@@ -10,7 +10,9 @@ import http from 'node:http'
 import fs from 'node:fs'
 import path from 'node:path'
 
-const DIST = '/home/user/tikshop/dist'
+// Relative to this file, not a machine path: the repo was at /home/user/tikshop
+// on one machine and /home/user/tiktokshop on the next, and this broke the audit.
+const DIST = new URL('../dist', import.meta.url).pathname
 const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.webmanifest': 'application/manifest+json' }
 
 const server = http.createServer((req, res) => {

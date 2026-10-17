@@ -21,6 +21,7 @@ import type { Draft, Listing, Shop } from '../types'
 import PhotoBlock, { ActionButton } from './PhotoBlock'
 import VoiceCapture from './VoiceCapture'
 import DraftQueue from './DraftQueue'
+import { onQueueChange as onSenderChange } from '../offline/runner'
 import BarSpacer from '../ui/BarSpacer'
 import BulkAdd from './BulkAdd'
 import Icon from '../ui/Icon'
@@ -90,6 +91,10 @@ export default function ListingDetail({
   useEffect(() => {
     void refreshDrafts()
   }, [refreshDrafts])
+
+  // The sender runs in the background now, so this screen hears about each
+  // push from it rather than from a loop of its own.
+  useEffect(() => onSenderChange(() => void refreshDrafts()), [refreshDrafts])
 
   // Variations already live on TikTok. Needed so the counter continues the
   // sequence instead of restarting at A1 on a fresh device.

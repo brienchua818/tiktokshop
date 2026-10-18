@@ -244,10 +244,11 @@ export default function DraftQueue({
    * person is shown what TikTok holds now — in the sheet they are about to
    * tap again — before they decide whether to.
    */
-  async function checkStock(v: LiveVariant) {
+  async function checkStock(v: LiveVariant): Promise<LiveVariant | null> {
     const state = await refresh()
     const now = state?.variants.find((x) => sameVariant(x, v))
     if (now) setAdjusting((open) => (open && sameVariant(now, open) ? now : open))
+    return now ?? null
   }
 
   /**
@@ -781,7 +782,8 @@ export default function DraftQueue({
             // backend's to say, and only a read brings it.
             await refresh(changed ? POLL_READ : HEAVY_READ)
           }}
-          onUnknown={() => void checkStock(adjusting)}
+          onUnknown={() => checkStock(adjusting)}
+          onStale={() => void checkStock(adjusting)}
         />
       )}
 
@@ -1120,6 +1122,13 @@ function RemoteRow({
 const BUSY_RETRY_MS = [2_000, 4_000, 6_000]
 
 /**
+ * Refusals that mean TikTok's figure is not the one this sheet was opened on:
+ * an exact set from a stale number, a step that would go below 1 after sales,
+ * a price changed since. Nothing was changed, and the figure needs reading.
+ */
+const MOVED_SINCE = new Set(['TS-STK-12', 'TS-STK-14', 'TS-PRC-07'])
+
+/**
  * One key per tap, sent with every attempt of that tap.
  *
  * `crypto.randomUUID` needs a secure context and iOS 15.4 or later. The
@@ -1164,6 +1173,7 @@ export function StockSheet({
   onClose,
   onDone,
   onUnknown,
+  onStale,
 }: {
   v: LiveVariant
   listingId: string | null
@@ -1175,9 +1185,17 @@ export function StockSheet({
   onDone: (note: string, changed?: { stock_available?: number; price?: string }) => Promise<void>
   /**
    * A write whose reply never came, and which may have landed. The caller
-   * reads the listing back; the sheet never sends the write again.
+   * reads the listing back; the sheet never sends the write again. A caller
+   * that returns what it read lets the sheet say how the check ended.
    */
-  onUnknown?: () => void
+  onUnknown?: () => void | Promise<LiveVariant | null>
+  /**
+   * The backend refused because TikTok has moved since this sheet's figure
+   * was read. The caller reads the listing again so the sheet shows what
+   * TikTok holds now — otherwise every retry from here sent the same stale
+   * number and was refused again.
+   */
+  onStale?: () => void
 }) {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -1189,8 +1207,26 @@ export function StockSheet({
   const [mode, setMode] = useState<'add' | 'set'>('add')
   const [priceText, setPriceText] = useState(v.price)
   const [confirming, setConfirming] = useState(false)
+  /** Between two tries of a busy write: nothing is in flight, so it may be closed. */
+  const [waiting, setWaiting] = useState(false)
+  /** Closed or gone: a busy write waiting for its next try must not make it. */
+  const abandoned = useRef(false)
+  useEffect(
+    () => () => {
+      abandoned.current = true
+    },
+    [],
+  )
   const locked = busy !== '' || unknown !== ''
-  useDismiss(busy ? () => {} : onClose)
+  // Locked while a write is actually out, so a reply cannot land on a sheet
+  // nobody is looking at. Not while it only waits to try again: the sheet
+  // covers the whole app, and three busy replies kept it up for two minutes.
+  const canClose = busy === '' || waiting
+  const close = () => {
+    abandoned.current = true
+    onClose()
+  }
+  useDismiss(canClose ? close : () => {})
 
   const now = v.stock_available ?? 0
   const label = v.identifier || v.variant
@@ -1238,29 +1274,51 @@ export function StockSheet({
         } catch (e: unknown) {
           if (e instanceof ApiError && e.code === 'LISTING_BUSY' && attempt < BUSY_RETRY_MS.length) {
             setRetrying(
-              `Another change is saving first. Retrying (${attempt + 1} of ${BUSY_RETRY_MS.length})…`,
+              `Another change is saving first. Retrying (${attempt + 1} of ${BUSY_RETRY_MS.length})… ` +
+                'Nothing has been changed yet; you can close this.',
             )
+            setWaiting(true)
             await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS[attempt]))
+            setWaiting(false)
+            if (abandoned.current) return null
             continue
           }
-          if (e instanceof ApiError && e.isOutcomeUnknown) {
+          // An unanticipated failure on the backend (TS-UNC-00) can come after
+          // TikTok's write landed — the read-back, our Sheet — so it is treated
+          // like a lost reply: looked at, never resent.
+          const lost = e instanceof ApiError && (e.isOutcomeUnknown || e.code === 'TS-UNC-00')
+          if (lost) {
             setUnknown(
-              `Outcome unknown: no reply came, so the ${what} may already be on TikTok. ` +
-                'It was not sent again. Checking the listing…',
+              `Outcome unknown: ${(e as ApiError).isOutcomeUnknown ? 'no reply came' : 'the backend failed partway'}, ` +
+                `so the ${what} may already be on TikTok. It was not sent again. Checking the listing…`,
             )
-            onUnknown?.()
+            const checked = onUnknown?.()
+            if (checked && typeof (checked as Promise<unknown>).then === 'function') {
+              void (checked as Promise<LiveVariant | null>).then((now) => {
+                if (abandoned.current) return
+                setUnknown(
+                  now
+                    ? `Checked: TikTok now shows ${now.stock_available ?? 0} left at $${now.price}. If that ` +
+                        'includes your change, it is done. To change it again, close this and open it again.'
+                    : 'Could not check the listing: no reply. Close this, tap refresh, and look at the figure ' +
+                        'before changing it again.',
+                )
+              })
+            }
           } else if (e instanceof ApiError && e.code === 'LISTING_BUSY') {
             setError(
               `Still busy after ${BUSY_RETRY_MS.length} retries. Nothing was changed — try again in a minute.`,
             )
           } else {
             setError(e instanceof ApiError ? e.display : String(e))
+            if (e instanceof ApiError && MOVED_SINCE.has(String(e.code))) onStale?.()
           }
           return null
         }
       }
     } finally {
       setRetrying('')
+      setWaiting(false)
       setBusy('')
     }
   }
@@ -1313,7 +1371,7 @@ export function StockSheet({
     await onDone(
       `${name}: now $${r.after}, was $${r.before}.` +
         (r.pending_price
-          ? ` The listing's copy under review still shows $${r.before}; TikTok will catch up, and pushes meanwhile keep $${r.after}.`
+          ? ` The listing's copy under review still shows $${r.before}. Pushes from this app keep $${r.after}; check this price again once TikTok finishes reviewing the listing.`
           : ''),
       { price: r.after },
     )
@@ -1321,7 +1379,7 @@ export function StockSheet({
 
   return (
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
-      <div className="absolute inset-0 bg-scrim" onClick={busy ? undefined : onClose} />
+      <div className="absolute inset-0 bg-scrim" onClick={canClose ? close : undefined} />
       <div
         role="dialog"
         aria-modal="true"
@@ -1338,8 +1396,8 @@ export function StockSheet({
             </p>
           </div>
           <button
-            onClick={onClose}
-            disabled={busy !== ''}
+            onClick={close}
+            disabled={!canClose}
             className="min-h-11 min-w-11 -mr-1 -mt-1 inline-flex items-center justify-center text-muted disabled:opacity-40"
             aria-label="Close"
           >
@@ -1442,7 +1500,9 @@ export function StockSheet({
                 inputMode="decimal"
                 value={priceText}
                 onChange={(e) => {
-                  setPriceText(e.target.value)
+                  // A phone set to a comma-decimal region offers "," on the
+                  // decimal keypad, and "$" is easy to type out of habit.
+                  setPriceText(e.target.value.replace(/,/g, '.').replace(/^\s*\$/, ''))
                   setConfirming(false)
                 }}
                 disabled={locked}
@@ -1451,12 +1511,13 @@ export function StockSheet({
               />
               <button
                 onClick={() => void savePrice()}
-                disabled={locked || !priceChanged}
-                className={`min-h-12 px-4 rounded-xl disabled:opacity-40 text-[15px] font-semibold shrink-0 ${
-                  confirming ? 'bg-warn-solid text-on-warn' : 'bg-accent hover:bg-accent-hover text-white'
-                }`}
+                // Off while it asks: the second tap of a double tap landed on
+                // this same button, by then reading "Confirm", and sent a
+                // price nobody had looked at twice.
+                disabled={locked || !priceChanged || confirming}
+                className="min-h-12 px-4 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white shrink-0"
               >
-                {confirming ? `Confirm $${nextText}` : 'Save price'}
+                Save price
               </button>
             </div>
             {priceChanged && (
@@ -1465,12 +1526,21 @@ export function StockSheet({
               </p>
             )}
             {confirming && currentCents !== null && nextCents !== null && (
-              <p className="text-xs text-warn">
-                {nextCents > currentCents
-                  ? `That is more than three times the current $${currentText}.`
-                  : `That is under a third of the current $${currentText}.`}{' '}
-                Check it, then tap Confirm if ${nextText} is right.
-              </p>
+              <div className="space-y-2">
+                <p className="text-xs text-warn">
+                  {nextCents > currentCents
+                    ? `That is more than three times the current $${currentText}.`
+                    : `That is under a third of the current $${currentText}.`}{' '}
+                  Check it, then confirm if ${nextText} is right.
+                </p>
+                <button
+                  onClick={() => void savePrice()}
+                  disabled={locked}
+                  className="min-h-12 w-full rounded-xl bg-warn-solid text-on-warn disabled:opacity-40 text-[15px] font-semibold"
+                >
+                  Yes, set ${nextText}
+                </button>
+              </div>
             )}
             {priceProblem && priceText.trim() !== v.price.trim() && (
               <p className="text-xs text-bad">{priceProblem}</p>

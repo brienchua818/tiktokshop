@@ -48,6 +48,7 @@ let root: Root
 async function mount(props: Partial<Parameters<typeof StockSheet>[0]> = {}) {
   const onDone = vi.fn(async (_note: string, _changed?: unknown) => {})
   const onUnknown = vi.fn()
+  const onStale = vi.fn()
   el = document.createElement('div')
   document.body.appendChild(el)
   root = createRoot(el)
@@ -59,11 +60,12 @@ async function mount(props: Partial<Parameters<typeof StockSheet>[0]> = {}) {
         onClose={() => {}}
         onDone={onDone}
         onUnknown={onUnknown}
+        onStale={onStale}
         {...props}
       />,
     )
   })
-  return { onDone, onUnknown }
+  return { onDone, onUnknown, onStale }
 }
 
 const labelled = (label: string) => el.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)
@@ -127,6 +129,28 @@ describe('stock', () => {
     expect(ctl.setStock.mock.calls[0]![0]).toMatchObject({ absolute: 6, expected_before: 10 })
   })
 
+  it('a refusal because TikTok has moved asks for a fresh figure, so the next try is not refused again', async () => {
+    ctl.setStock.mockRejectedValue(
+      new ApiError(500, 'Stock is now 3, not the 10 shown (sales since). Nothing was changed — check and set again.', 'TS-STK-12'),
+    )
+    const { onStale, onUnknown } = await mount()
+    await click(titled('Set an exact number instead'))
+    type('input[aria-label="Exact stock"]', '6')
+    await click(titled('Set'))
+    expect(onStale).toHaveBeenCalledTimes(1)
+    expect(onUnknown).not.toHaveBeenCalled()
+    expect(el.textContent).toContain('Stock is now 3')
+    // And the sheet is still usable: nothing was changed.
+    expect(titled('Set')?.disabled).toBe(false)
+  })
+
+  it('any other refusal does not ask for a fresh figure', async () => {
+    ctl.setStock.mockRejectedValue(new ApiError(422, 'TikTok refused the quantity', 'TS-STK-05'))
+    const { onStale } = await mount()
+    await click(titled('+5'))
+    expect(onStale).not.toHaveBeenCalled()
+  })
+
   it('a busy backend is retried with the same key, and the sheet says it is retrying', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     ctl.setStock
@@ -146,6 +170,59 @@ describe('stock', () => {
     expect(keys[0]).toBeTruthy()
     expect(new Set(keys).size).toBe(1)
     expect(onDone).toHaveBeenCalledWith('A1: 11 left, was 10.', { stock_available: 11 })
+  })
+
+  it('can be closed while it waits to retry, and then sends nothing more', async () => {
+    // Three busy replies kept a sheet that covers the whole app up for two
+    // minutes. Between tries nothing is in flight, so closing is safe.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ctl.setStock.mockRejectedValue(busy())
+    const onClose = vi.fn()
+    await mount({ onClose })
+    await click(titled('+5'))
+    expect(ctl.setStock).toHaveBeenCalledTimes(1)
+    const close = labelled('Close')!
+    expect(close.disabled).toBe(false)
+    await click(close)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    await later(2_000)
+    await later(4_000)
+    await later(6_000)
+    expect(ctl.setStock).toHaveBeenCalledTimes(1)
+  })
+
+  it('cannot be closed while a write is actually out', async () => {
+    ctl.setStock.mockImplementation(() => new Promise(() => {}))
+    await mount()
+    await click(titled('+5'))
+    expect(labelled('Close')!.disabled).toBe(true)
+  })
+
+  it('a backend that failed partway is treated like a lost reply: looked at, never resent', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ctl.setStock.mockRejectedValueOnce(new ApiError(500, 'Service Spreadsheets timed out', 'TS-UNC-00'))
+    const { onUnknown } = await mount()
+    await click(titled('+10'))
+    expect(onUnknown).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toMatch(/Outcome unknown: the backend failed partway.*not sent again/)
+    expect(titled('+10')?.disabled).toBe(true)
+  })
+
+  it('says how the check ended once the caller has read the listing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ctl.setStock.mockRejectedValueOnce(lost('setStock'))
+    await mount({ onUnknown: () => Promise.resolve(variant({ stock_available: 20 })) })
+    await click(titled('+10'))
+    expect(el.textContent).toMatch(/Checked: TikTok now shows 20 left/)
+    expect(titled('+10')?.disabled).toBe(true)
+  })
+
+  it('says so when the check could not be made', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    ctl.setStock.mockRejectedValueOnce(lost('setStock'))
+    await mount({ onUnknown: () => Promise.resolve(null) })
+    await click(titled('+10'))
+    expect(el.textContent).toMatch(/Could not check the listing/)
   })
 
   it('a backend still busy after three retries is reported, and nothing more is sent', async () => {
@@ -217,9 +294,23 @@ describe('price', () => {
     await click(titled('Save price'))
     expect(ctl.setPrice).not.toHaveBeenCalled()
     expect(el.textContent).toContain('more than three times the current $12.90')
-    await click(titled('Confirm $99.00'))
+    // Save price is off while it asks, so the second tap of a double tap does nothing.
+    expect(titled('Save price')?.disabled).toBe(true)
+    await click(titled('Save price'))
+    expect(ctl.setPrice).not.toHaveBeenCalled()
+    await click(titled('Yes, set $99.00'))
     expect(ctl.setPrice).toHaveBeenCalledTimes(1)
     expect(ctl.setPrice.mock.calls[0]![0].price).toBe('99.00')
+  })
+
+  it('a price typed with a comma, as some phones offer it, is sent with a point', async () => {
+    ctl.setPrice.mockResolvedValue({
+      identifier: 'A1', before: '12.90', after: '12.50', requested: '12.50', pending_price: false, currency: 'SGD',
+    })
+    await mount()
+    type('input[aria-label="New price"]', '12,50')
+    await click(titled('Save price'))
+    expect(ctl.setPrice.mock.calls[0]![0].price).toBe('12.50')
   })
 
   it('under a third of the current price asks once more too', async () => {
@@ -254,7 +345,7 @@ describe('price', () => {
     const note = String(onDone.mock.calls[0]![0])
     expect(note).toContain('A1: now $9.90, was $12.90.')
     expect(note).toContain('copy under review still shows $12.90')
-    expect(note).toContain('TikTok will catch up')
+    expect(note).toContain('check this price again once TikTok finishes reviewing')
   })
 
   it('a price change whose reply never came is not sent again', async () => {

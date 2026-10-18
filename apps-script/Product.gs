@@ -2374,8 +2374,16 @@ function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute,
   // Only if we have a row for it. A variation added in Seller Center has none,
   // and its stock still changes on TikTok — there is simply nothing of ours to
   // keep in step.
-  var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
-  if (row) markSkus_([{ sku_id: String(row.sku_id), stock: after }]);
+  // From here on the change is on TikTok. A step of ours failing after it —
+  // the Sheet busy, a log line — must not report the change as failed: the
+  // person would tap again and it would land twice.
+  try {
+    var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+    if (row) markSkus_([{ sku_id: String(row.sku_id), stock: after }]);
+  } catch (e) {
+    warn_('TS-STK-17', listingId + ': ' + label + ' is ' + after + ' on TikTok, but our row could not be ' +
+      'updated: ' + (e && e.message ? e.message : e));
+  }
 
   logEvent_(actor && actor.name, 'set_stock', String(listingId),
     label + ': ' + before + ' -> ' + after, 'ok');
@@ -2628,8 +2636,15 @@ function setVariationPrice_(listingId, identifier, tiktokSkuId, price, expectedB
 
   // Keep our record in step where we have one. A Seller Center variation has
   // no row, and its price still changed on TikTok.
-  var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
-  if (row) markSkus_([{ sku_id: String(row.sku_id), price: requested }]);
+  // As for stock: past this point the price is on TikTok, and our own record
+  // failing must not report it as failed.
+  try {
+    var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+    if (row) markSkus_([{ sku_id: String(row.sku_id), price: requested }]);
+  } catch (e) {
+    warn_('TS-PRC-13', listingId + ': ' + label + ' is ' + requested + ' on TikTok, but our row could not be ' +
+      'updated: ' + (e && e.message ? e.message : e));
+  }
 
   logEvent_(user && user.name, 'set_price', String(listingId),
     label + ': ' + before + ' -> ' + requested + ' ' + CURRENCY, 'ok');

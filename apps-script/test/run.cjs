@@ -5520,8 +5520,9 @@ const PRICE_CASES = [
       getRange: (r, c, nr, nc) => ({
         getValues: () => (r === 1 ? [HEAD.slice()]
           : skuRows.slice(r - 2, r - 2 + (nr || 1)).map((x) => x.slice(c - 1, c - 1 + (nc || 1)))),
-        setValue: (v) => { skuRows[r - 2][c - 1] = v },
-        setValues() { return this }, setFontWeight() { return this }, clearContent() { return this },
+        setValue: (v) => { if (tt.sheetFails) throw new Error('Service Spreadsheets timed out (stub)'); skuRows[r - 2][c - 1] = v },
+        setValues() { if (tt.sheetFails) throw new Error('Service Spreadsheets timed out (stub)'); return this },
+        setFontWeight() { return this }, clearContent() { return this },
       }),
       appendRow: () => {},
     }
@@ -5616,6 +5617,27 @@ const PRICE_CASES = [
     delete authState.props.LAST_LISTED_HZ
     call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
     eq(Boolean(authState.props.LAST_LISTED_HZ), true, 'after a price change')
+  })
+
+  check('a stock change that is on TikTok is reported as done even if our Sheet then fails', () => {
+    // Reported as a failure, the person taps again and it lands twice.
+    setup()
+    tt.sheetFails = true
+    const out = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-s' }, A1_STOCK))
+    eq(out.ok && out.ok.after, 15, JSON.stringify(out))
+    eq(logRows.some((r) => String(r[4]).indexOf('[TS-STK-17]') === 0), true, 'and the Sheet failure is logged')
+    tt.sheetFails = false
+    const again = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-s' }, A1_STOCK))
+    eq(again.ok && [again.ok.after, again.ok.deduplicated], [15, true], JSON.stringify(again))
+    eq(tt.writes.length, 1)
+  })
+
+  check('a price change that is on TikTok is reported as done even if our Sheet then fails', () => {
+    setup()
+    tt.sheetFails = true
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.ok && out.ok.after, '9.90', JSON.stringify(out))
+    eq(logRows.some((r) => String(r[4]).indexOf('[TS-PRC-13]') === 0), true)
   })
 
   check('an exact number set from the live figure is written even if the copy under review differs', () => {

@@ -1129,6 +1129,17 @@ const BUSY_RETRY_MS = [2_000, 4_000, 6_000]
 const MOVED_SINCE = new Set(['TS-STK-12', 'TS-STK-14', 'TS-PRC-07'])
 
 /**
+ * Refusals that come after TikTok accepted the write, or may have: the read
+ * back failed (TS-STK-18; TS-PRD-02 from a backend that predates it), the
+ * figure read back is not the one asked for (TS-STK-06, TS-STK-07, TS-PRC-11),
+ * the price could not be read back (TS-PRC-10), or this very tap already
+ * reached TikTok unconfirmed (TS-STK-13). Each is treated as a lost reply:
+ * the sheet locks and the listing is read, because another tap here is how a
+ * +10 lands twice.
+ */
+const MAY_HAVE_LANDED = new Set(['TS-STK-18', 'TS-PRD-02', 'TS-STK-06', 'TS-STK-07', 'TS-STK-13', 'TS-PRC-10', 'TS-PRC-11'])
+
+/**
  * One key per tap, sent with every attempt of that tap.
  *
  * `crypto.randomUUID` needs a secure context and iOS 15.4 or later. The
@@ -1211,12 +1222,14 @@ export function StockSheet({
   const [waiting, setWaiting] = useState(false)
   /** Closed or gone: a busy write waiting for its next try must not make it. */
   const abandoned = useRef(false)
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Reset on mount as well: StrictMode mounts twice in development, and
+    // the first unmount would leave the sheet abandoned from the start.
+    abandoned.current = false
+    return () => {
       abandoned.current = true
-    },
-    [],
-  )
+    }
+  }, [])
   const locked = busy !== '' || unknown !== ''
   // Locked while a write is actually out, so a reply cannot land on a sheet
   // nobody is looking at. Not while it only waits to try again: the sheet
@@ -1286,11 +1299,14 @@ export function StockSheet({
           // An unanticipated failure on the backend (TS-UNC-00) can come after
           // TikTok's write landed — the read-back, our Sheet — so it is treated
           // like a lost reply: looked at, never resent.
-          const lost = e instanceof ApiError && (e.isOutcomeUnknown || e.code === 'TS-UNC-00')
+          const lost =
+            e instanceof ApiError &&
+            (e.isOutcomeUnknown || e.code === 'TS-UNC-00' || MAY_HAVE_LANDED.has(String(e.code)))
           if (lost) {
             setUnknown(
               `Outcome unknown: ${(e as ApiError).isOutcomeUnknown ? 'no reply came' : 'the backend failed partway'}, ` +
-                `so the ${what} may already be on TikTok. It was not sent again. Checking the listing…`,
+                `so the ${what} may already be on TikTok. It was not sent again. Checking the listing…` +
+                ((e as ApiError).isOutcomeUnknown ? '' : ` (${(e as ApiError).display})`),
             )
             const checked = onUnknown?.()
             if (checked && typeof (checked as Promise<unknown>).then === 'function') {
@@ -1319,7 +1335,13 @@ export function StockSheet({
             )
           } else {
             setError(e instanceof ApiError ? e.display : String(e))
-            if (e instanceof ApiError && MOVED_SINCE.has(String(e.code))) onStale?.()
+            if (e instanceof ApiError && MOVED_SINCE.has(String(e.code))) {
+              // The typed number was worked out from the old figure. Left in
+              // the box, one more tap sent it against the new figure, past the
+              // check, and wrote over the sales the refusal was about.
+              setExact('')
+              onStale?.()
+            }
           }
           return null
         }

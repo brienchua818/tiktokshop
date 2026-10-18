@@ -1476,7 +1476,15 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
     try {
       page = ttSearchOrders_(shopId, scan.ge, scan.lt, scan.token, true);
     } catch (e) {
-      if (!resuming) throw e;
+      if (!resuming) {
+        // Keep what earlier pages read: written, remembered, and the scan
+        // saved at this page (scan.token still names it), so the next run
+        // carries on here. A failure to save must not hide why the read failed.
+        if (unsaved) {
+          try { save(); } catch (saveError) { /* the fetch error below is the one to report */ }
+        }
+        throw e;
+      }
       /**
        * A saved page TikTok will not continue from.
        *
@@ -1605,7 +1613,6 @@ function syncRecentOrdersOnce_() {
     var at = Number(listed[id] || 0);
     return Boolean(at) && syncEveryMinutes_(startedMs - at) === SYNC_EVERY_MINUTES;
   };
-  var anyLive = shops.some(isLive);
 
   shops.forEach(function (shopId) {
     try {
@@ -1624,7 +1631,12 @@ function syncRecentOrdersOnce_() {
        * a cancellation, because cancelling does not change when an order was
        * created.
        */
-      var budget = anyLive && !isLive(shopId) ? Math.min(deadlineMs, Date.now() + SYNC_CATCHUP_MS) : deadlineMs;
+      // Capped whenever another shop is live, whatever this one's stamp says: a
+      // read stamps activity too, so opening the Orders tab for the shop that
+      // is catching up made it "live" and lifted its cap. A shop with nothing
+      // to catch up reads one page, far inside the cap.
+      var otherLive = shops.some(function (s) { return s !== shopId && isLive(s); });
+      var budget = otherLive ? Math.min(deadlineMs, Date.now() + SYNC_CATCHUP_MS) : deadlineMs;
       var orders = syncChangedOrders_(shopId, snapshot, nowEpoch, budget);
 
       if (orders.fallback) {

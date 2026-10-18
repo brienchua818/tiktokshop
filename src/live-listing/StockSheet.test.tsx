@@ -140,9 +140,25 @@ describe('stock', () => {
     expect(onStale).toHaveBeenCalledTimes(1)
     expect(onUnknown).not.toHaveBeenCalled()
     expect(el.textContent).toContain('Stock is now 3')
+    // The typed number was worked out from the stale figure, so it is cleared:
+    // one more tap on Set must not send it against the new one.
+    expect((el.querySelector('input[aria-label="Exact stock"]') as HTMLInputElement).value).toBe('')
+    expect(titled('Set')?.disabled).toBe(true)
     // And the sheet is still usable: nothing was changed.
+    type('input[aria-label="Exact stock"]', '2')
     expect(titled('Set')?.disabled).toBe(false)
   })
+
+  for (const code of ['TS-STK-18', 'TS-PRD-02', 'TS-STK-07', 'TS-STK-13']) {
+    it(`${code} after a stock write is treated as a lost reply: locked and looked at`, async () => {
+      ctl.setStock.mockRejectedValueOnce(new ApiError(500, 'TikTok accepted the stock change but it could not be read back', code))
+      const { onUnknown } = await mount()
+      await click(titled('+10'))
+      expect(onUnknown).toHaveBeenCalledTimes(1)
+      expect(titled('+10')?.disabled).toBe(true)
+      expect(el.textContent).toMatch(/Outcome unknown/)
+    })
+  }
 
   it('any other refusal does not ask for a fresh figure', async () => {
     ctl.setStock.mockRejectedValue(new ApiError(422, 'TikTok refused the quantity', 'TS-STK-05'))

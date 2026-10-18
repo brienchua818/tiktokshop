@@ -2222,7 +2222,18 @@ function writeStockOnce_(shopId, listingId, sku, quantity) {
       (extra.code ? ' (' + extra.code + ')' : ''));
   }
 
-  var after = ttGetProduct_(shopId, listingId);
+  // The write has landed by here. A read-back that fails must say so, under a
+  // code of its own: as a plain "could not read the listing" (TS-PRD-02) the
+  // phone took it for a failed change, left the buttons live, and the next tap
+  // added the stock a second time.
+  var after;
+  try {
+    after = ttGetProduct_(shopId, listingId);
+  } catch (e) {
+    throw fail_('TS-STK-18',
+      'TikTok accepted the stock change but it could not be read back, so it may already be on TikTok. ' +
+      'Nothing further was sent. ' + (e && e.message ? e.message : e));
+  }
   for (var i = 0; i < after.skus.length; i++) {
     if (String(after.skus[i].id) === String(sku.id)) return Number(after.skus[i].quantity || 0);
   }

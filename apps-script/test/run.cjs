@@ -2652,6 +2652,7 @@ function describe_backgroundSync() {
     if (path === '/order/202309/orders/search') {
       st.orderSearches++
       if (st.onOrderSearch) st.onOrderSearch(st.orderSearches)
+      if (st.failOn && st.failOn(st.orderSearches)) return { code: 12019999, message: 'stub failure' }
       const byUpdate = body.update_time_ge !== undefined
       const pool = st.ordersFor ? st.ordersFor(query.shop_cipher) : st.orders
       const list = pool.filter((o) => {
@@ -2707,7 +2708,7 @@ function describe_backgroundSync() {
     Object.assign(st, {
       clockMs: T * 1000, run: 0, calls: [], orders: [], returns: [], strays: [], product: null,
       perCallMs: 0, ignoreUpdateFilter: false, tokensDieBetweenRuns: false,
-      orderSearches: 0, onOrderSearch: null, ordersFor: null, beforeWrite: null,
+      orderSearches: 0, onOrderSearch: null, ordersFor: null, beforeWrite: null, failOn: null,
     })
     lockState.refused = false
     lockState.acquisitions = 0
@@ -2997,6 +2998,45 @@ function describe_backgroundSync() {
     const hzReads = searches('orders/search').filter((c) => c.query.shop_cipher !== 'c-pm').length
     eq(hzReads <= 10, true, 'the shop catching up got about 45 s, not 4 minutes: ' + hzReads + ' pages')
     eq(warned('TS-ORD-34') >= 1, true, 'and says it will carry on')
+  })
+
+  test('a page that fails mid-scan keeps the pages read before it, and the next run carries on there', () => {
+    // Held pages are written every ten; a failure on page 5 used to drop
+    // pages 1-4 — the newest orders among them — on every run it happened.
+    install({ LAST_SYNCED_HZ: String(T - 86400) })
+    st.orders = backlog(30 * 50)
+    st.failOn = (n) => n === 5
+    run(T)
+    eq(warned('TS-ORD-24'), 1, 'the run says it failed')
+    eq(rowsOf('Orders').length, 200, 'the four pages read before it are written')
+    eq(Boolean(authState.props.SYNC_CURSOR_HZ), true, 'and the scan is saved at the page that failed')
+    st.failOn = null
+    run()
+    eq(searches('orders/search').filter((c) => c.run === 2)[0].query.page_token, '1:200', 'it carries on there')
+    eq(rowsOf('Orders').length, 1500)
+  })
+
+  test('a shop catching up stays capped even when a read has just stamped it active', () => {
+    // Opening the Orders tab for HZ stamps it active. That made HZ "live" and
+    // lifted its cap, and the streaming shop waited behind four minutes again.
+    install({
+      LAST_SYNCED_HZ: String(T - 86400),
+      LAST_LISTED_HZ: String((T - 30) * 1000),
+      PM_APP_KEY: 'k', PM_APP_SECRET: 's', PM_ACCESS_TOKEN: 't', PM_SHOP_CIPHER: 'c-pm',
+      PM_ACCESS_EXPIRES: String(T + 60 * 86400),
+      LAST_LISTED_PM: String((T - 60) * 1000),
+      LAST_SYNCED_PM: String(T - 3600),
+    })
+    const hz = backlog(61 * 50)
+    const pm = []
+    for (let i = 0; i < 120; i++) pm.push(order('pm' + String(i).padStart(4, '0'), T - 3000 + i * 20))
+    st.ordersFor = (cipher) => (cipher === 'c-pm' ? pm : hz)
+    st.perCallMs = 5000
+    run(T)
+    const pmRows = rowsOf('Orders').filter((o) => String(o.order_id).indexOf('pm') === 0)
+    eq(pmRows.length, 120, 'the streaming shop is fully synced')
+    const hzReads = searches('orders/search').filter((c) => c.query.shop_cipher !== 'c-pm').length
+    eq(hzReads <= 10, true, 'the shop catching up was capped: ' + hzReads + ' pages')
   })
 
   check('shopsToSync_ puts the most recently active shop first', () => {
@@ -5617,6 +5657,26 @@ const PRICE_CASES = [
     delete authState.props.LAST_LISTED_HZ
     call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
     eq(Boolean(authState.props.LAST_LISTED_HZ), true, 'after a price change')
+  })
+
+  check('a stock change whose read-back fails says it may have landed, under its own code', () => {
+    // As TS-PRD-02 ("could not read the listing") the phone took it for a
+    // failure and the next tap added the stock again.
+    setup({ onInventory: (body) => { tt.throttle = true; return setQty(body) } })
+    const orig = gs.__getUrlFetch()
+    gs.__setUrlFetch({
+      // Every read of the product after the write is throttled, past the one retry.
+      fetch: (url, opts) => (tt.throttle && url.indexOf('/products/P1?') > 0
+        ? { getResponseCode: () => 200, getContentText: () => JSON.stringify({ code: 36009002, message: 'throttled' }) }
+        : orig.fetch(url, opts)),
+      fetchAll: orig.fetchAll,
+    })
+    let out
+    try { out = call('setStock', Object.assign({ delta: 10, idempotency_key: 'tap-r' }, A1_STOCK)) }
+    finally { gs.__setUrlFetch(orig) }
+    eq(out.code, 'TS-STK-18', out.message)
+    eq(/may already be on TikTok/.test(out.message), true, out.message)
+    eq(tt.writes.length, 1)
   })
 
   check('a stock change that is on TikTok is reported as done even if our Sheet then fails', () => {

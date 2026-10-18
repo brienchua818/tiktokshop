@@ -889,10 +889,66 @@ export const api = {
     identifier: string
     /** TikTok's own id, which is the only handle a Seller Center row has. */
     tiktok_sku_id?: string
+    /** Negative takes stock off. */
     delta?: number
     absolute?: number
+    /**
+     * With `absolute`: the number the screen showed. If TikTok holds anything
+     * else by now, nothing is written and the refusal says what it holds.
+     */
+    expected_before?: number
+    /**
+     * One per tap, the same on every retry of that tap. The backend answers a
+     * repeat from memory instead of adding the units again.
+     */
+    idempotency_key?: string
   }) =>
-    call<{ identifier: string; before: number; after: number; requested: number }>('setStock', {
+    call<{
+      identifier: string
+      tiktok_sku_id?: string
+      before: number
+      after: number
+      requested: number
+      /** This tap had already been carried out; nothing was written again. */
+      deduplicated?: boolean
+    }>('setStock', {
+      body,
+      timeoutMs: 90_000,
+    }),
+
+  /**
+   * Change one variation's price, and get back what buyers now see.
+   *
+   * Absolute, with the price the screen showed: if Seller Center or another
+   * phone has changed it since, nothing is written. 90 seconds for the same
+   * reason as stock — read, write, re-read against TikTok — and a timeout is an
+   * unknown outcome, never a failure.
+   */
+  setPrice: (body: {
+    listing_id: string
+    identifier: string
+    tiktok_sku_id?: string
+    /** Two decimals at most, 0.01 to 10,000. */
+    price: string
+    /** The price the screen showed. */
+    expected_before?: string
+  }) =>
+    call<{
+      identifier: string
+      tiktok_sku_id?: string
+      /** TikTok's live price before, and after: its figure, not the one asked for. */
+      before: string
+      after: string
+      requested: string
+      /**
+       * The live price changed, but the listing's copy under review still shows
+       * the old one. TikTok catches up; pushes meanwhile send the live price.
+       */
+      pending_price: boolean
+      currency: string
+      /** It already had this price, so nothing was sent. */
+      unchanged?: boolean
+    }>('setPrice', {
       body,
       timeoutMs: 90_000,
     }),

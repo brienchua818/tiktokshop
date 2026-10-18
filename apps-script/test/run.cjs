@@ -213,6 +213,16 @@ ${src}
     ttFetchAll_: typeof ttFetchAll_ === 'function' ? ttFetchAll_ : undefined,
     ttRequest_: typeof ttRequest_ === 'function' ? ttRequest_ : undefined,
     __resetPhotoFolderMemo: function () { PHOTO_FOLDER_MEMO_ = {} },
+    // Stock and price changes. The new ones guarded like ttFetchAll_ above, so
+    // this file still LOADS against the code before them — which is how each
+    // test below was seen to fail there first.
+    setVariationStock_, removeVariation_, restoreVariation_,
+    setVariationPrice_: typeof setVariationPrice_ === 'function' ? setVariationPrice_ : undefined,
+    validatePrice_: typeof validatePrice_ === 'function' ? validatePrice_ : undefined,
+    pricedFromLive_: typeof pricedFromLive_ === 'function' ? pricedFromLive_ : undefined,
+    // The SKUs tab's real columns, copied before any test swaps them, so a
+    // fake tab is laid out exactly as the code writes it.
+    __SKU_HEADERS: HEADERS[TAB_SKUS].slice(),
     datedPhotoFolder_, savePhoto_, PHOTO_FOLDER_TTL_S, prefetchPhotos_, placePhoto_, EXPORT_PHOTO_BUDGET_MS, PHOTO_BATCH, logEvent_, warn_, pushedToday_, listListings_
   };
 `
@@ -4645,13 +4655,30 @@ console.log('\nindependent TikTok calls share one round trip')
   }
   const blob = () => ({ getBytes: () => [1, 2, 3] })
 
-  check('an append uploads the image and reads the product in ONE round trip', () => {
+  check('an append uploads the image and reads both versions of the product in ONE round trip', () => {
+    // Three calls, not two: the live version rides along so the edit can take
+    // its prices from it (pricedFromLive_). Still one round trip.
     const out = run(() => gs.appendAssets_('HZ', blob(), 'P1'))
-    eq(sent.filter((x) => x.batched).length, 2, 'both calls in the batch')
+    eq(sent.filter((x) => x.batched).length, 3, 'every call in the batch')
     eq(sent.filter((x) => !x.batched).length, 0, 'nothing sent one at a time')
     eq(out.attributeImageUri, 'tos-img')
     eq(out.snapshot.productId, 'P1')
     eq(out.snapshot.mainImageUri, 'main-uri')
+    eq(out.buyable.productId, 'P1')
+  })
+
+  check('an append onto a product with no live version still goes ahead', () => {
+    // Never approved is an answer, not a failure: the append rebuilds from
+    // the version under review exactly as before.
+    const noLive = {
+      fetch: () => { throw new Error('not expected') },
+      fetchAll: (batch) => batch.map((b) => b.url.indexOf('return_under_review_version=false') > 0
+        ? { getResponseCode: () => 200, getContentText: () => '{"code":12052700,"message":"no live version"}' }
+        : reply(route(b.url))),
+    }
+    const out = run(() => { gs.__setUrlFetch(noLive); return gs.appendAssets_('HZ', blob(), 'P1') })
+    eq(out.snapshot.productId, 'P1')
+    eq(out.buyable, null)
   })
 
   check('a new listing uploads both images in ONE round trip', () => {
@@ -4759,10 +4786,12 @@ console.log('\nindependent TikTok calls share one round trip')
     eq(reads.every((x) => x.batched), true, 'both in one batch')
   })
 
-  check('a real push with a photo reads the product once, in the same batch as the upload', () => {
+  check('a real push with a photo reads each version once, in the same batch as the upload', () => {
     // Through pushSku_ itself. The tests above call the helpers directly, so
     // putting the push back on the sequential path — or having addVariation_
     // ignore the product it was handed and read it again — left them green.
+    // Each version once: the one under review to rebuild from, the live one
+    // for the prices (pricedFromLive_).
     const emptyTab = () => ({
       getLastRow: () => 1, getLastColumn: () => 1,
       getRange: () => ({ getValues: () => [[]], setValues() { return this }, setValue() { return this }, setFontWeight() { return this }, clearContent() { return this } }),
@@ -4780,8 +4809,10 @@ console.log('\nindependent TikTok calls share one round trip')
     const upload = sent.find((x) => x.url.indexOf('/images/upload') > 0)
     eq(Boolean(upload), true, 'the push must reach the upload')
     eq(upload.batched, true, 'the upload must go in the batch')
-    eq(reads.length, 1, 'the product was read ' + reads.length + ' times')
-    eq(reads[0].batched, true, 'and that read went in the same batch')
+    eq(reads.length, 2, 'the product was read ' + reads.length + ' times')
+    eq(reads.every((x) => x.batched), true, 'and both reads went in the same batch')
+    eq(reads.filter((x) => x.url.indexOf('return_under_review_version=true') > 0).length, 1, 'once under review')
+    eq(reads.filter((x) => x.url.indexOf('return_under_review_version=false') > 0).length, 1, 'once live')
   })
 }
 
@@ -5335,6 +5366,453 @@ console.log('\nthe listing picker is newest first')
   })
 }
 
+
+// ---------------------------------------------------------------------------
+// Stock and price changes, end to end.
+//
+// Through route_ itself, which reads every argument as `params.x || body.x`,
+// against a TikTok that answers from what each request carried and a SKUs tab
+// laid out with the real columns. So "the payload is one SKU", "nothing was
+// sent" and "the row was written" are read off what was actually sent and
+// written, never rebuilt here.
+// ---------------------------------------------------------------------------
+console.log('\nstock and price changes, end to end')
+
+/**
+ * One table for both validators. tiktok-rules.test.ts holds the same rows
+ * against validatePrice, so the phone and the backend cannot drift apart.
+ */
+const PRICE_FORMAT = 'Price must be a number with at most two decimal places.'
+const PRICE_CEILING = 'Price must be at most 10,000 — TikTok’s ceiling for Singapore.'
+const PRICE_CASES = [
+  ['12.90', ''], ['9', ''], ['0.01', ''], ['10000', ''], ['10000.00', ''], [' 12.90 ', ''],
+  ['', 'Price is required.'], ['   ', 'Price is required.'],
+  ['0', 'Price must be more than zero.'], ['0.00', 'Price must be more than zero.'],
+  ['10000.01', PRICE_CEILING], ['25000', PRICE_CEILING],
+  ['-5', PRICE_FORMAT], ['18.905', PRICE_FORMAT], ['1e3', PRICE_FORMAT], ['cheap', PRICE_FORMAT],
+  ['12.', PRICE_FORMAT], ['.5', PRICE_FORMAT], ['1,000', PRICE_FORMAT],
+]
+
+{
+  const HEAD = gs.__SKU_HEADERS
+  const user = { email: 'b@x', name: 'Brien' }
+  const HOST = 'https://open-api.tiktokglobalshop.com'
+  let tt, skuRows, logRows
+
+  const rawSku = (o) => ({
+    id: o.id, seller_sku: o.seller || '',
+    price: { sale_price: o.price, currency: 'SGD' },
+    inventory: [{ warehouse_id: 'W1', quantity: o.qty }],
+    sales_attributes: [{ id: '100089', name: 'Design', value_id: 'v' + o.id,
+      value_name: (o.seller || 'SC') + ' item', sku_img: { uri: 'img' + o.id } }],
+  })
+  const product = (v) => ({ code: 0, data: {
+    id: 'P1', title: 'Stream', status: v.status, main_images: [{ uri: 'main' }], skus: v.skus.map(rawSku),
+  } })
+  const each = (body, fn) => body.skus.forEach((sent) =>
+    [tt.v1, tt.v2].forEach((v) => v && v.skus.forEach((x) => { if (x.id === sent.id) fn(x, sent) })))
+  // TikTok as documented and as measured: the quantity sent replaces the stock.
+  const setQty = (body) => { each(body, (x, sent) => { x.qty = sent.inventory[0].quantity }); return { code: 0, data: {} } }
+  // A price edit published at once to the live version, and copied to the one under review.
+  const priceBoth = (body) => { each(body, (x, sent) => { x.price = sent.price.amount }); return { code: 0, data: {} } }
+  // The same edit with the copy under review lagging behind.
+  const priceLiveOnly = (body) => {
+    body.skus.forEach((sent) => tt.v1.skus.forEach((x) => { if (x.id === sent.id) x.price = sent.price.amount }))
+    return { code: 0, data: {} }
+  }
+
+  const answer = (url, opts) => {
+    const where = url.split('?')[0].replace(HOST, '')
+    const body = opts && typeof opts.payload === 'string' ? JSON.parse(opts.payload) : null
+    if (where === '/product/202309/products/P1') {
+      tt.reads++
+      if (url.indexOf('return_under_review_version=false') > 0) {
+        return tt.v1 ? product(tt.v1) : { code: 12052700, message: 'no live version' }
+      }
+      return product(tt.v2)
+    }
+    if (where === '/product/202309/images/upload') return { code: 0, data: { uri: 'tos-img' } }
+    tt.writes.push({ path: where, body })
+    if (where.endsWith('/prices/update')) return tt.onPrice(body)
+    if (where.endsWith('/inventory/update')) return tt.onInventory(body)
+    if (where.endsWith('/partial_edit')) return { code: 0, data: { skus: [] } }
+    return { code: 0, data: {} }
+  }
+  const reply = (b) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(b) })
+  const fetcher = {
+    fetch: (url, opts) => reply(answer(url, opts)),
+    fetchAll: (batch) => batch.map((b) => reply(answer(b.url, b))),
+  }
+
+  const blank = () => ({ getValues: () => [[]], setValue() {}, setValues() { return this }, setFontWeight() { return this }, clearContent() { return this } })
+  const tab = (name) => {
+    if (name === 'Log') return { appendRow: (r) => logRows.push(r), getLastRow: () => 1, getLastColumn: () => 6, getRange: blank }
+    if (name !== 'SKUs') return { getLastRow: () => 1, getLastColumn: () => 1, getRange: blank, appendRow: () => {} }
+    return {
+      getLastRow: () => skuRows.length + 1,
+      getLastColumn: () => HEAD.length,
+      getRange: (r, c, nr, nc) => ({
+        getValues: () => (r === 1 ? [HEAD.slice()]
+          : skuRows.slice(r - 2, r - 2 + (nr || 1)).map((x) => x.slice(c - 1, c - 1 + (nc || 1)))),
+        setValue: (v) => { skuRows[r - 2][c - 1] = v },
+        setValues() { return this }, setFontWeight() { return this }, clearContent() { return this },
+      }),
+      appendRow: () => {},
+    }
+  }
+  const asRow = (o) => HEAD.map((h) => (o[h] === undefined ? '' : o[h]))
+  const cell = (i, field) => skuRows[i][HEAD.indexOf(field)]
+  const ours = (o) => Object.assign({ listing_id: 'P1', shop_id: 'HZ', status: 'pushed' }, o)
+
+  const A1 = { id: '9001', seller: 'A1', price: '12.90', qty: 10 }
+  const B2 = { id: '9002', seller: 'B2', price: '20.00', qty: 5 }
+  const SC = { id: '9003', seller: '', price: '7.50', qty: 4 }  // added in Seller Center: no row of ours
+  const ROWS = [
+    ours({ sku_id: 's1', identifier: 'A1', tiktok_sku_id: '9001', price: '12.90', stock: 10, variant: 'A1 item' }),
+    ours({ sku_id: 's2', identifier: 'B2', tiktok_sku_id: '9002', price: '20.00', stock: 5, variant: 'B2 item' }),
+  ]
+  const copy = (list) => list.map((x) => Object.assign({}, x))
+
+  /** v2 is the version under review; v1, the live one, defaults to the same SKUs. */
+  const setup = (o = {}) => {
+    const v2 = o.v2 || [A1, B2, SC]
+    tt = {
+      v2: { status: o.v2status || 'ACTIVATE', skus: copy(v2) },
+      v1: o.v1 === null ? null : { status: o.v1status || 'ACTIVATE', skus: copy(o.v1 || v2) },
+      reads: 0, writes: [],
+      onPrice: o.onPrice || priceBoth,
+      onInventory: o.onInventory || setQty,
+    }
+    skuRows = (o.rows || ROWS).map(asRow)
+    logRows = []
+    gs.__setHeaders('SKUs', HEAD)
+    gs.__setSheetImpl(tab)
+    gs.invalidateRead_()
+    cacheState.store = {}
+    lockState.refused = false
+    authState.props = {
+      HZ_APP_KEY: 'k', HZ_APP_SECRET: 's', HZ_ACCESS_TOKEN: 't', HZ_SHOP_CIPHER: 'c',
+      HZ_ACCESS_EXPIRES: String(Math.floor(Date.now() / 1000) + 30 * 86400),
+    }
+    gs.__setUrlFetch(fetcher)
+  }
+  const call = (action, body) => {
+    try { return { ok: JSON.parse(gs.route_(action, {}, body, user).text) } }
+    catch (e) { return { code: gs.codeOf_(e), message: e.message } }
+  }
+  const qtyOf = (id) => tt.v1.skus.find((x) => x.id === id).qty
+  const A1_STOCK = { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001' }
+
+  // ── stock ──────────────────────────────────────────────────────────────
+
+  check('taking stock off sends the lower total', () => {
+    // The backend already took a negative delta; this pins it now that the
+    // phone sends one.
+    setup()
+    const out = call('setStock', Object.assign({ delta: -4, idempotency_key: 'tap-a' }, A1_STOCK))
+    eq(out.ok && [out.ok.before, out.ok.after], [10, 6], JSON.stringify(out))
+    eq(tt.writes.map((w) => w.body.skus[0].inventory[0].quantity), [6])
+  })
+
+  check('taking off more than TikTok holds is refused by name, and nothing is sent', () => {
+    // The screen said 10, sales since left 3. "-2 is out of range" would be
+    // true and useless.
+    setup({ v2: [Object.assign({}, A1, { qty: 3 }), B2, SC] })
+    const out = call('setStock', Object.assign({ delta: -5 }, A1_STOCK))
+    eq(out.code, 'TS-STK-14', out.message)
+    eq(/^Only 3 left of A1 on TikTok now, so taking 5 off would leave -2/.test(out.message), true, out.message)
+    eq(tt.writes.length, 0)
+  })
+
+  check('an exact number set from a stale screen is refused, and nothing is sent', () => {
+    // The harness case: shown 10, meant to take 4 off, set 6 — and TikTok had
+    // sold down to 3, so the "reduction" raised it.
+    setup({ v2: [Object.assign({}, A1, { qty: 3 }), B2, SC] })
+    const out = call('setStock', Object.assign({ absolute: 6, expected_before: 10 }, A1_STOCK))
+    eq(out.code, 'TS-STK-12', out.message)
+    eq(out.message, 'Stock is now 3, not the 10 shown (sales since). Nothing was changed — check and set again.')
+    eq(tt.writes.length, 0)
+    eq(qtyOf('9001'), 3)
+  })
+
+  check('an exact number set from a screen that was right is written', () => {
+    setup({ v2: [Object.assign({}, A1, { qty: 3 }), B2, SC] })
+    const out = call('setStock', Object.assign({ absolute: 6, expected_before: 3 }, A1_STOCK))
+    eq(out.ok && out.ok.after, 6, JSON.stringify(out))
+  })
+
+  check('a stock or price change keeps the shop\'s orders syncing every minute', () => {
+    setup()
+    delete authState.props.LAST_LISTED_HZ
+    call('setStock', Object.assign({ delta: 1 }, A1_STOCK))
+    eq(Boolean(authState.props.LAST_LISTED_HZ), true, 'after a stock change')
+    setup()
+    delete authState.props.LAST_LISTED_HZ
+    call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(Boolean(authState.props.LAST_LISTED_HZ), true, 'after a price change')
+  })
+
+  check('an exact number set from the live figure is written even if the copy under review differs', () => {
+    // The phone shows the live copy's stock. Were the copy under review ever
+    // to disagree, a set made from the screen must not be refused for good.
+    setup({ v2: [Object.assign({}, A1, { qty: 12 }), B2, SC], v1: [Object.assign({}, A1, { qty: 10 }), B2, SC] })
+    const out = call('setStock', Object.assign({ absolute: 6, expected_before: 10 }, A1_STOCK))
+    eq(out.ok && out.ok.after, 6, JSON.stringify(out))
+  })
+
+  check('a phone that sends no expected_before can still set an exact number', () => {
+    setup()
+    eq(call('setStock', Object.assign({ absolute: 25 }, A1_STOCK)).ok.after, 25)
+  })
+
+  check('absolute: null is no absolute at all, not "set to zero"', () => {
+    setup()
+    const out = call('setStock', Object.assign({ delta: 2, absolute: null }, A1_STOCK))
+    eq(out.ok && out.ok.after, 12, JSON.stringify(out))
+    eq(tt.writes.length, 1)
+  })
+
+  check('a repeated request key writes once, and answers with the first result', () => {
+    setup()
+    const first = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-1' }, A1_STOCK))
+    const again = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-1' }, A1_STOCK))
+    eq(first.ok.after, 15)
+    eq(again.ok && again.ok.after, 15, JSON.stringify(again))
+    eq(again.ok.deduplicated, true)
+    eq(tt.writes.length, 1, 'TikTok was written ' + tt.writes.length + ' times')
+    eq(qtyOf('9001'), 15)
+    // A new tap is a new key, and is written.
+    eq(call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-2' }, A1_STOCK)).ok.after, 20)
+  })
+
+  check('a repeat of a write TikTok took but never confirmed is refused, not resent', () => {
+    // TikTok accepted the write and then reported something else, so the first
+    // attempt failed AFTER the write went out. Its repeat must not write again.
+    setup({ onInventory: (body) => { each(body, (x) => { x.qty = 99 }); return { code: 0, data: {} } } })
+    const first = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-x' }, A1_STOCK))
+    eq(first.code, 'TS-STK-07', first.message)
+    const again = call('setStock', Object.assign({ delta: 5, idempotency_key: 'tap-x' }, A1_STOCK))
+    eq(again.code, 'TS-STK-13', again.message)
+    eq(tt.writes.length, 1)
+  })
+
+  check('the new figure goes on the listed row, never on a removed one with the same identifier', () => {
+    const removedFirst = [
+      ours({ sku_id: 'gone', identifier: 'A1', tiktok_sku_id: '8001', status: 'removed', stock: 2 }),
+      ours({ sku_id: 'here', identifier: 'A1', tiktok_sku_id: '9001', stock: 10 }),
+    ]
+    setup({ rows: removedFirst })
+    call('setStock', Object.assign({ delta: 5 }, A1_STOCK))
+    eq([cell(0, 'stock'), cell(1, 'stock')], [2, 15])
+    // An older row with no TikTok id, addressed by identifier alone: still the
+    // listed one, by its status.
+    setup({ rows: [removedFirst[0], ours({ sku_id: 'here', identifier: 'A1', tiktok_sku_id: '', stock: 10 })] })
+    call('setStock', { listing_id: 'P1', identifier: 'A1', delta: 1 })
+    eq([cell(0, 'stock'), cell(1, 'stock')], [2, 11])
+  })
+
+  check('a variation TikTok does not return is not blamed on review', () => {
+    // The read includes variations under review now, so "wait for it to go
+    // live" sent people waiting for something that would never change.
+    let message = ''
+    try { gs.skuForStock_({ skus: [] }, 'B9', '') } catch (e) { message = e.message; eq(gs.codeOf_(e), 'TS-STK-02') }
+    eq(/under review is not returned|wait for it to go live/.test(message), false, message)
+  })
+
+  // ── price ──────────────────────────────────────────────────────────────
+
+  check('validatePrice_ agrees with validatePrice case for case', () => {
+    if (typeof gs.validatePrice_ !== 'function') throw new Error('validatePrice_ does not exist')
+    PRICE_CASES.forEach(([input, want]) => eq(gs.validatePrice_(input), want, JSON.stringify(input)))
+  })
+
+  check('a push is held to the same price rules, before anything is sent', () => {
+    setup()
+    ;['10000.01', '18.905'].forEach((price) => {
+      let code = ''
+      try {
+        gs.pushSku_({ shop_id: 'HZ', listing_id: 'P1', identifier: 'A9', variant_name: 'Blue', price,
+          stock: 3, tiktok_image_uri: 'img', idempotency_key: 'k-' + price }, user)
+      } catch (e) { code = gs.codeOf_(e) }
+      eq(code, 'TS-PRD-21', price)
+    })
+    eq(tt.writes.length, 0)
+  })
+
+  check('a price change sends one SKU to Update Price, confirms it live, and records it', () => {
+    setup()
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.9', expected_before: '12.90' })
+    eq(out.ok, { identifier: 'A1', tiktok_sku_id: '9001', before: '12.90', after: '9.90', requested: '9.90',
+      pending_price: false, currency: 'SGD' })
+    eq(tt.writes.length, 1)
+    eq(tt.writes[0].path, '/product/202309/products/P1/prices/update')
+    // Both versions read before, and both again after: the write is confirmed by a read.
+    eq(tt.reads, 4)
+    eq(cell(0, 'price'), '9.90')
+    eq(cell(1, 'price'), '20.00')
+    const line = logRows.find((r) => r[2] === 'set_price')
+    eq(line && [line[1], line[3], line[4], line[5]], ['Brien', 'P1', 'A1: 12.90 -> 9.90 SGD', 'ok'])
+  })
+
+  check('the payload is exactly one SKU and its price, never a partial edit or stock', () => {
+    setup()
+    call('setPrice', { listing_id: 'P1', identifier: 'B2', tiktok_sku_id: '9002', price: '12.9', expected_before: '20.00' })
+    eq(tt.writes.map((w) => w.path), ['/product/202309/products/P1/prices/update'])
+    eq(tt.writes[0].body, { skus: [{ id: '9002', price: { amount: '12.90', currency: 'SGD' } }] })
+  })
+
+  check('a Seller Center variation is repriced by TikTok id, with no row of ours to touch', () => {
+    setup()
+    const before = JSON.stringify(skuRows)
+    const out = call('setPrice', { listing_id: 'P1', identifier: '', tiktok_sku_id: '9003', price: '8', expected_before: '7.50' })
+    eq(out.ok && out.ok.after, '8.00', JSON.stringify(out))
+    eq(JSON.stringify(skuRows), before)
+  })
+
+  ;[12052038, 12019045].forEach((code) => {
+    check('a price held by a promotion says so, keeping TikTok ' + code, () => {
+      setup({ onPrice: () => ({ code, message: code === 12052038 ? 'Product price locked due to ongoing promotion.' : 'price is locked' }) })
+      const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+      eq(out.code, 'TS-PRC-08', out.message)
+      eq(/locked by a promotion running in Seller Center/.test(out.message || ''), true, out.message)
+      eq((out.message || '').indexOf('(TikTok ' + code + ')') > 0, true, out.message)
+      eq(cell(0, 'price'), '12.90')
+    })
+  })
+
+  check('a live price that did not change is reported, and not sent again', () => {
+    setup({ onPrice: () => ({ code: 0, data: {} }) })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.code, 'TS-PRC-11', out.message)
+    eq(tt.writes.length, 1)
+    eq(cell(0, 'price'), '12.90')
+  })
+
+  check('a live price that shows a moment late is looked at again, not called a failure', () => {
+    setup({ onPrice: (body) => {
+      const sent = body.skus[0]
+      const x = tt.v1.skus.find((k) => k.id === sent.id)
+      const was = x.price
+      const at = tt.reads
+      // The first read back (both copies, reads at+1 and at+2) still shows the
+      // old live price; the second look does not.
+      Object.defineProperty(x, 'price', { configurable: true, get: () => (tt.reads > at + 2 ? sent.price.amount : was) })
+      tt.v2.skus.find((k) => k.id === sent.id).price = sent.price.amount
+      return { code: 0, data: {} }
+    } })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.ok && out.ok.after, '9.90', JSON.stringify(out))
+    eq(tt.writes.length, 1)
+    eq(tt.reads, 6)
+  })
+
+  check('a copy under review still showing the old price is flagged and logged, not failed', () => {
+    setup({ onPrice: priceLiveOnly })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.ok && [out.ok.after, out.ok.pending_price], ['9.90', true], JSON.stringify(out))
+    eq(logRows.some((r) => r[5] === 'warn' && String(r[4]).indexOf('[TS-PRC-12]') === 0), true)
+    eq(tt.writes.length, 1)
+  })
+
+  check('a price changed since the phone looked is refused, and nothing is sent', () => {
+    setup({ v2: [Object.assign({}, A1, { price: '11.50' }), B2, SC] })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.code, 'TS-PRC-07', out.message)
+    eq(tt.writes.length, 0)
+  })
+
+  check('asking for the price it already has sends nothing', () => {
+    setup()
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '12.9', expected_before: '12.90' })
+    eq(out.ok && [out.ok.unchanged, out.ok.after], [true, '12.90'], JSON.stringify(out))
+    eq(tt.writes.length, 0)
+  })
+
+  check('a variation still in review has no live price to change', () => {
+    setup({ v1: [B2, SC] })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.code, 'TS-PRC-06', out.message)
+    eq(tt.writes.length, 0)
+  })
+
+  check('a listing with nothing live refuses before sending', () => {
+    setup({ v1: null })
+    const out = call('setPrice', { listing_id: 'P1', identifier: 'A1', tiktok_sku_id: '9001', price: '9.90', expected_before: '12.90' })
+    eq(out.code, 'TS-PRC-05', out.message)
+    eq(tt.writes.length, 0)
+  })
+
+  check('setPrice is a write on both sides, and every backend write is a client write', () => {
+    const between = (text, open, close) => text.slice(text.indexOf(open), text.indexOf(close, text.indexOf(open)))
+    const backend = (between(fs.readFileSync(path.join(DIR, 'Api.gs'), 'utf8'), 'var WRITE_ACTIONS = {', '};')
+      .replace(/\/\/.*$/gm, '').match(/\b([A-Za-z]+):\s*1/g) || []).map((x) => x.split(':')[0])
+    const client = (between(fs.readFileSync(path.join(DIR, '..', 'src', 'lib', 'script-api.ts'), 'utf8'),
+      'const WRITE_ACTIONS = new Set([', '])').replace(/\/\/.*$/gm, '').match(/'([A-Za-z]+)'/g) || [])
+      .map((x) => x.slice(1, -1))
+    eq(backend.indexOf('setPrice') >= 0, true, 'Api.gs: ' + backend.join(', '))
+    eq(backend.filter((a) => client.indexOf(a) < 0), [], 'missing from script-api.ts')
+  })
+
+  // ── a push never puts an old price back ───────────────────────────────
+
+  // A1 was repriced to 9.90; the copy under review still says 12.90. R4 is
+  // still in review, so it has no live price and keeps its own.
+  const R4 = { id: '9004', seller: 'R4', price: '30.00', qty: 2 }
+  const lagging = () => setup({
+    v2: [A1, B2, SC, R4],
+    v1: [Object.assign({}, A1, { price: '9.90' }), B2, Object.assign({}, SC, { price: '6.00' })],
+  })
+  const editedPrice = (id) => {
+    const edit = tt.writes.find((w) => w.path.endsWith('/partial_edit'))
+    if (!edit) throw new Error('no partial_edit was sent: ' + JSON.stringify(tt.writes.map((w) => w.path)))
+    return (edit.body.skus.find((x) => x.id === id) || { price: {} }).price.amount
+  }
+
+  check('a push while the copy under review holds an older price sends the live price', () => {
+    lagging()
+    gs.__setDriveApp({ getFolderById: () => { throw new Error('Service error: Drive') } })
+    gs.pushSku_({ shop_id: 'HZ', listing_id: 'P1', identifier: 'A7', variant_name: 'Blue', price: '10',
+      stock: 3, photo_base64: 'AAAA', photo_mime: 'image/jpeg', idempotency_key: 'push-1' }, user)
+    eq(editedPrice('9001'), '9.90', 'A1 sent back at the price under review')
+    eq(editedPrice('9003'), '6.00')
+    eq(editedPrice('9002'), '20.00')
+    eq(editedPrice('9004'), '30.00', 'a variation still in review keeps its own price')
+  })
+
+  check('so does a push that brings its photo already uploaded', () => {
+    lagging()
+    gs.pushSku_({ shop_id: 'HZ', listing_id: 'P1', identifier: 'A8', variant_name: 'Red', price: '10',
+      stock: 3, tiktok_image_uri: 'img', idempotency_key: 'push-2' }, user)
+    eq(editedPrice('9001'), '9.90')
+  })
+
+  check('a removal rebuilds at the live price too', () => {
+    lagging()
+    gs.removeVariation_('P1', '9002', user)
+    eq(editedPrice('9001'), '9.90')
+    eq(editedPrice('9002'), undefined)
+  })
+
+  check('and so does a restore', () => {
+    lagging()
+    skuRows.push(asRow(ours({ sku_id: 's9', identifier: 'C5', variant: 'C5 bowl', price: '15.00', stock: 4,
+      status: 'removed', tiktok_image_uri: 'img-c5', removed_at: '2026-10-18T01:00:00.000Z' })))
+    gs.invalidateRead_(); cacheState.store = {}
+    gs.restoreVariation_('P1', 'C5', 2, user)
+    eq(editedPrice('9001'), '9.90')
+  })
+
+  // ── the screen shows what a buyer pays ────────────────────────────────
+
+  check('the listing shows the live price for a live variation, ours or Seller Center’s', () => {
+    lagging()
+    const st = gs.listingState_('P1')
+    const by = (id) => st.variants.find((v) => v.tiktok_sku_id === id) || {}
+    eq(by('9001').price, '9.90', 'ours, live: TikTok’s live price over the Sheet’s 12.90')
+    eq(by('9003').price, '6.00', 'Seller Center, live: the live price over the 7.50 under review')
+    eq(by('9004').price, '30.00', 'Seller Center, in review: the only price there is')
+  })
+}
 
 console.log('\n' + pass + ' passed, ' + fail + ' failed\n')
 process.exit(fail ? 1 : 0)

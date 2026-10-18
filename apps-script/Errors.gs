@@ -16,8 +16,9 @@
  * registry, so the document cannot drift from the code.
  *
  * Areas: API (routing, roles), AUTH (sign-in), CFG (configuration), EXP
- * (exports), LCK (locking), ORD (orders), PRD (products and variations), SHT
- * (spreadsheet), TT (TikTok API transport and tokens). UNC is reserved for the
+ * (exports), LCK (locking), ORD (orders), PRC (price changes), PRD (products
+ * and variations), SEQ (identifier reservation), SHT (spreadsheet), STK (stock
+ * changes), TT (TikTok API transport and tokens). UNC is reserved for the
  * one case that has no code: an error the runtime raised that this code did not
  * anticipate — which is itself the finding.
  */

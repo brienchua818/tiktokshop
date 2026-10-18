@@ -65,6 +65,16 @@ var SHOPS = [
 var TITLE_MIN = 25;
 var TITLE_MAX = 255;
 var CURRENCY = 'SGD';
+/**
+ * A Singapore local seller's price range, in SGD, to two decimal places.
+ *
+ * TikTok's Product pricing page (doc 67e1288d76cfee049d9af858): "Singapore |
+ * 0.01 – 10,000" for local sellers, and SGD carries 2 decimal places. Checked
+ * before a push or a price change is sent, so an out-of-range price is named
+ * here rather than refused by TikTok as 12052570.
+ */
+var PRICE_MIN = 0.01;
+var PRICE_MAX = 10000;
 var WEIGHT_UNIT = 'KILOGRAM';
 var DIMENSION_UNIT = 'CENTIMETER';
 var CATEGORY_VERSION = 'v2';

@@ -138,6 +138,47 @@ function validateVariantName_(name) {
 }
 
 /**
+ * A price TikTok will take for Singapore: two decimals at most, 0.01 to
+ * 10,000. Empty string when it is acceptable.
+ *
+ * The same rules, in the same order and the same words, as `validatePrice` in
+ * src/lib/tiktok-rules.ts — the phone checks for speed, this is the check
+ * that protects the shop, and the tests hold the two to one table. A push
+ * used to accept anything above zero here, so "18.905" or 25,000 went to
+ * TikTok to be refused there.
+ */
+function validatePrice_(raw) {
+  var price = String(raw === undefined || raw === null ? '' : raw).trim();
+  if (!price) return 'Price is required.';
+  if (!/^\d+(\.\d{1,2})?$/.test(price)) return 'Price must be a number with at most two decimal places.';
+  if (Number(price) < PRICE_MIN) return 'Price must be more than zero.';
+  if (Number(price) > PRICE_MAX) {
+    return 'Price must be at most ' + String(PRICE_MAX).replace(/\B(?=(\d{3})+(?!\d))/g, ',') +
+      ' — TikTok’s ceiling for Singapore.';
+  }
+  return '';
+}
+
+/**
+ * A price as whole cents, so "12.9" and "12.90" are one price.
+ *
+ * TikTok's read and our Sheet do not spell a price the same way — the Sheet
+ * turns "12.90" into the number 12.9 on write — and comparing them as text
+ * would report a change that never happened. NaN when there is no price.
+ */
+function cents_(value) {
+  var text = String(value === undefined || value === null ? '' : value).trim();
+  if (!text) return NaN;
+  return Math.round(Number(text) * 100);
+}
+
+/** A price as TikTok's write takes it: always two decimals. Empty when there is none. */
+function priceText_(value) {
+  var c = cents_(value);
+  return isNaN(c) ? '' : (c / 100).toFixed(2);
+}
+
+/**
  * The title for a continuation listing.
  *
  * Singapore caps a product at 100 variations, so a long factory run spills
@@ -584,9 +625,30 @@ function productVersions_(prefix, productId) {
       ? ttProductFrom_(answers[1], productId)
       : ttGetProductVersion_(prefix, productId, false);
   } catch (e) {
-    warn_('TS-PRD-33', 'No live version for ' + productId + ' (nothing buyable yet): ' + e);
+    noLiveVersion_(productId, e);
   }
   return { pending: pending, buyable: buyable };
+}
+
+/**
+ * The live version's answer, or null when there is none.
+ *
+ * For a read that went out in somebody else's batch — the push sends it with
+ * the image upload. Same rule as productVersions_: a product never approved
+ * has no live version, and that is an answer rather than a failure.
+ */
+function buyableFrom_(r, productId) {
+  try {
+    return ttProductFrom_(r, productId);
+  } catch (e) {
+    noLiveVersion_(productId, e);
+    return null;
+  }
+}
+
+/** One home for the warning, because a code belongs to one site. */
+function noLiveVersion_(productId, e) {
+  warn_('TS-PRD-33', 'No live version for ' + productId + ' (nothing buyable yet): ' + e);
 }
 
 function listingState_(listingId) {
@@ -700,7 +762,15 @@ function listingState_(listingId) {
     return {
       identifier: String(r.identifier || ''),
       variant: String(r.variant || ''),
-      price: String(r.price || ''),
+      /**
+       * What a buyer pays, when a buyer can pay it.
+       *
+       * The Sheet holds the price the app listed it at, and a price changed
+       * since — in the app or in Seller Center — leaves that figure behind.
+       * A live variation shows TikTok's live price; one still in review has
+       * no live price yet and keeps the recorded one.
+       */
+      price: String((st.state === 'live' && match && match.priceAmount) || r.price || ''),
       status: String(r.status || ''),
       external: false,
       tiktok_sku_id: String((match && match.id) || r.tiktok_sku_id || ''),
@@ -805,14 +875,22 @@ function listingState_(listingId) {
   // or on another tool. Shown, or the app claims a listing has four variations
   // while listing three, and offers an identifier that is already taken.
   var oursByIdentifier = shownAsOurs_(rows);
+  var liveById = {};
+  (buyable ? buyable.skus : []).forEach(function (s) {
+    if (s.id) liveById[String(s.id)] = s;
+  });
   live.skus.forEach(function (s) {
     if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
     var extSale = salesFor_(sales, s.id, s.sellerSku);
     var extState = variationState_(s.sellerSku, s.id, liveSkus[String(s.sellerSku)], s);
+    // The live price before the one under review, which can lag a price
+    // change (see pricedFromLive_). By TikTok's id first: a Seller Center
+    // variation often has no seller_sku to match on.
+    var extLive = liveById[String(s.id)] || (s.sellerSku ? liveSkus[String(s.sellerSku)] : null);
     variants.push({
       identifier: String(s.sellerSku || ''),
       variant: String(s.valueName || ''),
-      price: String(s.priceAmount || ''),
+      price: String((extLive && extLive.priceAmount) || s.priceAmount || ''),
       status: 'external',
       external: true,
       tiktok_sku_id: String(s.id || ''),
@@ -935,6 +1013,43 @@ function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
       quantity: Number(r.stock || 0)
     };
   });
+}
+
+/**
+ * The snapshot an edit is rebuilt from, with each live SKU's price taken from
+ * the version buyers see.
+ *
+ * Every push, removal and restore is a partial_edit rebuilt from the version
+ * under review, and it echoes every SKU's price back. A price change does not
+ * wait for review — "edits to the `price` or `inventory` fields do not require
+ * a reaudit and will be immediately published on the platform" (Partial Edit
+ * Product, doc 68f597ee1e45470499ff10f0) — so the live version has the new
+ * price at once, while the copy under review can still hold the old one. Rebuilt
+ * from that copy alone, the next push would put the old price back, and TikTok
+ * would answer success.
+ *
+ * So a SKU that is live is sent at its live price. One not live yet has no
+ * other price to take and keeps the one under review. Matched by TikTok's SKU
+ * id and nothing else: a price moved onto the wrong variation is worse than a
+ * stale one.
+ */
+function pricedFromLive_(snapshot, buyable) {
+  if (!buyable || !buyable.skus || !buyable.skus.length) return snapshot;
+  var liveById = {};
+  buyable.skus.forEach(function (s) {
+    if (s.id) liveById[String(s.id)] = s;
+  });
+  var out = {};
+  Object.keys(snapshot).forEach(function (k) { out[k] = snapshot[k]; });
+  out.skus = snapshot.skus.map(function (sku) {
+    var live = sku.id ? liveById[String(sku.id)] : null;
+    if (!live || !live.priceAmount || cents_(live.priceAmount) === cents_(sku.priceAmount)) return sku;
+    var copy = {};
+    Object.keys(sku).forEach(function (k) { copy[k] = sku[k]; });
+    copy.priceAmount = live.priceAmount;
+    return copy;
+  });
+  return out;
 }
 
 /**
@@ -1118,10 +1233,13 @@ function removeVariation_(listingId, tiktokSkuId, user) {
   if (!shopId) throw fail_('TS-PRD-09', 'Unknown listing: ' + listingId);
   var shop = shopById_(shopId);
 
-  var snapshot = ttGetProduct_(shopId, String(listingId));
+  // Both versions in one round trip: the one under review to rebuild from,
+  // the live one for the prices it must not undo. See pricedFromLive_.
+  var versions = productVersions_(shopId, String(listingId));
+  var snapshot = versions.pending;
   var ours = rows.filter(function (r) { return String(r.tiktok_sku_id || '') === String(tiktokSkuId); })[0];
   var alsoKeep = pendingToCarry_(listingId, snapshot, ours ? ours.identifier : null);
-  var built = buildRemovePayload_(snapshot, alsoKeep, tiktokSkuId);
+  var built = buildRemovePayload_(pricedFromLive_(snapshot, versions.buyable), alsoKeep, tiktokSkuId);
 
   var r = ttFetch_(shopId, 'post',
     '/product/202509/products/' + listingId + '/partial_edit', {}, { skus: built.skus });
@@ -1425,7 +1543,8 @@ function pushSku_(body, user) {
   if (!body.identifier || /\s/.test(body.identifier)) {
     throw fail_('TS-PRD-20', 'SKU identifier is required and cannot contain spaces.');
   }
-  if (!(Number(body.price) > 0)) throw fail_('TS-PRD-21', 'Price must be more than zero.');
+  var priceProblem = validatePrice_(body.price);
+  if (priceProblem) throw fail_('TS-PRD-21', priceProblem);
   var stock = Number(body.stock);
   if (!(stock >= 1 && stock <= 99999)) throw fail_('TS-PRD-22', 'Stock must be between 1 and 99,999.');
   if (!body.photo_base64 && !body.tiktok_image_uri) throw fail_('TS-PRD-23', 'A photo is required.');
@@ -1476,8 +1595,8 @@ function pushSku_(body, user) {
     var photoUrl = '';
     var imageUri = body.tiktok_image_uri || '';
     var attributeImageUri = body.tiktok_attribute_image_uri || '';
-    /** The product, when it was read alongside the image upload. */
-    var prefetchedSnapshot = null;
+    /** Both versions of the product, when they were read alongside the image upload. */
+    var prefetched = null;
     if (body.photo_base64) {
       // Optional on purpose: a Drive wobble must never stop a product going
       // live. See savePhotoOptional_ — WX11 and WX12, 16 Sep.
@@ -1510,7 +1629,7 @@ function pushSku_(body, user) {
       if (body.listing_id) {
         var appended = appendAssets_(prefix, blob, String(body.listing_id));
         attributeImageUri = appended.attributeImageUri;
-        prefetchedSnapshot = appended.snapshot;
+        prefetched = { pending: appended.snapshot, buyable: appended.buyable };
         if (!imageUri) imageUri = attributeImageUri;
       } else {
         var fresh = newListingAssets_(prefix, photoBytes, photoMime);
@@ -1528,23 +1647,29 @@ function pushSku_(body, user) {
     };
 
     return body.listing_id
-      ? addVariation_(body, user, prefix, shop, addition, photoUrl, prefetchedSnapshot)
+      ? addVariation_(body, user, prefix, shop, addition, photoUrl, prefetched)
       : startNewListing_(body, user, prefix, shop, addition, imageUri, attributeImageUri, photoUrl);
   }
 }
 
 /**
  * What an append needs from TikTok before it can edit: the uploaded image,
- * and the product as it stands. One round trip for both.
+ * the product as it stands, and the live version whose prices the edit must
+ * not undo (see pricedFromLive_). One round trip for all three.
  */
 function appendAssets_(prefix, blob, listingId) {
-  var both = ttFetchAll_([
+  var all = ttFetchAll_([
     ttImageRequest_(prefix, blob, 'ATTRIBUTE_IMAGE'),
-    ttProductRequest_(prefix, listingId, true)
+    ttProductRequest_(prefix, listingId, true),
+    ttProductRequest_(prefix, listingId, false)
   ]);
   // Image first, so a failed upload still reports TS-PRD-01 as it always did.
-  var attributeImageUri = ttImageFrom_(both[0]);
-  return { attributeImageUri: attributeImageUri, snapshot: ttProductFrom_(both[1], listingId) };
+  var attributeImageUri = ttImageFrom_(all[0]);
+  return {
+    attributeImageUri: attributeImageUri,
+    snapshot: ttProductFrom_(all[1], listingId),
+    buyable: buyableFrom_(all[2], listingId)
+  };
 }
 
 /**
@@ -1563,8 +1688,10 @@ function newListingAssets_(prefix, photoBytes, photoMime) {
 function addVariation_(body, user, prefix, shop, addition, photoUrl, prefetched) {
   var listingId = String(body.listing_id);
   // Already read in parallel with the image upload when a photo came with the
-  // push; read here only when it did not.
-  var snapshot = prefetched || ttGetProduct_(prefix, listingId);
+  // push; read here only when it did not. Both versions either way: the one
+  // under review to rebuild from, the live one for its prices.
+  var versions = prefetched || productVersions_(prefix, listingId);
+  var snapshot = versions.pending;
 
   /**
    * Has this identifier already been added?
@@ -1642,7 +1769,7 @@ function addVariation_(body, user, prefix, shop, addition, photoUrl, prefetched)
 
   var payload;
   try {
-    payload = buildAppendPayload_(snapshot, addition, alsoKeep);
+    payload = buildAppendPayload_(pricedFromLive_(snapshot, versions.buyable), addition, alsoKeep);
   } catch (e) {
     if (String(e.message) === 'LISTING_FULL') {
       // Not a failure — the run has outgrown one product. Say so in a way the
@@ -1909,10 +2036,14 @@ function skuForStock_(live, identifier, tiktokSkuId) {
     if (!tiktokSkuId && String(s.sellerSku) === String(identifier)) { sku = s; break; }
   }
   if (!sku) {
+    // The read is the version under review, which includes variations still
+    // in review — so "wait for it to go live", which this used to say, sent
+    // people waiting for something that would never change. Missing from it
+    // means removed, or added too recently for TikTok to return yet.
     throw fail_('TS-STK-02',
       (identifier || tiktokSkuId || 'That variation') +
-      ' is not one of the variations TikTok is returning for this listing. ' +
-      'A variation still under review is not returned, so wait for it to go live before changing its stock.');
+      ' is not on this listing on TikTok right now, so its stock was not changed. ' +
+      'It may have been removed, or added moments ago — refresh the listing and try again.');
   }
   if (!sku.warehouseId && !(sku.inventories && sku.inventories.length)) {
     throw fail_('TS-STK-03',
@@ -2113,12 +2244,49 @@ function writeStockOnce_(shopId, listingId, sku, quantity) {
  * whole sequence is one call with nothing in between, and it is taken under
  * the same script lock as every other write, so two phones cannot interleave.
  *
+ * A negative delta takes stock off ("5 fewer"), for the same reason a positive
+ * one adds. Before the phone offered one, taking stock off meant setting an
+ * exact number worked out from the screen, and a harness showed where that
+ * goes: the screen said 10, the operator meant to take 4 off and set 6, and
+ * TikTok — sold down to 3 since — was RAISED to 6. A set is still offered, and
+ * now carries `expectedBefore`, the number the phone showed; if TikTok holds
+ * anything else the set is refused rather than written over a sale.
+ *
+ * `requestKey` is the phone's key for one tap. TikTok has none, so this
+ * backend keeps its own: see stockRequestSeen_.
+ *
  * What it returns is the RE-READ figure, never the intended one. A write that
  * reports success and does something else is the failure worth catching.
  */
-function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute, actor) {
+function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute, actor,
+                            expectedBefore, requestKey) {
   if (!listingId || (!identifier && !tiktokSkuId)) {
     throw fail_('TS-STK-10', 'A stock change needs a listing and a variation.');
+  }
+
+  /**
+   * A tap this backend has already acted on.
+   *
+   * Checked first, and under the script lock the router holds, so two copies
+   * of one request cannot both get past it. A finished one is answered from
+   * memory without touching TikTok — a delta applied twice is +20 where +10
+   * was asked, which is exactly what the GET replay once did. One that got
+   * as far as TikTok and never came back confirmed is refused: whether it
+   * landed is not something a second write can find out.
+   */
+  if (requestKey) {
+    var seen = stockRequestSeen_(requestKey);
+    if (seen && seen.result) {
+      var again = {};
+      Object.keys(seen.result).forEach(function (k) { again[k] = seen.result[k]; });
+      again.deduplicated = true;
+      return again;
+    }
+    if (seen && seen.sent) {
+      throw fail_('TS-STK-13',
+        'This stock change already reached TikTok once and its result was never confirmed, so it was ' +
+        'not sent again. Refresh the listing to see what TikTok holds, then change it from there.');
+    }
   }
 
   // The shop comes from the listing, as it does for a removal: the phone knows
@@ -2134,21 +2302,53 @@ function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute,
   }
   if (!shopId) throw fail_('TS-STK-11', 'Unknown listing: ' + listingId);
 
-  var live;
+  // Both copies in one round trip: the one under review is what a write is
+  // worked out from, as it always was; the live one is what the phone shows.
+  var versions;
   try {
-    live = ttGetProduct_(shopId, String(listingId));
+    versions = productVersions_(shopId, String(listingId));
   } catch (e) {
     throw fail_('TS-STK-01',
       'Could not read the listing before changing stock, so nothing was sent. ' + (e && e.message ? e.message : e));
   }
+  var live = versions.pending;
 
   var sku = skuForStock_(live, identifier, tiktokSkuId);
   var before = Number(sku.quantity || 0);
-  var want = (absolute === null || absolute === undefined || absolute === '')
-    ? before + Number(delta || 0)
-    : Number(absolute);
+  var setting = !(absolute === null || absolute === undefined || absolute === '');
+  var label = identifier || sku.valueName || tiktokSkuId;
+  var shownSku = versions.buyable ? skuIn_(versions.buyable.skus, sku.id, '') : null;
+  var shown = shownSku ? Number(shownSku.quantity || 0) : null;
+
+  // An older phone sends no expectedBefore, and its set still works as before.
+  // The phone's figure is the live copy's, so it is matched against that as
+  // well: if the two copies ever disagree, a set made from the screen must not
+  // be refused for ever over a number the person cannot see.
+  var expecting = !(expectedBefore === null || expectedBefore === undefined || expectedBefore === '');
+  if (setting && expecting && Number(expectedBefore) !== before && Number(expectedBefore) !== shown) {
+    throw fail_('TS-STK-12',
+      'Stock is now ' + before + ', not the ' + expectedBefore + ' shown' +
+      (before < Number(expectedBefore) ? ' (sales since)' : ' (changed on another phone or in Seller Center)') +
+      '. Nothing was changed — check and set again.');
+  }
+
+  var want = setting ? Number(absolute) : before + Number(delta || 0);
+
+  // The phone greys out a step that would go below 1 on the number it shows;
+  // sales since can still take TikTok's figure there first. Said in terms of
+  // what was asked, rather than as "-2 is out of range".
+  if (!setting && Number(delta) < 0 && want < 1) {
+    throw fail_('TS-STK-14',
+      'Only ' + before + ' left of ' + label + ' on TikTok now, so taking ' + (-Number(delta)) +
+      ' off would leave ' + want + '. Nothing was changed. TikTok cannot set a variation to zero ' +
+      'from here — remove the variation instead.');
+  }
 
   checkStockTotal_(want);
+
+  // Marked before the write, not after: from here on, a repeat of this key may
+  // be a repeat of a write that landed.
+  if (requestKey) stockRequestRemember_(requestKey, 'sent');
 
   var after = writeStockOnce_(shopId, listingId, sku, want);
 
@@ -2167,23 +2367,267 @@ function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute,
   // Only if we have a row for it. A variation added in Seller Center has none,
   // and its stock still changes on TikTok — there is simply nothing of ours to
   // keep in step.
-  rows = listSkus_(listingId);
-  for (var j = 0; j < rows.length; j++) {
-    if (identifier && String(rows[j].identifier) === String(identifier)) {
-      markSkus_([{ sku_id: String(rows[j].sku_id), stock: after }]);
-      break;
-    }
-  }
+  var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+  if (row) markSkus_([{ sku_id: String(row.sku_id), stock: after }]);
 
   logEvent_(actor && actor.name, 'set_stock', String(listingId),
-    (identifier || sku.valueName || tiktokSkuId) + ': ' + before + ' -> ' + after, 'ok');
+    label + ': ' + before + ' -> ' + after, 'ok');
+  // Someone is working this shop: keep its orders syncing every minute, so the
+  // sales the change was made for show as quickly as the change itself.
+  noteShopActivity_(shopId);
 
-  return {
+  var result = {
     identifier: String(identifier || sku.valueName || ''),
+    tiktok_sku_id: String(sku.id || ''),
     before: before,
     after: after,
     requested: want
   };
+  if (requestKey) stockRequestRemember_(requestKey, JSON.stringify(result));
+  return result;
+}
+
+/**
+ * Our Sheet row for a variation TikTok has, or null.
+ *
+ * TikTok's own id first, because it names exactly one SKU. Then the
+ * identifier, but only on a row that is still listed: a removed B74 and the
+ * B74 put back after it share the identifier, and the removed one is usually
+ * the older row, so "the first row with this identifier" — which the stock
+ * change used — wrote the new figure onto the record of a deleted variation.
+ * A variation added in Seller Center has no row, and gets null.
+ */
+function ourRowFor_(rows, tiktokSkuId, identifier) {
+  var id = String(tiktokSkuId || '');
+  var i;
+  if (id) {
+    for (i = 0; i < rows.length; i++) {
+      if (String(rows[i].tiktok_sku_id || '') === id) return rows[i];
+    }
+  }
+  if (identifier) {
+    for (i = 0; i < rows.length; i++) {
+      if (String(rows[i].identifier) === String(identifier) && String(rows[i].status) === 'pushed') {
+        return rows[i];
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * How long a stock request's key is remembered: CacheService's ceiling.
+ *
+ * The phone repeats a key only while retrying one busy tap, seconds apart, so
+ * this is far more than it needs. The cache may drop a key before then; a
+ * repeat after that is judged afresh, which is how every stock change was
+ * judged before keys existed.
+ */
+var STOCK_REQUEST_TTL_S = 21600;
+
+function stockRequestCacheKey_(key) {
+  return 'stockreq:' + String(key).slice(0, 200);
+}
+
+/**
+ * What this backend remembers about one tap: null, `{sent}` once it has gone
+ * to TikTok, or `{result}` once TikTok's answer was confirmed. A cache that
+ * cannot be read is logged and treated as "never seen" — no worse than before
+ * there was a key.
+ */
+function stockRequestSeen_(key) {
+  try {
+    var got = CacheService.getScriptCache().get(stockRequestCacheKey_(key));
+    if (!got) return null;
+    if (got === 'sent') return { sent: true };
+    return { result: JSON.parse(got) };
+  } catch (e) {
+    warn_('TS-STK-15', 'Could not check stock request ' + key + ' for a repeat: ' + e);
+    return null;
+  }
+}
+
+function stockRequestRemember_(key, value) {
+  try {
+    CacheService.getScriptCache().put(stockRequestCacheKey_(key), value, STOCK_REQUEST_TTL_S);
+  } catch (e) {
+    warn_('TS-STK-16', 'Could not remember stock request ' + key + ': ' + e);
+  }
+}
+
+/**
+ * TikTok's answers that mean a promotion holds the price: 12052038 "Product
+ * price locked due to ongoing promotion" and 12019045 "price is locked"
+ * (Update Price, doc 650307de5a12ff0294eac8b0).
+ */
+var PRICE_LOCKED_CODES = { 12052038: 1, 12019045: 1 };
+
+/** A SKU in one version of the product: TikTok's id first, then our seller_sku. */
+function skuIn_(skus, tiktokSkuId, identifier) {
+  var id = String(tiktokSkuId || '');
+  var seller = String(identifier || '');
+  var i;
+  if (id) {
+    for (i = 0; i < skus.length; i++) if (String(skus[i].id) === id) return skus[i];
+  }
+  if (seller) {
+    for (i = 0; i < skus.length; i++) if (String(skus[i].sellerSku) === seller) return skus[i];
+  }
+  return null;
+}
+
+/** How long a price change waits before reading it back a second time. */
+var PRICE_RECHECK_MS = 2000;
+
+/**
+ * Change one variation's price on TikTok, and report what buyers now see.
+ *
+ * Its own endpoint, not a partial_edit: Update Price touches nothing but the
+ * SKUs it names, where a partial_edit has to restate the whole product and
+ * deletes anything it leaves out. TikTok takes it only on an ACTIVATE product
+ * that is not in an ongoing promotion (doc 650307de5a12ff0294eac8b0), and
+ * publishes it at once, without review.
+ *
+ * Absolute only. A price has no "add 50 cents", and the risk an absolute
+ * carries — overwriting a change made since the phone last looked — is
+ * handled the same way as the stock set: `expectedBefore` is the price the
+ * phone showed, and if the live price is anything else nothing is sent.
+ *
+ * Two versions, read together. The live one is what the endpoint changes and
+ * the only one checked afterwards: it must show the new price, or this fails
+ * without a second write. The one under review is a copy that may lag; when it
+ * still shows the old price that is logged and returned as `pending_price`,
+ * and pricedFromLive_ keeps the next push from putting the old price back.
+ */
+function setVariationPrice_(listingId, identifier, tiktokSkuId, price, expectedBefore, user) {
+  if (!listingId || (!identifier && !tiktokSkuId)) {
+    throw fail_('TS-PRC-01', 'A price change needs a listing and a variation.');
+  }
+  var problem = validatePrice_(price);
+  if (problem) throw fail_('TS-PRC-02', problem);
+  var requested = priceText_(price);
+
+  // The shop from the listing, as for stock.
+  var rows = listSkus_(listingId);
+  var shopId = rows.length ? String(rows[0].shop_id) : '';
+  if (!shopId) {
+    var listing = readAll_(TAB_LISTINGS).filter(function (l) {
+      return String(l.listing_id) === String(listingId);
+    })[0];
+    shopId = listing ? String(listing.shop_id) : '';
+  }
+  if (!shopId) throw fail_('TS-PRC-03', 'Unknown listing: ' + listingId);
+
+  var versions;
+  try {
+    versions = productVersions_(shopId, String(listingId));
+  } catch (e) {
+    throw fail_('TS-PRC-04',
+      'Could not read the listing before changing the price, so nothing was sent. ' + (e && e.message ? e.message : e));
+  }
+
+  var buyable = versions.buyable;
+  if (!buyable || String(buyable.status) !== 'ACTIVATE') {
+    throw fail_('TS-PRC-05',
+      'TikTok changes prices only on a live listing, and this one is ' +
+      (buyable ? String(buyable.status || 'not live') : 'not live yet') + '. Nothing was sent.');
+  }
+  var sku = skuIn_(buyable.skus, tiktokSkuId, identifier);
+  var label = String(identifier || (sku && (sku.sellerSku || sku.valueName)) || tiktokSkuId);
+  if (!sku) {
+    throw fail_('TS-PRC-06',
+      label + ' is not live on TikTok, so it has no price to change yet. A variation still in review ' +
+      'gets its price when it goes live. Nothing was sent.');
+  }
+
+  var before = priceText_(sku.priceAmount);
+  var result = {
+    identifier: label,
+    tiktok_sku_id: String(sku.id || ''),
+    before: before,
+    after: before,
+    requested: requested,
+    pending_price: false,
+    currency: CURRENCY
+  };
+
+  // Already the price asked for — a repeat of a change that landed, or another
+  // phone that got there first. Checked before the comparison below, because
+  // a repeat is exactly the case where the screen is out of date and the
+  // outcome is still the one wanted.
+  if (cents_(before) === cents_(requested)) {
+    result.unchanged = true;
+    return result;
+  }
+
+  var expecting = !(expectedBefore === null || expectedBefore === undefined || expectedBefore === '');
+  if (expecting && cents_(expectedBefore) !== cents_(before)) {
+    throw fail_('TS-PRC-07',
+      'The price of ' + label + ' is now ' + before + ', not the ' + expectedBefore + ' shown — it was ' +
+      'changed on another phone or in Seller Center. Nothing was changed; check it and set it again.');
+  }
+
+  // One SKU, the price and nothing else. No inventory, no partial_edit.
+  var r = ttFetch_(shopId, 'post', '/product/202309/products/' + listingId + '/prices/update', {},
+    { skus: [{ id: String(sku.id), price: { amount: requested, currency: CURRENCY } }] });
+  if (r.code !== 0) {
+    if (PRICE_LOCKED_CODES[r.code]) {
+      throw fail_('TS-PRC-08',
+        'The price of ' + label + ' is locked by a promotion running in Seller Center, so it was not ' +
+        'changed. End or edit the promotion there first. TikTok said: ' + ttReason_(r));
+    }
+    throw fail_('TS-PRC-09', 'TikTok refused the price change for ' + label + ': ' + ttReason_(r));
+  }
+
+  // TikTok's data is "always empty" on this endpoint, so the read is the answer.
+  var now;
+  try {
+    now = productVersions_(shopId, String(listingId));
+  } catch (e) {
+    throw fail_('TS-PRC-10',
+      'TikTok accepted the price change for ' + label + ' but the listing could not be read back, so it is ' +
+      'not confirmed. Nothing further was sent. Check the price before trying again.');
+  }
+  var liveNow = now.buyable ? skuIn_(now.buyable.skus, sku.id, '') : null;
+  var shown = liveNow ? priceText_(liveNow.priceAmount) : '';
+  if (cents_(shown) !== cents_(requested)) {
+    // TikTok publishes a price at once, by its docs; a read a moment too soon
+    // is still possible, and calling an accepted change a failure sends the
+    // person to try again. One more look, a little later, before saying so.
+    Utilities.sleep(PRICE_RECHECK_MS);
+    try {
+      now = productVersions_(shopId, String(listingId));
+      liveNow = now.buyable ? skuIn_(now.buyable.skus, sku.id, '') : null;
+      shown = liveNow ? priceText_(liveNow.priceAmount) : '';
+    } catch (e) {
+      // The first read stands.
+    }
+  }
+  if (cents_(shown) !== cents_(requested)) {
+    // Not sent again. A second write on top of an outcome we do not
+    // understand is how one wrong number becomes two — as for stock.
+    throw fail_('TS-PRC-11',
+      'TikTok accepted the price change for ' + label + ' but its live listing shows ' + (shown || 'no price') +
+      ' rather than ' + requested + '. Nothing further was sent. Check Seller Center before trying again.');
+  }
+  result.after = shown;
+
+  var underReview = skuIn_(now.pending.skus, sku.id, '');
+  if (underReview && cents_(underReview.priceAmount) !== cents_(requested)) {
+    result.pending_price = true;
+    warn_('TS-PRC-12', listingId + ': ' + label + ' is ' + requested + ' live, but the copy under review ' +
+      'still shows ' + priceText_(underReview.priceAmount) + '. Pushes take the live price (pricedFromLive_).');
+  }
+
+  // Keep our record in step where we have one. A Seller Center variation has
+  // no row, and its price still changed on TikTok.
+  var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+  if (row) markSkus_([{ sku_id: String(row.sku_id), price: requested }]);
+
+  logEvent_(user && user.name, 'set_price', String(listingId),
+    label + ': ' + before + ' -> ' + requested + ' ' + CURRENCY, 'ok');
+  noteShopActivity_(shopId);
+  return result;
 }
 
 /**
@@ -2294,7 +2738,9 @@ function restoreVariation_(listingId, identifier, stock, user) {
       'every variation. List it again from the app instead.');
   }
 
-  var snapshot = ttGetProduct_(shopId, String(listingId));
+  // Both versions, for the same reason as a push: see pricedFromLive_.
+  var versions = productVersions_(shopId, String(listingId));
+  var snapshot = versions.pending;
   var addition = {
     identifier: String(row.identifier),
     // The stored variant name already carries the identifier, which
@@ -2305,7 +2751,7 @@ function restoreVariation_(listingId, identifier, stock, user) {
     imageUri: imageUri
   };
 
-  var payload = buildAppendPayload_(snapshot, addition,
+  var payload = buildAppendPayload_(pricedFromLive_(snapshot, versions.buyable), addition,
     pendingToCarry_(listingId, snapshot, addition.identifier));
 
   var edited = ttFetch_(shopId, 'post',

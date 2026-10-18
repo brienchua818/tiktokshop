@@ -85,6 +85,10 @@ var WRITE_ACTIONS = {
   // Read-modify-write on TikTok's stock, so it must not interleave with
   // another phone doing the same thing to the same variation.
   setStock: 1,
+  // Read, compare with what the phone showed, write, re-read. Two phones
+  // doing that at once would each compare against a price the other is about
+  // to replace.
+  setPrice: 1,
   // Hands out a number two phones must never share. See reserveIdentifier_.
   reserveIdentifier: 1,
   // Rebuilds the product from a read, exactly as pushSku does; two at once
@@ -429,7 +433,26 @@ function route_(action, params, body, user) {
         params.identifier || body.identifier,
         params.tiktok_sku_id || body.tiktok_sku_id,
         Number(params.delta || body.delta || 0),
-        (params.absolute || body.absolute) === undefined ? null : Number(params.absolute || body.absolute),
+        optionalNumber_(params.absolute || body.absolute),
+        user,
+        // What the phone showed, so a set computed from a stale screen is
+        // refused rather than written over the sales since.
+        optionalNumber_(params.expected_before || body.expected_before),
+        // One per tap, the same on every retry of that tap.
+        params.idempotency_key || body.idempotency_key || ''
+      ));
+
+    /**
+     * Change one variation's price. Absolute, and checked against the price
+     * the phone showed; see setVariationPrice_.
+     */
+    case 'setPrice':
+      return json_(setVariationPrice_(
+        params.listing_id || body.listing_id,
+        params.identifier || body.identifier,
+        params.tiktok_sku_id || body.tiktok_sku_id,
+        params.price || body.price,
+        params.expected_before || body.expected_before,
         user
       ));
 
@@ -484,6 +507,22 @@ function route_(action, params, body, user) {
     default:
       return json_({ error: 'Unknown action: ' + action }, 400);
   }
+}
+
+/**
+ * A number the caller may have left out: the number, or null for "not given".
+ *
+ * `absolute` was read as "undefined means absent, anything else is a number",
+ * and `Number(null)` is 0 — so a phone sending `absolute: null` beside a delta
+ * asked to set the stock to zero and was refused for it. Missing, null, an
+ * empty string, and the "null" a query string makes of one are all absent. A
+ * real 0 stays 0, so it is refused by name rather than quietly ignored.
+ */
+function optionalNumber_(value) {
+  if (value === undefined || value === null || value === '' || value === 'null' || value === 'undefined') {
+    return null;
+  }
+  return Number(value);
 }
 
 /**

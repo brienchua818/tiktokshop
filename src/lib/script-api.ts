@@ -291,6 +291,9 @@ const WRITE_ACTIONS = new Set([
   'pushSku',
   'setRole',
   'setStock',
+  // Read, compare, write, re-read: a timeout leaves it unknown whether the
+  // price changed, exactly as for stock.
+  'setPrice',
   'reserveIdentifier',
   'removeVariation',
   'restoreVariation',

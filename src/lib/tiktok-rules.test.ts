@@ -128,6 +128,24 @@ describe('validatePrice', () => {
   it('rejects a price that is not a number', () => {
     expect(validatePrice('cheap')).not.toEqual([])
   })
+
+  /**
+   * The same table as apps-script/test/run.cjs holds against validatePrice_,
+   * row for row, so the phone and the backend cannot drift: a price this
+   * accepts and the backend refuses is a sheet that says "Save" and then fails.
+   */
+  const FORMAT = 'Price must be a number with at most two decimal places.'
+  const CEILING = 'Price must be at most 10,000 — TikTok’s ceiling for Singapore.'
+  it.each([
+    ['12.90', ''], ['9', ''], ['0.01', ''], ['10000', ''], ['10000.00', ''], [' 12.90 ', ''],
+    ['', 'Price is required.'], ['   ', 'Price is required.'],
+    ['0', 'Price must be more than zero.'], ['0.00', 'Price must be more than zero.'],
+    ['10000.01', CEILING], ['25000', CEILING],
+    ['-5', FORMAT], ['18.905', FORMAT], ['1e3', FORMAT], ['cheap', FORMAT],
+    ['12.', FORMAT], ['.5', FORMAT], ['1,000', FORMAT],
+  ])('%j → %j, as the backend says', (input, want) => {
+    expect(validatePrice(input)[0]?.message ?? '').toBe(want)
+  })
 })
 
 describe('validateStock', () => {

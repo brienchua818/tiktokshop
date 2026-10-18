@@ -104,18 +104,31 @@ describe.each([405, 404])('when the POST comes back as a page (HTTP %i)', (statu
 
 describe('the write list mirrors the backend', () => {
   it('names every action the backend treats as a write', async () => {
+    // A request that never answers, so every call below ends in its own
+    // deadline — and nothing leaves the machine.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (_i: unknown, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+          }),
+      ),
+    )
     const api = await loadApi()
     // apps-script/Api.gs WRITE_ACTIONS, verbatim.
     for (const a of [
       'addListing', 'saveSku', 'pushSku', 'setRole',
-      'setStock', 'reserveIdentifier', 'removeVariation', 'restoreVariation',
+      'setStock', 'setPrice', 'reserveIdentifier', 'removeVariation', 'restoreVariation',
     ]) {
       const err = await api
         .call(a, { body: {}, timeoutMs: 1 })
-        .then(() => null, (e: unknown) => e as { isOutcomeUnknown?: boolean })
+        .then(() => null, (e: unknown) => e as { message: string })
       // A timeout on any of these must read as "may have landed", never as
-      // "nothing was changed, safe to try again".
+      // "nothing was changed, safe to try again". Asserted on the words, which
+      // are the only thing that differs: a read times out too.
       expect(err, a).not.toBeNull()
+      expect(err!.message, a).toMatch(/may still have gone through/)
     }
   })
 })

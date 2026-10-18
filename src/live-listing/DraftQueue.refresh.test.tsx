@@ -208,7 +208,7 @@ describe('1. it polls while the listing is open and on screen', () => {
 
   it('skips a tick while the stock sheet is open, and tries again on the next', async () => {
     await mount()
-    await click('Change stock for A1')
+    await click('Stock and price for A1')
     await advance(95_000)
     expect(reads()).toBe(1)
     await click('Close')
@@ -368,7 +368,7 @@ describe('5. a stock change shows at once', () => {
     expect(rowText('A1')).toContain('5 left of 7')
     ctl.listingState.mockImplementation(() => new Promise(() => {}))
     ctl.setStock.mockResolvedValue({ identifier: 'A1', before: 5, after: 10, requested: 5 })
-    await click('Change stock for A1')
+    await click('Stock and price for A1')
     await clickText('+5')
     expect(rowText('A1')).toContain('10 left of 12')
     // And it is still followed by a read.
@@ -383,7 +383,7 @@ describe('5. a stock change shows at once', () => {
     expect(reads()).toBe(2)
     ctl.listingState.mockImplementation(() => new Promise(() => {}))
     ctl.setStock.mockResolvedValue({ identifier: 'A1', before: 5, after: 10, requested: 5 })
-    await click('Change stock for A1')
+    await click('Stock and price for A1')
     await clickText('+5')
     await act(async () => old.resolve(state(variant('A1'))))
     await advance(0)
@@ -395,9 +395,9 @@ describe('5. a stock change shows at once', () => {
     ctl.setStock.mockRejectedValue(new ApiError(0, '"setStock" gave no reply after 90s. It may still have gone through, so check before repeating it.', 'TIMEOUT'))
     const truth = deferred<ListingState>()
     ctl.listingState.mockImplementationOnce(() => truth.promise)
-    await click('Change stock for A1')
+    await click('Stock and price for A1')
     await clickText('+5')
-    expect(document.body.textContent).toContain('It may still have gone through')
+    expect(document.body.textContent).toMatch(/Outcome unknown.*not sent again/)
     expect(reads()).toBe(2)
     await act(async () => truth.resolve(state(variant('A1', { stock_available: 10, stock_total: 12 }))))
     await advance(0)
@@ -411,7 +411,7 @@ describe('5. a stock change shows at once', () => {
   it('a refusal is not an unknown outcome: no extra read', async () => {
     await mount()
     ctl.setStock.mockRejectedValue(new ApiError(422, 'TikTok refused the quantity', 'TS-PRD-40'))
-    await click('Change stock for A1')
+    await click('Stock and price for A1')
     await clickText('+5')
     expect(reads()).toBe(1)
   })

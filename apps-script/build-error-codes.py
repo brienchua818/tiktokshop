@@ -23,8 +23,11 @@ AREAS = {
     'EXP': 'Exports to Drive, photos in the purchase order (Export.gs)',
     'LCK': 'The script lock that serialises writes (Lock.gs)',
     'ORD': 'Order sync and summaries (Orders.gs)',
+    'PRC': 'Price changes on a live variation (Product.gs)',
     'PRD': 'Products, variations, pushes (Product.gs)',
+    'SEQ': 'Identifier reservation, so two phones never share one (Product.gs)',
     'SHT': 'The data spreadsheet (Sheet.gs)',
+    'STK': 'Stock changes on a live variation (Product.gs)',
     'TT': 'TikTok API transport, tokens, authorisation (TikTok.gs)',
     'UNC': 'Not raised by this code: the runtime threw something nobody anticipated',
 }

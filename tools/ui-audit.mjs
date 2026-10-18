@@ -130,6 +130,7 @@ const REPLIES = {
   ],
   setRole: { email: 'judy@sheldonglobal.com', role: 'lister' },
   setStock: { identifier: 'A1', before: 48, after: 58, requested: 58 },
+  setPrice: { identifier: 'A1', tiktok_sku_id: '9001', before: '18.90', after: '17.90', requested: '17.90', pending_price: false, currency: 'SGD' },
   reserveIdentifier: { identifier: 'A2', prefix: 'A', seq: 2 },
   removedVariations: {
     listing_id: '1734903629786286062',
@@ -202,7 +203,7 @@ const SCREENS = [
       const row = page.locator('text=I12 Clearance Sale').first()
       if (await row.count()) await row.click()
       await page.waitForTimeout(500)
-      const stock = page.getByRole('button', { name: /Change stock for/ }).first()
+      const stock = page.getByRole('button', { name: /Stock and price for/ }).first()
       if (await stock.count()) await stock.click()
       await page.waitForTimeout(300)
     },

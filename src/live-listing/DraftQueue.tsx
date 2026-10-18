@@ -35,7 +35,7 @@ import {
   soldOut,
   splitRows,
 } from './reconcile'
-import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
+import { MAX_SKUS_PER_PRODUCT, validatePrice } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
 
@@ -222,6 +222,14 @@ export default function DraftQueue({
     if (!was) return
     readShown.current = ++readsAsked.current
     show(withStock(was, v, after))
+  }
+
+  /** The same for a price: TikTok's figure on the row now, before the next read. */
+  function showPrice(v: LiveVariant, price: string) {
+    const was = liveNow.current
+    if (!was) return
+    readShown.current = ++readsAsked.current
+    show({ ...was, variants: was.variants.map((x) => (sameVariant(x, v) ? { ...x, price } : x)) })
   }
 
   /**
@@ -514,7 +522,11 @@ export default function DraftQueue({
         identifier={draft.identifier}
         name={draft.title}
         photo={<Thumbnail draft={draft} fallback={v?.image_url ?? ''} />}
-        price={draft.price}
+        // TikTok's price once the backend has one: a price changed after the
+        // push — here, on another phone, or in Seller Center — is not this
+        // draft's. `||` rather than `??`, so an empty figure is not shown as
+        // no price at all.
+        price={v?.price || draft.price}
         stock={
           v ? (
             <StockState v={v} />
@@ -747,13 +759,14 @@ export default function DraftQueue({
           v={adjusting}
           listingId={listingId}
           onClose={() => setAdjusting(null)}
-          onDone={async (note, stock) => {
+          onDone={async (note, changed) => {
             setRemovedNote(note)
             setAdjusting(null)
-            if (stock) showStock(adjusting, stock.after)
+            if (changed?.stock_available !== undefined) showStock(adjusting, changed.stock_available)
+            if (changed?.price !== undefined) showPrice(adjusting, changed.price)
             // Still read: the rest of the row — sold, held, the badge — is the
             // backend's to say, and only a read brings it.
-            await refresh(stock ? POLL_READ : HEAVY_READ)
+            await refresh(changed ? POLL_READ : HEAVY_READ)
           }}
           onUnknown={() => void checkStock(adjusting)}
         />
@@ -1090,7 +1103,49 @@ function RemoteRow({
   )
 }
 
-function StockSheet({
+/** The waits before each retry of a busy write: about 2, 4 and 6 seconds. */
+const BUSY_RETRY_MS = [2_000, 4_000, 6_000]
+
+/**
+ * One key per tap, sent with every attempt of that tap.
+ *
+ * `crypto.randomUUID` needs a secure context and iOS 15.4 or later. The
+ * fallback only has to be unique on this phone for the six hours the backend
+ * remembers a key, which the time and two random draws comfortably are.
+ */
+function tapKey(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  } catch {
+    // Outside a secure context it throws rather than being absent.
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
+}
+
+/** A price as whole cents, so "12.9" and "12.90" are one price. Null when it is not a number. */
+function centsOf(text: string): number | null {
+  const t = text.trim()
+  const n = Number(t)
+  return t && Number.isFinite(n) ? Math.round(n * 100) : null
+}
+
+/**
+ * Stock and price for one live variation.
+ *
+ * Stock moves by steps both ways. Taking stock off used to mean "set an exact
+ * number" worked out from the screen, and a harness showed where that goes:
+ * the screen said 10, the operator meant to take 4 off and set 6, and TikTok —
+ * sold down to 3 by then — was RAISED to 6. A step sends a delta, which the
+ * backend applies to what TikTok holds at that moment. The exact set stays,
+ * and carries the number it was worked out from, so the backend refuses it
+ * rather than write over sales it never saw.
+ *
+ * Every tap carries one key, sent again with each retry of that tap and never
+ * with another. Only a busy refusal is retried — the backend refused it before
+ * doing anything. A reply that never came is never retried: the write may have
+ * landed, and sending it again is how +10 became +20.
+ */
+export function StockSheet({
   v,
   listingId,
   onClose,
@@ -1100,44 +1155,166 @@ function StockSheet({
   v: LiveVariant
   listingId: string | null
   onClose: () => void
-  /** `stock` is TikTok's figure after the change, for the row to show at once. */
-  onDone: (note: string, stock?: { after: number }) => Promise<void>
-  /** The change may have landed with its reply lost. Look; never resend. */
+  /**
+   * After TikTok has confirmed a change. `changed` is TikTok's own figure, for
+   * a caller that wants to show it before its next read of the listing.
+   */
+  onDone: (note: string, changed?: { stock_available?: number; price?: string }) => Promise<void>
+  /**
+   * A write whose reply never came, and which may have landed. The caller
+   * reads the listing back; the sheet never sends the write again.
+   */
   onUnknown?: () => void
 }) {
-  const [busy, setBusy] = useState(false)
+  const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  /** Said while a busy write waits for its next try. */
+  const [retrying, setRetrying] = useState('')
+  /** A write that may have landed. Nothing more is sent from this sheet once set. */
+  const [unknown, setUnknown] = useState('')
   const [exact, setExact] = useState('')
   const [mode, setMode] = useState<'add' | 'set'>('add')
+  const [priceText, setPriceText] = useState(v.price)
+  const [confirming, setConfirming] = useState(false)
+  const locked = busy !== '' || unknown !== ''
   useDismiss(busy ? () => {} : onClose)
 
   const now = v.stock_available ?? 0
+  const label = v.identifier || v.variant
 
-  async function apply(body: { delta?: number; absolute?: number }) {
-    if (!listingId) return
-    setBusy(true)
+  // The same gate as stock: the sheet only opens on a variation with stock to
+  // show, which means a live one. Not the listing's status as well — that is
+  // read from the copy under review, which is what a listing is for most of a
+  // stream, and the price would have been hidden exactly when it is needed.
+  // TikTok's own rule (ACTIVATE only) is checked by the backend against the
+  // live copy, and its refusal says so.
+  const priceOffered = v.stock_available !== null && !v.removed
+  const currentCents = centsOf(v.price)
+  const currentText = currentCents === null ? v.price : (currentCents / 100).toFixed(2)
+  const priceProblem = validatePrice(priceText)[0]?.message ?? ''
+  const nextCents = priceProblem ? null : centsOf(priceText)
+  const nextText = nextCents === null ? '' : (nextCents / 100).toFixed(2)
+  const priceChanged = nextCents !== null && nextCents !== currentCents
+  /**
+   * A slip of the thumb that is still a valid price: 99 for 9.90, 1.29 for
+   * 12.90. More than three times the current price, or under a third of it,
+   * asks once more before it is sent.
+   */
+  const farOff =
+    priceChanged &&
+    currentCents !== null &&
+    currentCents > 0 &&
+    nextCents !== null &&
+    (nextCents > currentCents * 3 || nextCents * 3 < currentCents)
+
+  /**
+   * Send one write. Retry it while the backend is busy, and in no other case.
+   *
+   * LISTING_BUSY is the lock refusing before anything ran, so the same request
+   * again is safe — and the backend's own message promises a retry, which
+   * nothing used to make. An answer that never arrived is the opposite case:
+   * it is reported, handed to `onUnknown` to read back, and left alone.
+   */
+  async function write<T>(send: () => Promise<T>, saying: string, what: string): Promise<T | null> {
+    setBusy(saying)
     setError('')
     try {
-      const r = await api.setStock({
-        listing_id: listingId,
-        identifier: v.identifier,
-        tiktok_sku_id: v.tiktok_sku_id,
-        ...body,
-      })
-      // TikTok's number, not ours. "Set to 31" is a promise; "31 left" is a fact.
-      await onDone(`${r.identifier || v.variant}: ${r.after} left, was ${r.before}.`, r)
-    } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.display : String(e))
-      if (e instanceof ApiError && e.isOutcomeUnknown) onUnknown?.()
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await send()
+        } catch (e: unknown) {
+          if (e instanceof ApiError && e.code === 'LISTING_BUSY' && attempt < BUSY_RETRY_MS.length) {
+            setRetrying(
+              `Another change is saving first. Retrying (${attempt + 1} of ${BUSY_RETRY_MS.length})…`,
+            )
+            await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS[attempt]))
+            continue
+          }
+          if (e instanceof ApiError && e.isOutcomeUnknown) {
+            setUnknown(
+              `Outcome unknown: no reply came, so the ${what} may already be on TikTok. ` +
+                'It was not sent again. Checking the listing…',
+            )
+            onUnknown?.()
+          } else if (e instanceof ApiError && e.code === 'LISTING_BUSY') {
+            setError(
+              `Still busy after ${BUSY_RETRY_MS.length} retries. Nothing was changed — try again in a minute.`,
+            )
+          } else {
+            setError(e instanceof ApiError ? e.display : String(e))
+          }
+          return null
+        }
+      }
     } finally {
-      setBusy(false)
+      setRetrying('')
+      setBusy('')
     }
+  }
+
+  async function changeStock(body: { delta: number } | { absolute: number; expected_before: number }) {
+    if (!listingId) return
+    const key = tapKey()
+    const r = await write(
+      () =>
+        api.setStock({
+          listing_id: listingId,
+          identifier: v.identifier,
+          tiktok_sku_id: v.tiktok_sku_id,
+          ...body,
+          idempotency_key: key,
+        }),
+      'Changing stock on TikTok…',
+      'stock change',
+    )
+    // TikTok's number, not ours. "Set to 31" is a promise; "31 left" is a fact.
+    if (r) await onDone(`${r.identifier || v.variant}: ${r.after} left, was ${r.before}.`, { stock_available: r.after })
+  }
+
+  async function savePrice() {
+    if (!listingId || !priceChanged) return
+    if (farOff && !confirming) {
+      setConfirming(true)
+      return
+    }
+    setConfirming(false)
+    const r = await write(
+      () =>
+        api.setPrice({
+          listing_id: listingId,
+          identifier: v.identifier,
+          tiktok_sku_id: v.tiktok_sku_id,
+          price: nextText,
+          expected_before: v.price,
+        }),
+      'Changing the price on TikTok…',
+      'price change',
+    )
+    if (!r) return
+    const name = r.identifier || label
+    if (r.unchanged) {
+      await onDone(`${name} is already $${r.after} on TikTok. Nothing was changed.`, { price: r.after })
+      return
+    }
+    // TikTok's figure, read back from what buyers see.
+    await onDone(
+      `${name}: now $${r.after}, was $${r.before}.` +
+        (r.pending_price
+          ? ` The listing's copy under review still shows $${r.before}; TikTok will catch up, and pushes meanwhile keep $${r.after}.`
+          : ''),
+      { price: r.after },
+    )
   }
 
   return (
     <div className="fixed inset-0 z-40 flex items-end sm:items-center justify-center">
       <div className="absolute inset-0 bg-scrim" onClick={busy ? undefined : onClose} />
-      <div className="relative w-full sm:max-w-sm bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] space-y-3">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${priceOffered ? 'Stock and price' : 'Stock'} for ${label}`}
+        className="relative w-full sm:max-w-sm max-h-full overflow-y-auto bg-surface border-t sm:border border-line rounded-t-2xl sm:rounded-2xl p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] space-y-3"
+      >
         <div className="flex items-start gap-2">
           <div className="min-w-0 flex-1">
             <p className="text-xs font-mono text-identifier">{v.identifier || 'Seller Center'}</p>
@@ -1149,7 +1326,7 @@ function StockSheet({
           </div>
           <button
             onClick={onClose}
-            disabled={busy}
+            disabled={busy !== ''}
             className="min-h-11 min-w-11 -mr-1 -mt-1 inline-flex items-center justify-center text-muted disabled:opacity-40"
             aria-label="Close"
           >
@@ -1159,23 +1336,50 @@ function StockSheet({
 
         {mode === 'add' ? (
           <>
-            {/* The whole point, and the four amounts a factory run actually
-                uses. One tap, no keyboard, no mental arithmetic. */}
-            <div className="grid grid-cols-4 gap-2">
-              {[1, 5, 10, 20].map((n) => (
-                <button
-                  key={n}
-                  onClick={() => void apply({ delta: n })}
-                  disabled={busy}
-                  className="min-h-12 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white"
-                >
-                  +{n}
-                </button>
-              ))}
+            {/* The amounts a factory run actually uses, both ways, and the
+                same size both ways: taking stock off is as ordinary as adding
+                it. One tap, no keyboard, no mental arithmetic. */}
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-semibold tracking-wide text-muted uppercase">Add stock</p>
+              <div className="grid grid-cols-4 gap-2">
+                {[1, 5, 10, 20].map((n) => (
+                  <button
+                    key={n}
+                    onClick={() => void changeStock({ delta: n })}
+                    disabled={locked}
+                    aria-label={`Add ${n}`}
+                    className="min-h-12 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white"
+                  >
+                    +{n}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <p className="text-[11px] font-semibold tracking-wide text-muted uppercase">Take stock off</p>
+              <div className="grid grid-cols-4 gap-2">
+                {[1, 5, 10].map((n) => {
+                  // TikTok's floor is 1. Greyed out on the number shown; the
+                  // backend refuses by name if sales have got there first.
+                  const belowFloor = now - n < 1
+                  return (
+                    <button
+                      key={n}
+                      onClick={() => void changeStock({ delta: -n })}
+                      disabled={locked || belowFloor}
+                      aria-label={`Take ${n} off`}
+                      title={belowFloor ? `Only ${now} left, and TikTok cannot go below 1` : undefined}
+                      className="min-h-12 rounded-xl border border-line3 bg-chip2 hover:bg-chip disabled:opacity-40 text-[15px] font-semibold text-fg"
+                    >
+                      −{n}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
             <button
               onClick={() => setMode('set')}
-              disabled={busy}
+              disabled={locked}
               className="min-h-11 w-full text-xs text-muted underline disabled:opacity-40"
             >
               Set an exact number instead
@@ -1193,8 +1397,8 @@ function StockSheet({
                 className="flex-1 min-w-0 bg-sunken border border-line rounded-lg px-3 h-12 text-sm text-fg outline-none focus:border-accent"
               />
               <button
-                onClick={() => void apply({ absolute: Number(exact) })}
-                disabled={busy || !/^\d+$/.test(exact.trim()) || Number(exact) < 1}
+                onClick={() => void changeStock({ absolute: Number(exact), expected_before: now })}
+                disabled={locked || !/^\d+$/.test(exact.trim()) || Number(exact) < 1}
                 className="min-h-12 px-4 rounded-xl bg-accent hover:bg-accent-hover disabled:opacity-40 text-[15px] font-semibold text-white shrink-0"
               >
                 Set
@@ -1203,19 +1407,71 @@ function StockSheet({
             {/* TikTok's floor is 1, not 0. Said before somebody types 0 and
                 waits, rather than after. */}
             <p className="text-xs text-ghost">
-              1 to 99,999. TikTok cannot set a variation to zero — remove it instead.
+              1 to 99,999. TikTok cannot set a variation to zero — remove it instead. If sales
+              have moved it off {now} by the time this arrives, nothing changes and you are told.
             </p>
             <button
               onClick={() => setMode('add')}
-              disabled={busy}
+              disabled={locked}
               className="min-h-11 w-full text-xs text-muted underline disabled:opacity-40"
             >
-              Back to adding
+              Back to adding and taking off
             </button>
           </>
         )}
 
-        {busy && <p className="text-xs text-info">Changing stock on TikTok…</p>}
+        {priceOffered && (
+          <div className="space-y-1.5 border-t border-hair pt-3">
+            <p className="text-[11px] font-semibold tracking-wide text-muted uppercase">Price</p>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-faint shrink-0">$</span>
+              <input
+                inputMode="decimal"
+                value={priceText}
+                onChange={(e) => {
+                  setPriceText(e.target.value)
+                  setConfirming(false)
+                }}
+                disabled={locked}
+                aria-label="New price"
+                className="flex-1 min-w-0 bg-sunken border border-line rounded-lg px-3 h-12 text-sm text-fg tabular-nums outline-none focus:border-accent disabled:opacity-60"
+              />
+              <button
+                onClick={() => void savePrice()}
+                disabled={locked || !priceChanged}
+                className={`min-h-12 px-4 rounded-xl disabled:opacity-40 text-[15px] font-semibold shrink-0 ${
+                  confirming ? 'bg-warn-solid text-on-warn' : 'bg-accent hover:bg-accent-hover text-white'
+                }`}
+              >
+                {confirming ? `Confirm $${nextText}` : 'Save price'}
+              </button>
+            </div>
+            {priceChanged && (
+              <p className="text-xs text-fg2 tabular-nums">
+                ${currentText} → ${nextText}
+              </p>
+            )}
+            {confirming && currentCents !== null && nextCents !== null && (
+              <p className="text-xs text-warn">
+                {nextCents > currentCents
+                  ? `That is more than three times the current $${currentText}.`
+                  : `That is under a third of the current $${currentText}.`}{' '}
+                Check it, then tap Confirm if ${nextText} is right.
+              </p>
+            )}
+            {priceProblem && priceText.trim() !== v.price.trim() && (
+              <p className="text-xs text-bad">{priceProblem}</p>
+            )}
+          </div>
+        )}
+
+        {busy && !retrying && <p className="text-xs text-info">{busy}</p>}
+        {retrying && <p className="text-xs text-warn">{retrying}</p>}
+        {unknown && (
+          <p className="text-xs text-warn bg-warn-tint border border-warn-line rounded-lg px-3 py-2">
+            {unknown}
+          </p>
+        )}
         {error && <p className="text-xs text-bad">{error}</p>}
         <p className="text-xs text-ghost">
           Stock and price changes publish immediately. Adding a variation is what sends the
@@ -1335,7 +1591,7 @@ function VariantRow({
           <button
             onClick={onOpen}
             className="flex-1 min-w-0 flex items-center gap-3 py-2.5 text-left active:bg-chip rounded-lg"
-            aria-label={`Change stock for ${identifier || name}`}
+            aria-label={`Stock and price for ${identifier || name}`}
           >
             {inner}
           </button>

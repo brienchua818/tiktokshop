@@ -102,6 +102,15 @@ export const VALUE_NAME_MAX = 50
 export const STOCK_MIN = 1
 export const STOCK_MAX = 99_999
 
+/**
+ * A Singapore local seller's price range, in SGD, to two decimal places:
+ * "Singapore | 0.01 – 10,000" on TikTok's Product pricing page (doc
+ * 67e1288d76cfee049d9af858). The backend holds the same two numbers in
+ * Config.gs, and its validatePrice_ the same rules.
+ */
+export const PRICE_MIN = 0.01
+export const PRICE_MAX = 10_000
+
 /** Singapore is a SEA market, so the v2 (7-level) category tree is mandatory. */
 export const CATEGORY_VERSION = 'v2'
 
@@ -332,7 +341,11 @@ export function validateSellerSku(raw: string): Violation[] {
   return []
 }
 
-/** Price must be a positive decimal with at most two places. */
+/**
+ * Price must be a decimal with at most two places, inside TikTok's range for
+ * Singapore. The same rules, in the same order and the same words, as
+ * validatePrice_ in apps-script/Product.gs; the two test files share a table.
+ */
 export function validatePrice(raw: string): Violation[] {
   const price = raw.trim()
   if (price.length === 0) {
@@ -341,8 +354,16 @@ export function validatePrice(raw: string): Violation[] {
   if (!/^\d+(\.\d{1,2})?$/.test(price)) {
     return [{ field: 'price', message: 'Price must be a number with at most two decimal places.' }]
   }
-  if (Number(price) <= 0) {
+  if (Number(price) < PRICE_MIN) {
     return [{ field: 'price', message: 'Price must be more than zero.' }]
+  }
+  if (Number(price) > PRICE_MAX) {
+    return [
+      {
+        field: 'price',
+        message: `Price must be at most ${PRICE_MAX.toLocaleString('en-US')} — TikTok’s ceiling for Singapore.`,
+      },
+    ]
   }
   return []
 }

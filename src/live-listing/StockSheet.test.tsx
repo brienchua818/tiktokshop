@@ -149,7 +149,7 @@ describe('stock', () => {
     expect(titled('Set')?.disabled).toBe(false)
   })
 
-  for (const code of ['TS-STK-18', 'TS-PRD-02', 'TS-STK-07', 'TS-STK-13']) {
+  for (const code of ['TS-STK-18', 'TS-STK-19', 'TS-PRD-02', 'TS-STK-07', 'TS-STK-13']) {
     it(`${code} after a stock write is treated as a lost reply: locked and looked at`, async () => {
       ctl.setStock.mockRejectedValueOnce(new ApiError(500, 'TikTok accepted the stock change but it could not be read back', code))
       const { onUnknown } = await mount()

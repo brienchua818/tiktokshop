@@ -5679,6 +5679,49 @@ const PRICE_CASES = [
     eq(tt.writes.length, 1)
   })
 
+  check('a stock write answered by a gateway page may have landed, and is not called a refusal', () => {
+    // TikTok applied it; its gateway answered 504 with HTML. As TS-STK-05
+    // "refused" the phone left +10 live and the next tap wrote 30, not 20.
+    setup()
+    const orig = gs.__getUrlFetch()
+    gs.__setUrlFetch({
+      fetch: (url, opts) => {
+        const res = orig.fetch(url, opts)
+        if (url.indexOf('/inventory/update') < 0) return res
+        return { getResponseCode: () => 504, getContentText: () => '<html><body>504 Gateway Time-out</body></html>' }
+      },
+      fetchAll: orig.fetchAll,
+    })
+    let out
+    try { out = call('setStock', Object.assign({ delta: 10, idempotency_key: 'tap-g' }, A1_STOCK)) }
+    finally { gs.__setUrlFetch(orig) }
+    eq(out.code, 'TS-STK-19', out.message)
+    eq(tt.writes.length, 1)
+  })
+
+  check('a stock write answered with a server error in JSON may have landed too', () => {
+    setup()
+    const orig = gs.__getUrlFetch()
+    gs.__setUrlFetch({
+      fetch: (url, opts) => {
+        const res = orig.fetch(url, opts)
+        if (url.indexOf('/inventory/update') < 0) return res
+        return { getResponseCode: () => 500, getContentText: () => JSON.stringify({ code: 36009004, message: 'Internal error' }) }
+      },
+      fetchAll: orig.fetchAll,
+    })
+    let out
+    try { out = call('setStock', Object.assign({ delta: 10, idempotency_key: 'tap-j' }, A1_STOCK)) }
+    finally { gs.__setUrlFetch(orig) }
+    eq(out.code, 'TS-STK-19', out.message)
+  })
+
+  check('a clear refusal of a stock write is still a refusal', () => {
+    setup({ onInventory: () => ({ code: 12052073, message: 'invalid quantity' }) })
+    const out = call('setStock', Object.assign({ delta: 10 }, A1_STOCK))
+    eq(out.code, 'TS-STK-05', out.message)
+  })
+
   check('a stock change that is on TikTok is reported as done even if our Sheet then fails', () => {
     // Reported as a failure, the person taps again and it lands twice.
     setup()

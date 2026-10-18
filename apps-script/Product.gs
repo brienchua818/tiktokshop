@@ -2206,6 +2206,15 @@ function writeStockOnce_(shopId, listingId, sku, quantity) {
     { skus: [{ id: String(sku.id), inventory: [{ warehouse_id: String(inventories[0].warehouse_id), quantity: quantity }] }] });
 
   if (r.code !== 0) {
+    // No clear answer — an HTML or empty body, or a server error behind
+    // TikTok's gateway — is not a refusal: the write may have been applied
+    // before the gateway gave up. Reported as "refused", the person tapped
+    // again and the stock went up twice.
+    if (r.code === -1 || Number(r.httpStatus) >= 500) {
+      throw fail_('TS-STK-19',
+        'TikTok gave no clear answer to the stock change (' + ttReason_(r) + '), so it may already be on ' +
+        'TikTok. Nothing further was sent.');
+    }
     throw fail_('TS-STK-05', 'TikTok refused the stock change: ' + ttReason_(r));
   }
   // The envelope said success. Ask the rows.

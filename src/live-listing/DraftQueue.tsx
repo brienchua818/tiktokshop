@@ -1131,13 +1131,16 @@ const MOVED_SINCE = new Set(['TS-STK-12', 'TS-STK-14', 'TS-PRC-07'])
 /**
  * Refusals that come after TikTok accepted the write, or may have: the read
  * back failed (TS-STK-18; TS-PRD-02 from a backend that predates it), the
+ * write got no clear answer — a gateway page, a server error (TS-STK-19), the
  * figure read back is not the one asked for (TS-STK-06, TS-STK-07, TS-PRC-11),
  * the price could not be read back (TS-PRC-10), or this very tap already
  * reached TikTok unconfirmed (TS-STK-13). Each is treated as a lost reply:
  * the sheet locks and the listing is read, because another tap here is how a
  * +10 lands twice.
  */
-const MAY_HAVE_LANDED = new Set(['TS-STK-18', 'TS-PRD-02', 'TS-STK-06', 'TS-STK-07', 'TS-STK-13', 'TS-PRC-10', 'TS-PRC-11'])
+const MAY_HAVE_LANDED = new Set([
+  'TS-STK-18', 'TS-STK-19', 'TS-PRD-02', 'TS-STK-06', 'TS-STK-07', 'TS-STK-13', 'TS-PRC-10', 'TS-PRC-11',
+])
 
 /**
  * One key per tap, sent with every attempt of that tap.

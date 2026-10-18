@@ -364,8 +364,19 @@ function ttFetchAll_(requests) {
 
 function ttParse_(res) {
   var txt = res.getContentText() || '';
-  try { return JSON.parse(txt); }
-  catch (e) { return { code: -1, message: 'Non-JSON response: ' + txt.slice(0, 200) }; }
+  var parsed;
+  try { parsed = JSON.parse(txt); }
+  catch (e) { parsed = { code: -1, message: 'Non-JSON response: ' + txt.slice(0, 200) }; }
+  // The HTTP status rides along, out of sight of anything that compares or
+  // prints the reply: a write that got a 502 or 504 may still have been
+  // applied, and the caller has to be able to tell that from a refusal.
+  if (parsed && typeof parsed === 'object') {
+    try {
+      var status = typeof res.getResponseCode === 'function' ? res.getResponseCode() : 0;
+      Object.defineProperty(parsed, 'httpStatus', { value: status, enumerable: false });
+    } catch (e) { /* a frozen or odd value: without the status, nothing changes */ }
+  }
+  return parsed;
 }
 
 /**

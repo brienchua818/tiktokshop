@@ -197,10 +197,13 @@ function sgtStampFromEpoch_(epochSeconds) {
  * they were read through the documentation site's own JSON API at
  * /api/v1/document/detail?document_id=<id>&workspace_id=3.
  *
- * Four outcomes, because three were not enough to be honest:
+ * Five outcomes, because three were not enough to be honest:
  *
  *   sold    the seller kept the money
  *   unsold  the money did not stick, and TikTok returns the units to stock
+ *   unpaid  placed, and not paid for yet. Not revenue, so the money columns
+ *           count it with unsold exactly as they always have; named apart so
+ *           the listing screen stops calling it cancelled. See emptyTally_.
  *   held    PAID, but the buyer may still cancel unilaterally. Committed
  *           stock, not yet revenue — counting it as either is a lie.
  *   unknown a status this table does not list. Never counted as sold, always
@@ -208,7 +211,9 @@ function sgtStampFromEpoch_(epochSeconds) {
  *           overpayment.
  */
 var LINE_STATUS_MEANING = {
-  UNPAID: 'unsold',
+  // Was 'unsold', so the listing screen showed a basket waiting on payment as
+  // "1 cancelled" while nobody had cancelled anything.
+  UNPAID: 'unpaid',
   CANCELLED: 'unsold',
   CANCEL: 'unsold',
   ON_HOLD: 'held',
@@ -684,6 +689,14 @@ function emptyTally_() {
     sold_units: 0, sold_value: 0,
     /** Cancelled or never paid for. TikTok returns these to stock. */
     cancelled_units: 0, cancelled_value: 0,
+    /**
+     * Of the cancelled units, the ones never paid for. A breakdown, NOT a
+     * bucket: they stay inside cancelled_units, so every subtraction over the
+     * buckets — the export's net sold, the orders screen's — comes out exactly
+     * as it did before UNPAID had a name of its own. Only the listing screen
+     * takes them back out, in salesIndex_.
+     */
+    unpaid_units: 0, unpaid_value: 0,
     /** Bought, then given back. Invisible in any order status — see RETURN_STATUS_MEANING. */
     refunded_units: 0, refunded_value: 0,
     /** A return request is open and undecided. */
@@ -713,7 +726,10 @@ function addLine_(tally, row, refunds) {
   tally.ordered_value += value;
 
   if (meaning === 'sold') { tally.sold_units += qty; tally.sold_value += value; }
-  else if (meaning === 'unsold') { tally.cancelled_units += qty; tally.cancelled_value += value; }
+  else if (meaning === 'unsold' || meaning === 'unpaid') {
+    tally.cancelled_units += qty; tally.cancelled_value += value;
+    if (meaning === 'unpaid') { tally.unpaid_units += qty; tally.unpaid_value += value; }
+  }
   else if (meaning === 'refunded') { tally.refunded_units += qty; tally.refunded_value += value; }
   else if (meaning === 'at_risk') { tally.at_risk_units += qty; tally.at_risk_value += value; }
   else if (meaning === 'held') { tally.held_units += qty; tally.held_value += value; }
@@ -742,7 +758,7 @@ function withLegacyNames_(t) {
 
 /** Round every money figure on a tally, so the aliases cannot drift from it. */
 function roundTally_(t) {
-  ['ordered_value', 'sold_value', 'cancelled_value', 'refunded_value',
+  ['ordered_value', 'sold_value', 'cancelled_value', 'unpaid_value', 'refunded_value',
    'at_risk_value', 'held_value', 'unknown_value'].forEach(function (f) {
     t[f] = Math.round(t[f] * 100) / 100;
   });
@@ -752,7 +768,8 @@ function roundTally_(t) {
 /** Add one tally into another. Used for the per-listing and export totals. */
 function addTally_(into, from) {
   ['ordered_units', 'ordered_value', 'sold_units', 'sold_value',
-   'cancelled_units', 'cancelled_value', 'refunded_units', 'refunded_value',
+   'cancelled_units', 'cancelled_value', 'unpaid_units', 'unpaid_value',
+   'refunded_units', 'refunded_value',
    'at_risk_units', 'at_risk_value', 'held_units', 'held_value',
    'unknown_units', 'unknown_value'].forEach(function (f) {
     into[f] += from[f] || 0;
@@ -801,7 +818,11 @@ function salesIndex_(byVariation) {
     // app listed has a seller_sku; one added in Seller Center has only an id.
     var entry = {
       units: g.units,
-      unsold: g.unsold_units,
+      // Cancelled means cancelled here. The tally keeps unpaid units inside
+      // its cancelled figure for the money (see emptyTally_), and this screen
+      // is the one place that has to tell the two apart.
+      unsold: g.unsold_units - (g.unpaid_units || 0),
+      unpaid: g.unpaid_units || 0,
       held: g.held_units,
       unknown: g.unknown_units,
       refunded: g.refunded_units,
@@ -821,7 +842,7 @@ function salesIndex_(byVariation) {
     if (g.seller_sku) {
       var key = 'sku:' + g.seller_sku;
       if (compact[key] && compact[key].__owner !== g.sku_id) {
-        compact[key] = { units: null, unsold: null, held: null, unknown: null, ambiguous: true };
+        compact[key] = { units: null, unsold: null, unpaid: null, held: null, unknown: null, ambiguous: true };
       } else if (!compact[key]) {
         compact[key] = entry;
         compact[key].__owner = g.sku_id;
@@ -840,19 +861,24 @@ function salesIndex_(byVariation) {
  * refreshes repeatedly during a broadcast and has a 40 second budget, so it
  * cannot pay that price on every tap.
  *
- * Cached for a minute, keyed per listing. During a stream a sold count that is
- * up to sixty seconds old is indistinguishable from a live one: orders arrive
- * minutes after a SKU is called, and nothing anybody does on this screen
- * depends on the difference. A stock write, when that ships, will clear the
- * key rather than wait for it to lapse.
+ * Keyed per listing AND per orders version, like the SKU slices in Sheet.gs.
+ * It was keyed per listing alone with a sixty-second life, so a sync that had
+ * just written a cancellation could sit behind a minute-old answer, and any
+ * refresh more than a minute after the last one re-read the whole Order Items
+ * tab whether or not a single order had changed.
  *
- * Only the two counts are cached, not the rows, so the payload stays far
- * inside the 100 KB per-key limit even for a 200-SKU stream.
+ * Every write to Order Items or Returns bumps the version (`tabChanged_`), so
+ * the entry is unreachable the moment anything it was built from changes, and
+ * can otherwise live for CacheService's six-hour maximum. A quiet minute now
+ * writes nothing, so it bumps nothing, so the screen keeps its cached answer.
+ *
+ * Only the counts are cached, not the rows, so the payload stays far inside
+ * the 100 KB per-key limit even for a 200-SKU stream.
  */
-var SALES_CACHE_TTL_S = 60;
+var SALES_CACHE_TTL_S = 21600;
 
 function variationSalesCached_(listingId, known_) {
-  var key = 'sales:' + String(listingId);
+  var key = 'sales:v' + ordersVersion_() + ':' + String(listingId);
   var cache = null;
   try {
     cache = CacheService.getScriptCache();
@@ -967,9 +993,76 @@ var LAST_SYNCED_PREFIX = 'LAST_SYNCED_';
 var SYNC_BACKFILL_MIN = 60;
 /** How long after a shop's last push its orders are still watched for changes. */
 var SYNC_TAIL_HOURS = 72;
+/** Inside the tail, a shop is synced this often rather than on every firing. */
+var SYNC_TAIL_EVERY_MIN = 10;
+/** After the tail, a shop is still synced for this long, for refunds of older orders... */
+var SYNC_DORMANT_DAYS = 30;
+/** ...this often. */
+var SYNC_DORMANT_EVERY_MIN = 60;
+/** When each shop was last synced, so the slower tiers know when they are due. */
+var LAST_SYNC_RUN_PREFIX = 'LAST_SYNC_RUN_';
 var LAST_RETURNS_PREFIX = 'LAST_RETURNS_';
 /** First returns run looks back this far, so an existing refund is not missed. */
 var SYNC_RETURNS_BACKFILL_H = 720;
+
+/**
+ * How far behind its watermark each sync asks again.
+ *
+ * TikTok does not index a change the instant it stamps it. An order whose
+ * update_time is a few seconds older than the newest one we saw can turn up in
+ * search only after we asked — and a query starting exactly at the watermark
+ * never asks about that second again, so the order is skipped for good.
+ *
+ * Two minutes is a judgement, not a measurement: TS-ORD-25 recorded HOW MANY
+ * orders came back behind the watermark (one, every time) but not by how much.
+ * It is short enough that the orders asked about twice are a handful, which
+ * `dropUnchanged_` then does not write.
+ */
+var SYNC_OVERLAP_S = 120;
+
+/**
+ * How much older than a query's lower bound an order may be before TikTok is
+ * taken to have ignored the filter.
+ *
+ * Any amount was too strict: TS-ORD-25 fired 44 times on 18 days, every time
+ * for a single order, and every time threw the run onto the creation-time
+ * fallback, which cannot see a cancellation. With TikTok's indexing lag, an
+ * order a little behind the lower bound is the normal case, not a fault. An
+ * ignored filter returns the shop's most recent orders whatever they are, and
+ * on a shop that has traded for more than an hour that soon includes one far
+ * older than this.
+ */
+var SYNC_FILTER_TOLERANCE_S = 3600;
+
+/**
+ * When the order pass stops starting new pages.
+ *
+ * Apps Script kills an execution at six minutes. The pass used to read every
+ * page before writing any and then throw TS-ORD-02 at sixty pages, so a
+ * backlog bigger than that was never written and never got smaller. Four
+ * minutes leaves room for the returns pass; what is left over is resumed on
+ * the next firing from the saved page (SYNC_CURSOR_PREFIX).
+ */
+var SYNC_BUDGET_MS = 4 * 60 * 1000;
+
+/**
+ * Orders (and returns) already written whose update_time sits inside the
+ * overlap, by id, so asking about them again does not write them again.
+ *
+ * In Script Properties, not CacheService. It has to outlast the gap between
+ * two runs — an hour, for a shop in the slowest tier — and the cache may drop
+ * an entry before its expiry, which here would mean the boundary order being
+ * rewritten again: the TS-ORD-08-every-minute this exists to stop. It is
+ * read in the same `getProperties()` call as the watermark it belongs to, so
+ * it costs no extra read. The 9 KB per-value cap is the price, and
+ * SYNC_STATE_MAX_CHARS checks it before every write.
+ */
+var SYNC_SEEN_PREFIX = 'SYNC_SEEN_';
+var RETURNS_SEEN_PREFIX = 'RETURNS_SEEN_';
+/** A scan stopped by SYNC_BUDGET_MS, saved so the next run carries on from it. */
+var SYNC_CURSOR_PREFIX = 'SYNC_CURSOR_';
+/** Under Script Properties' 9 KB per-value cap, with headroom. */
+var SYNC_STATE_MAX_CHARS = 8000;
 
 /**
  * Install the timer. Run once, by hand, from the editor.
@@ -1017,64 +1110,110 @@ function removeOrderSync() {
  * need a timezone, a schedule, and remembering to change it — and would miss a
  * daytime stream while burning quota through a quiet evening. A shop that has
  * listed something in the last few hours is a shop taking orders; one that has
- * not is costing nothing.
+ * not costs a call every ten minutes, then every hour, then nothing — see
+ * syncEveryMinutes_.
  *
  * Pure so the rule can be asserted without a Sheet or a clock.
+ *
+ * `lastRun` is when each shop was last synced, so the slower tiers know when
+ * they are due. `backlog` names shops with a scan to finish (SYNC_CURSOR_PREFIX);
+ * those go on every firing whatever their tier, or a shop in the hourly tier
+ * would work through its backlog four minutes an hour.
  */
-function shopsToSync_(lastListed, nowMs, activeHours, tailHours) {
-  var cutoff = nowMs - (activeHours || SYNC_ACTIVE_HOURS) * 3600 * 1000;
-  /**
-   * A long tail, because an order does not stop changing when a stream ends.
-   *
-   * The gate was six hours from the last push, which is right for "is a
-   * broadcast running". It is wrong for cancellations and refunds, which
-   * arrive the next morning — and exports read the Sheet, not TikTok, so a
-   * purchase order built before somebody remembered to press Sync counts
-   * cancelled units as sold. That is the failure this whole sync exists to
-   * prevent, arriving through the back door.
-   *
-   * So a shop stays in the sync for a good while after it last listed. The
-   * cost of a firing with nothing to report is one TikTok call that answers
-   * empty, which is the point of asking by change rather than by window.
-   */
-  var tail = nowMs - (tailHours || SYNC_TAIL_HOURS) * 3600 * 1000;
+function shopsToSync_(lastListed, nowMs, lastRun, backlog) {
+  var ran = lastRun && typeof lastRun === 'object' ? lastRun : {};
+  var owed = backlog && typeof backlog === 'object' ? backlog : {};
+  var ids = {};
+  Object.keys(lastListed || {}).concat(Object.keys(owed)).forEach(function (id) { ids[id] = true; });
+
   var out = [];
-  Object.keys(lastListed || {}).forEach(function (shopId) {
+  Object.keys(ids).forEach(function (shopId) {
     if (!shopId) return;
-    var at = Number(lastListed[shopId] || 0);
-    if (at && at >= Math.min(cutoff, tail)) out.push(shopId);
+    if (owed[shopId]) { out.push(shopId); return; }
+    var at = Number((lastListed || {})[shopId] || 0);
+    if (!at) return;
+    var every = syncEveryMinutes_(nowMs - at);
+    if (!every) return;
+    var last = Number(ran[shopId] || 0);
+    // Thirty seconds of slack, because the timer does not fire on the second:
+    // a shop last synced at 10:00:05 is due at the firing near 10:10, not the
+    // one near 10:11.
+    if (every > 1 && last && last <= nowMs && nowMs - last < every * 60000 - 30000) return;
+    out.push(shopId);
   });
   return out.sort();
 }
 
 /**
- * When each shop last listed something, from Script Properties.
+ * How often a shop is synced, from how long ago it was last active. 0 is never.
+ *
+ * A long tail, because an order does not stop changing when a stream ends.
+ * Cancellations arrive the next morning and refunds for weeks — and exports
+ * read the Sheet, not TikTok, so a purchase order built before somebody
+ * remembered to press Sync counts those units as sold. That is the failure
+ * this whole sync exists to prevent, arriving through the back door.
+ *
+ * It was one gate: every minute for 72 hours after a push, then never. That
+ * was too often for the morning after, when nobody is watching a counter
+ * tick, and too short for a refund on day four, which was never read at all.
+ * So the cadence falls away with the activity instead:
+ *
+ *   within  6 h   every firing    a broadcast is on; sold is on screen
+ *   within 72 h   every 10 min    cancellations and the morning after
+ *   within 30 d   every 60 min    returns and refunds of older orders
+ *   after that    not at all
+ */
+function syncEveryMinutes_(sinceActivityMs) {
+  var hours = sinceActivityMs / 3600000;
+  if (hours <= SYNC_ACTIVE_HOURS) return SYNC_EVERY_MINUTES;
+  if (hours <= SYNC_TAIL_HOURS) return SYNC_TAIL_EVERY_MIN;
+  if (hours <= SYNC_DORMANT_DAYS * 24) return SYNC_DORMANT_EVERY_MIN;
+  return 0;
+}
+
+/**
+ * When each shop was last active, from Script Properties.
  *
  * Deliberately NOT from the SKUs tab. The gate runs on every firing of the
- * timer — seven hundred times a day — and reading a whole tab to decide
+ * timer — fourteen hundred times a day — and reading a whole tab to decide
  * whether to do nothing is more expensive than the work it is avoiding.
- * `noteListed_` writes one property on each push instead; reading three of
- * them is free.
+ * `noteShopActivity_` writes one property instead; reading three of them is
+ * free. Takes the run's own `getProperties()` snapshot when it has one, so
+ * the gate and the sync behind it share one read.
  */
-function lastListedAt_() {
-  var props = PropertiesService.getScriptProperties().getProperties();
+function lastListedAt_(snapshot_) {
+  var raw = shopProps_(snapshot_ || PropertiesService.getScriptProperties().getProperties(),
+                       LAST_LISTED_PREFIX);
+  var out = {};
+  Object.keys(raw).forEach(function (id) { out[id] = Number(raw[id]); });
+  return out;
+}
+
+/** One value per shop under a prefix, from a properties snapshot. */
+function shopProps_(snapshot, prefix) {
   var out = {};
   SHOPS.forEach(function (shop) {
-    var raw = props[LAST_LISTED_PREFIX + shop.id];
-    if (raw) out[shop.id] = Number(raw);
+    var raw = (snapshot || {})[prefix + shop.id];
+    if (raw) out[shop.id] = raw;
   });
   return out;
 }
 
-/** Stamped on every successful push, so the gate above costs one property read. */
-function noteListed_(shopId) {
+/**
+ * Mark a shop as trading, so the background sync watches its orders closely.
+ *
+ * Stamped on every successful push (`recordSku_`), and meant for any other
+ * write that says a shop is mid-broadcast. One property write, so the gate
+ * above costs one property read.
+ */
+function noteShopActivity_(shopId) {
   try {
     PropertiesService.getScriptProperties()
       .setProperty(LAST_LISTED_PREFIX + String(shopId), String(Date.now()));
   } catch (e) {
-    // The gate degrades to "do not sync", which is visible as a stale sold
+    // The gate degrades to a slower tier, which is visible as a stale sold
     // count rather than as damage. Never worth failing a push over.
-    console.error('could not stamp last listed: ' + e);
+    console.error('could not stamp shop activity: ' + e);
   }
 }
 
@@ -1096,13 +1235,19 @@ function noteListed_(shopId) {
  * The watermark is the newest change actually SEEN, not "now". A clock-based
  * one skips anything that changed during the call itself; this one cannot,
  * and the worst it does is re-fetch a handful next time.
+ *
+ * `sinceEpoch` is the query's lower bound. An order behind it is only proof
+ * the filter was ignored once it is more than `toleranceS` behind — see
+ * SYNC_FILTER_TOLERANCE_S for why any amount at all was a false alarm.
  */
-function changedSince_(orders, sinceEpoch) {
+function changedSince_(orders, sinceEpoch, toleranceS) {
+  var slack = toleranceS === undefined || toleranceS === null
+    ? SYNC_FILTER_TOLERANCE_S : Number(toleranceS);
   var stale = [];
   var newest = sinceEpoch;
   (orders || []).forEach(function (o) {
     var at = Number(o.update_time || o.create_time || 0);
-    if (at && at < sinceEpoch) stale.push(o);
+    if (at && at < sinceEpoch - slack) stale.push(o);
     if (at > newest) newest = at;
   });
   return {
@@ -1111,6 +1256,212 @@ function changedSince_(orders, sinceEpoch) {
     watermark: newest,
     count: (orders || []).length
   };
+}
+
+/** When an order or a return last changed, by TikTok's clock. 0 when it does not say. */
+function changedAt_(x) {
+  return Number((x && (x.update_time || x.create_time)) || 0);
+}
+
+/**
+ * What came back, minus what we already wrote at exactly that update_time.
+ *
+ * Pure. The query asks again about the last two minutes on purpose (see
+ * SYNC_OVERLAP_S), and even without the overlap its lower bound is inclusive,
+ * so the newest order came back on every run until a newer one arrived. Each
+ * time it was written again — the lock, the Sheet, and resolveSellerSkus_,
+ * which logged TS-ORD-08 for its one unresolvable line 3,747 times, once a
+ * minute. An order whose update_time has not moved has not changed, so it is
+ * dropped here; one with no time at all is always written, as before.
+ */
+function dropUnchanged_(items, seen, idField) {
+  var memo = seen || {};
+  return (items || []).filter(function (x) {
+    var at = changedAt_(x);
+    return !(at && memo[String(x[idField] || '')] === at);
+  });
+}
+
+/**
+ * The memo after a page: everything on it, plus what was already remembered at
+ * or after `floorEpoch`.
+ *
+ * Pure. The page's own entries are kept whatever their age, because they are
+ * what TikTok answered last and so what it may answer again; older ones fall
+ * away once the watermark has left them more than the overlap behind, so the
+ * memo stays the size of one answer rather than of the order history.
+ */
+function rememberSeen_(seen, items, idField, floorEpoch) {
+  var out = {};
+  Object.keys(seen || {}).forEach(function (id) {
+    if (Number(seen[id]) >= floorEpoch) out[id] = Number(seen[id]);
+  });
+  (items || []).forEach(function (x) {
+    var id = String(x[idField] || '');
+    var at = changedAt_(x);
+    if (id && at) out[id] = at;
+  });
+  return out;
+}
+
+/**
+ * The memo as stored: newest first, cut to fit a Script Property.
+ *
+ * Measured here rather than discovered at setProperty, which refuses a value
+ * over 9 KB with an exception and leaves the old memo in place. Sorted so the
+ * same memo always serialises to the same text: the caller writes only when
+ * the text changed, and an unchanged run must write nothing. What is dropped
+ * is the OLDEST entries, which are the least likely to be asked about again;
+ * dropping one costs at most one rewrite of that order.
+ */
+function seenText_(seen, maxChars) {
+  var ids = Object.keys(seen || {}).sort(function (a, b) {
+    return (seen[b] - seen[a]) || (a < b ? -1 : a > b ? 1 : 0);
+  });
+  var parts = [];
+  var length = 2;
+  var dropped = 0;
+  ids.forEach(function (id) {
+    var part = JSON.stringify(id) + ':' + Number(seen[id]);
+    if (length + part.length + 1 > maxChars) { dropped++; return; }
+    parts.push(part);
+    length += part.length + 1;
+  });
+  return { text: '{' + parts.join(',') + '}', dropped: dropped };
+}
+
+/** A JSON property, or null when it is missing or not JSON. Never throws. */
+function syncState_(raw) {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (e) { return null; }
+}
+
+/**
+ * One shop's changed orders, written a page at a time.
+ *
+ * Every page is written as soon as it arrives, and what was covered is saved
+ * before the next is asked for, so a run that stops — at SYNC_BUDGET_MS, at a
+ * BUSY lock, or killed at six minutes — has kept everything up to its last
+ * page, and the next run carries on from there instead of starting again.
+ * It used to read every page, then write them all, then throw TS-ORD-02 at
+ * sixty, which left a backlog bigger than that unwritten for ever.
+ *
+ * The watermark itself moves only when the scan reaches its last page. TikTok
+ * returns this search newest-CREATED first unless told otherwise, and whether
+ * it honours `sort_field=update_time` could not be confirmed (see LIMITS.md).
+ * Without that, the newest change on page one says nothing about page two,
+ * and moving the watermark to it would skip everything still unread. So an
+ * unfinished scan saves its page token instead (SYNC_CURSOR_PREFIX), with the
+ * exact bounds it was issued for, and the next run resumes that same query.
+ *
+ * Returns { fallback: true } when TikTok was found ignoring the filter, and
+ * { pending: true } when the budget stopped it with pages still to read.
+ */
+function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
+  var props = PropertiesService.getScriptProperties();
+  var markKey = LAST_SYNCED_PREFIX + shopId;
+  var seenKey = SYNC_SEEN_PREFIX + shopId;
+  var cursorKey = SYNC_CURSOR_PREFIX + shopId;
+
+  var watermark = Number(snapshot[markKey] || 0) || (nowEpoch - SYNC_BACKFILL_MIN * 60);
+  var seen = syncState_(snapshot[seenKey]) || {};
+  var seenSaved = String(snapshot[seenKey] || '');
+  var cursor = syncState_(snapshot[cursorKey]);
+  var cursorSaved = Boolean(snapshot[cursorKey]);
+  var trimmed = false;
+
+  /**
+   * From two minutes behind the watermark, not from it. See SYNC_OVERLAP_S:
+   * an order TikTok indexed after we last asked would otherwise sit behind
+   * the query for good. What that asks about twice, dropUnchanged_ discards.
+   */
+  var fresh = function () {
+    return { ge: Math.max(0, watermark - SYNC_OVERLAP_S), lt: nowEpoch + 1, token: '', newest: watermark };
+  };
+  var scan = cursor && cursor.token && Number(cursor.lt) > Number(cursor.ge)
+    ? { ge: Number(cursor.ge), lt: Number(cursor.lt), token: String(cursor.token),
+        newest: Math.max(watermark, Number(cursor.newest) || 0) }
+    : fresh();
+  var resuming = Boolean(scan.token);
+
+  while (true) {
+    var page;
+    try {
+      page = ttSearchOrders_(shopId, scan.ge, scan.lt, scan.token, true);
+    } catch (e) {
+      if (!resuming) throw e;
+      /**
+       * A saved page TikTok will not continue from.
+       *
+       * How long a page token stays good is not documented anywhere we have
+       * found. One that has lapsed costs a re-read from the watermark, which
+       * is what every run did before tokens were saved — never a gap.
+       */
+      warn_('TS-ORD-35', shopId + ': could not resume the saved order scan, so it starts ' +
+        'again from the watermark. Reason: ' + (e && e.message ? e.message : e), shopId);
+      props.deleteProperty(cursorKey);
+      cursorSaved = false;
+      scan = fresh();
+      resuming = false;
+      continue;
+    }
+    resuming = false;
+
+    var check = changedSince_(page.orders, scan.ge);
+    if (!check.applied) {
+      // A scan built on an ignored filter is not worth resuming.
+      if (cursorSaved) props.deleteProperty(cursorKey);
+      return { fallback: true, stale: check.stale };
+    }
+
+    // Nothing changed: no Sheet is opened, nothing is written, and no lock is
+    // taken. Which is the whole point of the question being "what changed"
+    // rather than "what exists".
+    var changed = dropUnchanged_(page.orders, seen, 'id');
+    if (changed.length) writeOrders_(shopId, changed, 'background sync');
+
+    if (check.watermark > scan.newest) scan.newest = check.watermark;
+    seen = rememberSeen_(seen, page.orders, 'id', Math.max(watermark, scan.newest) - SYNC_OVERLAP_S);
+    var stored = seenText_(seen, SYNC_STATE_MAX_CHARS);
+    if (stored.dropped && !trimmed) {
+      trimmed = true;
+      warn_('TS-ORD-36', shopId + ': ' + stored.dropped + ' order(s) left out of the sync memo, ' +
+        'which is capped at ' + SYNC_STATE_MAX_CHARS + ' characters. They may be written once more.', shopId);
+    }
+    if (stored.text !== seenSaved) {
+      props.setProperty(seenKey, stored.text);
+      seenSaved = stored.text;
+    }
+
+    if (!page.nextPageToken) break;
+    scan.token = page.nextPageToken;
+
+    var text = JSON.stringify(scan);
+    if (text.length <= SYNC_STATE_MAX_CHARS) {
+      props.setProperty(cursorKey, text);
+      cursorSaved = true;
+    } else {
+      // Not resumable, so the next run starts this scan again. Slower, never a gap.
+      warn_('TS-ORD-37', shopId + ': the order scan\'s page token is ' + text.length +
+        ' characters, too long to save; the next run starts the scan again.', shopId);
+      if (cursorSaved) props.deleteProperty(cursorKey);
+      cursorSaved = false;
+    }
+
+    if (Date.now() >= deadlineMs) {
+      var next = cursorSaved ? 'carries on from the same page' : 'starts the scan again';
+      warn_('TS-ORD-34', shopId + ': more orders changed than one run can read. Stopped at ' +
+        Math.round(SYNC_BUDGET_MS / 60000) + ' minutes with everything read so far written; ' +
+        'the next run ' + next + '.', shopId);
+      return { pending: true };
+    }
+  }
+
+  // The last page: everything changed since the watermark has been read and
+  // written, so — and only now — the watermark moves.
+  if (scan.newest > watermark) props.setProperty(markKey, String(scan.newest));
+  if (cursorSaved) props.deleteProperty(cursorKey);
+  return {};
 }
 
 /**
@@ -1130,12 +1481,16 @@ function syncRecentOrders() {
    *
    * A cache entry rather than a property: it expires by itself, so a run
    * killed by the six-minute limit cannot leave the sync switched off for ever.
+   * It lives for those six minutes, not five: a run that works through a
+   * backlog now uses SYNC_BUDGET_MS and the returns pass after it on purpose,
+   * and a guard that lapsed first would let a second run resume the same
+   * saved page alongside it.
    */
   var guard = null;
   try {
     guard = CacheService.getScriptCache();
     if (guard && guard.get('sync_running')) return;
-    if (guard) guard.put('sync_running', '1', 300);
+    if (guard) guard.put('sync_running', '1', 360);
   } catch (e) {
     // No cache is not a reason to skip the sync, only to lose the guard.
     guard = null;
@@ -1149,25 +1504,32 @@ function syncRecentOrders() {
 }
 
 function syncRecentOrdersOnce_() {
+  var startedMs = Date.now();
+  var snapshot;
   var shops;
   try {
-    shops = shopsToSync_(lastListedAt_(), Date.now(), SYNC_ACTIVE_HOURS);
+    // One read for the whole run: the gate, every watermark, every memo.
+    snapshot = PropertiesService.getScriptProperties().getProperties();
+    shops = shopsToSync_(lastListedAt_(snapshot), startedMs,
+                         shopProps_(snapshot, LAST_SYNC_RUN_PREFIX),
+                         shopProps_(snapshot, SYNC_CURSOR_PREFIX));
   } catch (e) {
     warn_('TS-ORD-23', 'Background sync could not read its activity marks: ' + e);
     return;
   }
-  // The common case, and it must cost almost nothing: three property reads and
-  // a return. Every two minutes, all day, every day.
+  // The common case, and it must cost almost nothing: one property read and
+  // a return. Every minute, all day, every day.
   if (!shops.length) return;
 
   var props = PropertiesService.getScriptProperties();
-  var nowEpoch = Math.floor(Date.now() / 1000);
+  var nowEpoch = Math.floor(startedMs / 1000);
+  var deadlineMs = startedMs + SYNC_BUDGET_MS;
 
   shops.forEach(function (shopId) {
     try {
-      var markKey = LAST_SYNCED_PREFIX + shopId;
-      var since = Number(props.getProperty(markKey) || 0) ||
-        (nowEpoch - SYNC_BACKFILL_MIN * 60);
+      // Stamped before the work, so a shop whose sync keeps failing is still
+      // retried at its tier's pace rather than on every firing.
+      props.setProperty(LAST_SYNC_RUN_PREFIX + shopId, String(Date.now()));
 
       /**
        * Ask only for what has changed. Usually nothing.
@@ -1180,32 +1542,26 @@ function syncRecentOrdersOnce_() {
        * a cancellation, because cancelling does not change when an order was
        * created.
        */
-      var orders = ttAllOrders_(shopId, since, nowEpoch + 1, true);
-      var check = changedSince_(orders, since);
+      var orders = syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs);
 
-      if (!check.applied) {
+      if (orders.fallback) {
         /**
          * The filter was ignored, so what came back is not what was asked
-         * for. Nothing is written from it, and this shop falls back to the
-         * creation-time window for this run — correct, just more expensive.
+         * for. The watermark does not move on it, and this shop falls back to
+         * the creation-time window for this run — correct, just more
+         * expensive. The returns pass below still runs: it is a different
+         * endpoint with its own filter, and skipping it here left refunds
+         * unread on exactly the runs that were already going wrong.
          */
-        warn_('TS-ORD-25', shopId + ': update_time filter not applied (' + check.stale +
-          ' order(s) older than the watermark). Falling back to creation time.');
+        warn_('TS-ORD-25', shopId + ': update_time filter not applied (' + orders.stale +
+          ' order(s) more than ' + SYNC_FILTER_TOLERANCE_S + 's older than the query\'s lower ' +
+          'bound). Falling back to creation time.');
         var from = new Date((nowEpoch - SYNC_WINDOW_MIN * 60) * 1000);
         var to = new Date(nowEpoch * 1000);
         var d = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'yyyy-MM-dd'); };
         var t = function (x) { return Utilities.formatDate(x, 'Asia/Singapore', 'HH:mm'); };
         syncOrders_(shopId, d(from), d(from) === d(to) ? t(from) : '00:00', d(to), t(to),
                     'background sync');
-        return;
-      }
-
-      // Nothing changed. No Sheet is opened, nothing is written, and the
-      // watermark does not move — which is the whole point of the question
-      // being "what changed" rather than "what exists".
-      if (check.count) {
-        writeOrders_(shopId, orders, 'background sync');
-        props.setProperty(markKey, String(check.watermark));
       }
 
       /**
@@ -1220,9 +1576,15 @@ function syncRecentOrdersOnce_() {
        */
       try {
         var returnsKey = LAST_RETURNS_PREFIX + shopId;
-        var returnsSince = Number(props.getProperty(returnsKey) || 0) ||
-          (nowEpoch - SYNC_RETURNS_BACKFILL_H * 3600);
-        var ret = syncReturns_(shopId, returnsSince, 'background sync');
+        var returnsSeenKey = RETURNS_SEEN_PREFIX + shopId;
+        var returnsMark = Number(snapshot[returnsKey] || 0);
+        // The same overlap as the orders pass, for the same reason: a return
+        // indexed late must not fall behind a query that has moved past it.
+        var returnsSince = returnsMark
+          ? returnsMark - SYNC_OVERLAP_S
+          : nowEpoch - SYNC_RETURNS_BACKFILL_H * 3600;
+        var returnsSeen = syncState_(snapshot[returnsSeenKey]) || {};
+        var ret = syncReturns_(shopId, returnsSince, 'background sync', returnsSeen);
         /**
          * The watermark only moves over ground actually covered.
          *
@@ -1235,8 +1597,31 @@ function syncRecentOrdersOnce_() {
          * Leaving it put means the next run re-reads the same window. If the
          * backlog is genuinely that large it stays put and keeps warning,
          * which is visible; advancing loses the refunds silently, which is not.
+         *
+         * And it moves to the newest change SEEN, not to the clock. This query
+         * has no upper bound, so any return TikTok had indexed with a later
+         * stamp than that one was in the answer, and anything that changes
+         * afterwards is stamped later still. The filter compares TikTok's
+         * clock, not ours, and ours can disagree with it; the stamp on a
+         * return we have already read cannot. The price is the boundary
+         * return coming back on every run, which the memo turns into nothing
+         * written.
          */
-        if (!ret.truncated) props.setProperty(returnsKey, String(nowEpoch));
+        if (!ret.truncated) {
+          var nextMark = Math.max(returnsMark, ret.newest);
+          if (nextMark > returnsMark) props.setProperty(returnsKey, String(nextMark));
+          var keptReturns = seenText_(
+            rememberSeen_(returnsSeen, ret.read, 'return_id', nextMark - SYNC_OVERLAP_S),
+            SYNC_STATE_MAX_CHARS);
+          if (keptReturns.dropped) {
+            warn_('TS-ORD-38', shopId + ': ' + keptReturns.dropped + ' return(s) left out of the ' +
+              'returns memo, which is capped at ' + SYNC_STATE_MAX_CHARS + ' characters. ' +
+              'They may be written once more.', shopId);
+          }
+          if (keptReturns.text !== String(snapshot[returnsSeenKey] || '')) {
+            props.setProperty(returnsSeenKey, keptReturns.text);
+          }
+        }
       } catch (e) {
         warn_('TS-ORD-30', shopId + ': returns sync failed (orders are unaffected): ' + e);
       }
@@ -1462,8 +1847,14 @@ function refundIndex_(returnRows) {
   return out;
 }
 
-/** Pull returns changed since the watermark into the Returns tab. */
-function syncReturns_(shopId, sinceEpoch, actor) {
+/**
+ * Pull returns changed since the watermark into the Returns tab.
+ *
+ * `seen_` is the memo of returns already written (see dropUnchanged_): one
+ * whose update_time has not moved is read and not written. Returns what was
+ * read and the newest change in it, for the caller's watermark and memo.
+ */
+function syncReturns_(shopId, sinceEpoch, actor, seen_) {
   var all = [];
   var token = '';
   var pages = 0;
@@ -1482,14 +1873,17 @@ function syncReturns_(shopId, sinceEpoch, actor) {
     }
   } while (token);
 
-  var rows = returnRows_(shopId, all, new Date().toISOString());
+  var newest = 0;
+  all.forEach(function (ret) { newest = Math.max(newest, changedAt_(ret)); });
+
+  var rows = returnRows_(shopId, dropUnchanged_(all, seen_, 'return_id'), new Date().toISOString());
   if (rows.length) {
     withScriptLock_(30000, function () {
       replaceByKey_(TAB_RETURNS, 'return_line_item_id', rows);
     });
     logEvent_(actor, 'sync_returns', shopId, rows.length + ' return line(s)', 'ok');
   }
-  return { returns: all.length, lines: rows.length, truncated: truncated };
+  return { returns: all.length, lines: rows.length, truncated: truncated, newest: newest, read: all };
 }
 
 // ── reconciliation ────────────────────────────────────────────────────

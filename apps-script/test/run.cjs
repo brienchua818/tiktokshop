@@ -39,7 +39,12 @@ const sandbox = `
     return {
       getProperty: function (k) { return AUTH_STATE.props[k] },
       setProperty: function (k, v) { AUTH_STATE.props[k] = v },
-      setProperties: function () {}
+      setProperties: function () {},
+      // A copy, as the real one is: a snapshot does not follow later writes,
+      // which is exactly what the background sync relies on and must be
+      // tested against.
+      getProperties: function () { return Object.assign({}, AUTH_STATE.props) },
+      deleteProperty: function (k) { delete AUTH_STATE.props[k] }
     }
   } };
   var Utilities = {
@@ -71,6 +76,8 @@ const sandbox = `
       if (pattern === 'yyyy-MM-dd') return y + '-' + mo + '-' + d
       if (pattern === 'yyyy-MM-dd HHmm') return y + '-' + mo + '-' + d + ' ' + h + mi
       if (pattern === 'yyyy-MM-dd HH:mm') return y + '-' + mo + '-' + d + ' ' + h + ':' + mi
+      // The background sync's creation-time fallback builds its window with it.
+      if (pattern === 'HH:mm') return h + ':' + mi
       // The Log tab's timestamp. Missing, it made logEvent_ throw before it
       // reached its write in EVERY test — so nothing on that path was tested.
       if (pattern === 'yyyy-MM-dd HH:mm:ss') {
@@ -168,10 +175,32 @@ ${src}
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_, isoOf_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
+    lastListedAt_, recordSku_, syncRecentOrders, syncRecentOrdersOnce_,
+    variationSalesCached_, SALES_CACHE_TTL_S,
+    // Guarded like ttFetchAll_ below, so the suite still LOADS against the
+    // code before the sync rework and each test that needs these fails on its
+    // own \u2014 which is how every one of them was seen to go red first.
+    syncEveryMinutes_: typeof syncEveryMinutes_ === 'function' ? syncEveryMinutes_ : undefined,
+    noteShopActivity_: typeof noteShopActivity_ === 'function' ? noteShopActivity_ : undefined,
+    dropUnchanged_: typeof dropUnchanged_ === 'function' ? dropUnchanged_ : undefined,
+    rememberSeen_: typeof rememberSeen_ === 'function' ? rememberSeen_ : undefined,
+    seenText_: typeof seenText_ === 'function' ? seenText_ : undefined,
+    SYNC_OVERLAP_S: typeof SYNC_OVERLAP_S === 'number' ? SYNC_OVERLAP_S : undefined,
+    SYNC_FILTER_TOLERANCE_S: typeof SYNC_FILTER_TOLERANCE_S === 'number' ? SYNC_FILTER_TOLERANCE_S : undefined,
+    SYNC_BUDGET_MS: typeof SYNC_BUDGET_MS === 'number' ? SYNC_BUDGET_MS : undefined,
+    SYNC_STATE_MAX_CHARS: typeof SYNC_STATE_MAX_CHARS === 'number' ? SYNC_STATE_MAX_CHARS : undefined,
+    // The real column lists, captured before any test narrows one with
+    // __setHeaders, so a test that needs the true shape of a tab can have it.
+    __realHeaders: JSON.parse(JSON.stringify(HEADERS)),
+    __headers: function (name) { return HEADERS[name] },
     strippedVariantName_, REMOVED_RECENT, ordersMissingFromTikTok_,
     // Lets a test swap the Sheets layer for a counter, so "how many times did
     // this read the tab" is an assertion rather than a belief.
     __setSheetImpl: function (fn) { sheet_ = fn },
+    // So a test can put back whatever the tests before it left in place,
+    // rather than the real Sheets layer the ones after it may not expect.
+    __getSheetImpl: function () { return sheet_ },
+    __getUrlFetch: function () { return UrlFetchApp },
     __setHeaders: function (name, cols) { HEADERS[name] = cols },
     // Drive swapped for a counter, so "how many Drive calls does a push make"
     // is an assertion too.
@@ -2111,40 +2140,133 @@ const HOURS = 3600 * 1000
 const NOW = Date.parse('2026-09-15T14:00:00.000Z')
 
 check('syncs a shop that has listed recently', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS }, NOW, 6, 72), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS }, NOW), ['HZ'])
 })
 
 check('keeps watching a shop the morning after a stream', () => {
   // The hole this closes: cancellations and refunds arrive AFTER a broadcast,
   // and an export built before somebody presses Sync counts them as sold.
-  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, 6, 72), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW), ['HZ'])
 })
 
-check('lets a shop go once even the tail has passed', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 100 * HOURS }, NOW, 6, 72), [])
+check('lets a shop go once a month has passed with no activity', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 31 * 24 * HOURS }, NOW), [])
 })
 
-check('syncs every shop still inside the tail, and only those', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS, PM: NOW - 2 * HOURS, TM: NOW - 300 * HOURS }, NOW, 6, 72),
+check('syncs every shop still inside the month, and only those', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 1 * HOURS, PM: NOW - 2 * HOURS, TM: NOW - 800 * HOURS }, NOW),
      ['HZ', 'PM'])
 })
 
 check('a shop that has never listed is not synced', () => {
-  eq(gs.shopsToSync_({ HZ: 0 }, NOW, 6, 72), [])
-  eq(gs.shopsToSync_({ '': NOW }, NOW, 6, 72), [])
+  eq(gs.shopsToSync_({ HZ: 0 }, NOW), [])
+  eq(gs.shopsToSync_({ '': NOW }, NOW), [])
 })
 
 check('nothing at all is an empty list, not a crash', () => {
-  // This runs seven hundred times a day inside a timer, and Apps Script
+  // This runs fourteen hundred times a day inside a timer, and Apps Script
   // disables a trigger that keeps throwing \u2014 a sync that silently stopped
   // weeks ago is the worst version of this feature.
-  eq(gs.shopsToSync_({}, NOW, 6, 72), [])
-  eq(gs.shopsToSync_(null, NOW, 6, 72), [])
+  eq(gs.shopsToSync_({}, NOW), [])
+  eq(gs.shopsToSync_(null, NOW), [])
+  eq(gs.shopsToSync_(null, NOW, null, null), [])
 })
 
-check('the boundary is inclusive, so a shop on the edge still syncs', () => {
-  eq(gs.shopsToSync_({ HZ: NOW - 72 * HOURS }, NOW, 6, 72), ['HZ'])
-  eq(gs.shopsToSync_({ HZ: NOW - 72 * HOURS - 1 }, NOW, 6, 72), [])
+check('the boundary is inclusive, so a shop on the edge of the month still syncs', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 30 * 24 * HOURS }, NOW), ['HZ'])
+  eq(gs.shopsToSync_({ HZ: NOW - 30 * 24 * HOURS - 1 }, NOW), [])
+})
+
+console.log('\nhow often, by how long since the shop was active')
+
+/**
+ * One gate used to decide everything: every minute for 72 hours after a push,
+ * then never. Too often for the morning after, when nobody is watching a
+ * counter tick, and too short for a refund on day four, which was never read.
+ * The cadence now falls away with the activity instead.
+ */
+const MIN = 60 * 1000
+
+check('the cadence falls away in three steps, then stops', () => {
+  eq(gs.syncEveryMinutes_(1 * HOURS), 1)
+  eq(gs.syncEveryMinutes_(6 * HOURS), 1)
+  eq(gs.syncEveryMinutes_(6 * HOURS + 1), 10)
+  eq(gs.syncEveryMinutes_(72 * HOURS), 10)
+  eq(gs.syncEveryMinutes_(72 * HOURS + 1), 60)
+  eq(gs.syncEveryMinutes_(30 * 24 * HOURS), 60)
+  eq(gs.syncEveryMinutes_(30 * 24 * HOURS + 1), 0)
+})
+
+check('during a stream, every firing, however recently it last ran', () => {
+  eq(gs.shopsToSync_({ HZ: NOW - 2 * HOURS }, NOW, { HZ: NOW - 30 * 1000 }), ['HZ'])
+})
+
+check('the morning after, every ten minutes rather than every minute', () => {
+  const active = { HZ: NOW - 20 * HOURS }
+  eq(gs.shopsToSync_(active, NOW, { HZ: NOW - 3 * MIN }), [], 'ran three minutes ago')
+  eq(gs.shopsToSync_(active, NOW, { HZ: NOW - 10 * MIN }), ['HZ'], 'ran ten minutes ago')
+})
+
+check('a firing a few seconds early still counts as on time', () => {
+  // The timer does not fire on the second. Without slack a shop last run at
+  // 10:00:05 waits for the firing near 10:11, not the one near 10:10.
+  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, { HZ: NOW - 9 * MIN - 40 * 1000 }), ['HZ'])
+})
+
+check('days later, refunds are still read, hourly', () => {
+  const active = { HZ: NOW - 300 * HOURS }
+  eq(gs.shopsToSync_(active, NOW, { HZ: NOW - 20 * MIN }), [], 'ran twenty minutes ago')
+  eq(gs.shopsToSync_(active, NOW, { HZ: NOW - 60 * MIN }), ['HZ'], 'ran an hour ago')
+  eq(gs.shopsToSync_(active, NOW), ['HZ'], 'never ran')
+})
+
+check('a shop with a scan to finish goes on every firing, whatever its tier', () => {
+  // Otherwise a backlog in the hourly tier drains four minutes an hour.
+  eq(gs.shopsToSync_({ HZ: NOW - 300 * HOURS }, NOW, { HZ: NOW - 1 * MIN }, { HZ: '{"token":"t"}' }),
+     ['HZ'])
+})
+
+check('a last-run stamp from the future does not park a shop', () => {
+  // A clock that jumped back must not read as "ran a moment ago" for an hour.
+  eq(gs.shopsToSync_({ HZ: NOW - 20 * HOURS }, NOW, { HZ: NOW + 2 * HOURS }), ['HZ'])
+})
+
+check('noteShopActivity_ stamps the mark the gate reads', () => {
+  // The helper every write that says "this shop is trading" is to call.
+  const realNow = Date.now
+  const realProps = authState.props
+  authState.props = {}
+  Date.now = () => NOW
+  try {
+    gs.noteShopActivity_('HZ')
+    eq(authState.props.LAST_LISTED_HZ, String(NOW))
+    eq(gs.lastListedAt_(), { HZ: NOW })
+    eq(gs.shopsToSync_(gs.lastListedAt_(), NOW + 5 * MIN), ['HZ'])
+  } finally {
+    Date.now = realNow
+    authState.props = realProps
+  }
+})
+
+check('a push still stamps it, through the same helper', () => {
+  const realNow = Date.now
+  const realProps = authState.props
+  const realSheet = gs.__getSheetImpl()
+  authState.props = {}
+  Date.now = () => NOW
+  gs.__setSheetImpl(() => ({
+    getLastRow: () => 1,
+    getRange: () => ({ setValues() { return this } }),
+  }))
+  try {
+    gs.recordSku_({ sku_id: 'x1', shop_id: 'PM', identifier: 'A1' })
+    eq(authState.props.LAST_LISTED_PM, String(NOW))
+  } finally {
+    Date.now = realNow
+    authState.props = realProps
+    gs.__setSheetImpl(realSheet)
+    gs.invalidateRead_()
+  }
 })
 
 console.log('\nsyncing touches only what changed')
@@ -2354,6 +2476,503 @@ check('an order exactly on the watermark is not stale', () => {
   eq(gs.changedSince_([{ id: 'a', update_time: SINCE }], SINCE).applied, true)
 })
 
+check('an order a little behind the lower bound is index lag, not an ignored filter', () => {
+  // TS-ORD-25 fired 44 times on 18 days, every time for ONE order behind the
+  // watermark, and every time dropped the run onto the creation-time
+  // fallback, which cannot see a cancellation.
+  const r = gs.changedSince_([
+    { id: 'late', update_time: SINCE - 600 },
+    { id: 'a', update_time: SINCE + 5 },
+  ], SINCE)
+  eq(r.applied, true)
+  eq(r.watermark, SINCE + 5)
+})
+
+check('an hour behind is the line, and the far side of it is still the real fault', () => {
+  // A literal, not the constant, so this states the rule rather than echoing
+  // whatever the code currently says.
+  const HOUR = 3600
+  eq(gs.changedSince_([{ id: 'a', update_time: SINCE - HOUR }], SINCE).applied, true)
+  eq(gs.changedSince_([{ id: 'a', update_time: SINCE - HOUR - 1 }], SINCE).applied, false)
+  eq(gs.SYNC_FILTER_TOLERANCE_S, HOUR)
+})
+
+console.log('\nan order is written when it changes, not when it is asked about')
+
+/**
+ * The query's lower bound is inclusive and now reaches two minutes behind the
+ * watermark on purpose, so the same few orders come back on every run. Each
+ * used to be written again: the lock, the Sheet, and resolveSellerSkus_ \u2014
+ * which logged TS-ORD-08 for one unresolvable line 3,747 times, every minute.
+ */
+check('an order whose update_time has not moved is dropped', () => {
+  const seen = { o1: SINCE, o2: SINCE + 10 }
+  const out = gs.dropUnchanged_([
+    { id: 'o1', update_time: SINCE },          // unchanged
+    { id: 'o2', update_time: SINCE + 20 },     // changed since we wrote it
+    { id: 'o3', update_time: SINCE + 5 },      // never written
+    { id: 'o4' },                              // no time at all: always written
+  ], seen, 'id')
+  eq(out.map((o) => o.id), ['o2', 'o3', 'o4'])
+})
+
+check('no memo means everything is written, as before', () => {
+  eq(gs.dropUnchanged_([{ id: 'o1', update_time: SINCE }], null, 'id').length, 1)
+})
+
+check('the memo keeps the last answer and forgets what the watermark left behind', () => {
+  const kept = gs.rememberSeen_(
+    { old: SINCE - 500, edge: SINCE - 100 },
+    [{ id: 'new', update_time: SINCE + 30 }, { id: 'lagging', update_time: SINCE - 900 }],
+    'id', SINCE - 120)
+  // 'old' fell behind the overlap; 'lagging' is on the page just read, which
+  // is what TikTok may answer with again, so it stays whatever its age.
+  eq(kept, { edge: SINCE - 100, new: SINCE + 30, lagging: SINCE - 900 })
+})
+
+check('the stored memo is the same text for the same memo, so an idle run writes nothing', () => {
+  const a = gs.seenText_({ o1: SINCE, o2: SINCE + 1 }, 8000).text
+  const b = gs.seenText_({ o2: SINCE + 1, o1: SINCE }, 8000).text
+  eq(a, b)
+  eq(JSON.parse(a).o1, SINCE)
+  eq(JSON.parse(a).o2, SINCE + 1)
+})
+
+check('the memo is cut to fit a Script Property, oldest first', () => {
+  // setProperty refuses a value over 9 KB with an exception and keeps the old
+  // memo. Measured before the call, never discovered by it.
+  const seen = {}
+  for (let i = 0; i < 1000; i++) seen['5777' + String(i).padStart(14, '0')] = SINCE + i
+  const out = gs.seenText_(seen, gs.SYNC_STATE_MAX_CHARS)
+  eq(out.text.length <= gs.SYNC_STATE_MAX_CHARS, true, 'length ' + out.text.length)
+  eq(gs.SYNC_STATE_MAX_CHARS < 9 * 1024, true)
+  eq(out.dropped > 0, true)
+  const back = JSON.parse(out.text)
+  eq(back['5777' + String(999).padStart(14, '0')], SINCE + 999, 'the newest is kept')
+  eq(back['5777' + String(0).padStart(14, '0')], undefined, 'the oldest is what goes')
+})
+
+console.log('\nthe background sync, run after run')
+
+/**
+ * Through syncRecentOrdersOnce_ itself, the function the timer calls, rather
+ * than through the helpers it is made of: the helpers can all be right while
+ * the sync wires them up wrong.
+ *
+ * The TikTok stub answers from what each request actually carried — the
+ * update_time bounds in the body, the page token in the query — and returns
+ * newest-CREATED first, TikTok's default and the order that makes moving a
+ * watermark mid-scan unsafe. The Sheet is in memory, and each run() is a new
+ * execution with its own read memo and its own clock.
+ */
+function describe_backgroundSync() {
+  const T = 1_790_000_000
+  // The overlap the spec asks for, written out rather than read back from the
+  // code under test.
+  const OVERLAP = 120
+  const TABS = ['Orders', 'Order Items', 'Returns', 'SKUs', 'Listings']
+  const st = {}
+  let tabs = {}
+  let logs = []
+  let savedHeaders = null
+  let savedProps = null
+  let savedSheet = null
+  let savedFetch = null
+
+  const memSheet = (name) => {
+    if (name === 'Log') return { appendRow: (r) => logs.push(r), getLastRow: () => logs.length + 1 }
+    const rows = tabs[name] || (tabs[name] = [])
+    const head = gs.__headers(name) || []
+    return {
+      getLastRow: () => rows.length + 1,
+      getLastColumn: () => head.length,
+      getRange(r, c, nr, nc) {
+        nr = nr || 1; nc = nc || 1
+        return {
+          getValues: () => Array.from({ length: nr }, (_, i) => {
+            const row = r + i === 1 ? head : (rows[r + i - 2] || [])
+            return Array.from({ length: nc }, (_, j) => (row[c - 1 + j] === undefined ? '' : row[c - 1 + j]))
+          }),
+          setValues(v) {
+            v.forEach((vals, i) => {
+              const at = r + i - 2
+              rows[at] = rows[at] || []
+              vals.forEach((x, j) => { rows[at][c - 1 + j] = x })
+            })
+            return this
+          },
+          setValue(x) { rows[r - 2] = rows[r - 2] || []; rows[r - 2][c - 1] = x; return this },
+          clearContent() { rows.splice(r - 2, nr); return this },
+          setFontWeight() { return this },
+        }
+      },
+    }
+  }
+  const rowsOf = (name) => (tabs[name] || []).map((row) => {
+    const o = {}
+    ;(gs.__headers(name) || []).forEach((h, i) => { o[h] = row[i] })
+    return o
+  })
+  const putRows = (name, objs) => {
+    tabs[name] = objs.map((o) => gs.__headers(name).map((h) => (o[h] === undefined ? '' : o[h])))
+  }
+  const warned = (code) => logs.filter((l) => String(l[4]).indexOf('[' + code + ']') === 0).length
+  const searches = (kind) => st.calls.filter((c) => c.path.indexOf(kind) >= 0)
+
+  const answer = (url, opts) => {
+    const parts = url.split('?')
+    const path = parts[0].replace(/^https?:\/\/[^/]+/, '')
+    const query = {}
+    new URLSearchParams(parts[1] || '').forEach((v, k) => { query[k] = v })
+    const body = opts && typeof opts.payload === 'string' ? JSON.parse(opts.payload) : {}
+    st.calls.push({ path, query, body, run: st.run })
+    st.clockMs += st.perCallMs
+    // A token names the run that issued it, so a test can make TikTok refuse
+    // one carried over from an earlier execution.
+    const token = query.page_token ? query.page_token.split(':') : null
+    if (token && st.tokensDieBetweenRuns && Number(token[0]) !== st.run) {
+      return { code: 36009099, message: 'page_token expired (stub)' }
+    }
+    const from = token ? Number(token[1]) : 0
+    const size = Number(query.page_size || 50)
+    const slice = (list) => ({
+      items: list.slice(from, from + size),
+      next: from + size < list.length ? st.run + ':' + (from + size) : '',
+    })
+    if (path === '/order/202309/orders/search') {
+      st.orderSearches++
+      if (st.onOrderSearch) st.onOrderSearch(st.orderSearches)
+      const byUpdate = body.update_time_ge !== undefined
+      const list = st.orders.filter((o) => {
+        if (byUpdate && st.ignoreUpdateFilter) return true
+        return byUpdate
+          ? o.update_time >= body.update_time_ge && o.update_time < body.update_time_lt
+          : o.create_time >= body.create_time_ge && o.create_time < body.create_time_lt
+      }).concat(byUpdate ? st.strays : [])
+        .sort((a, b) => (b.create_time - a.create_time) || (a.id < b.id ? -1 : 1))
+      const p = slice(list)
+      return { code: 0, data: { orders: p.items, next_page_token: p.next } }
+    }
+    if (path === '/return_refund/202309/returns/search') {
+      const list = st.returns.filter((r) => r.update_time >= body.update_time_ge)
+        .sort((a, b) => b.create_time - a.create_time)
+      const p = slice(list)
+      return { code: 0, data: { return_orders: p.items, next_page_token: p.next } }
+    }
+    if (path.indexOf('/product/202309/products/') === 0 && st.product) return { code: 0, data: st.product }
+    return { code: 12052001, message: 'not stubbed: ' + path }
+  }
+  const reply = (body) => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify(body) })
+  const tiktok = {
+    fetch: (url, opts) => reply(answer(url, opts)),
+    fetchAll: (batch) => batch.map((b) => reply(answer(b.url, b))),
+  }
+
+  const lineOf = (id, over) => Object.assign({
+    id: 'li-' + id, product_id: 'P1', product_name: 'Mug stream', sku_id: 'S1', seller_sku: 'A1',
+    sku_name: 'A1 Mug', sale_price: '10', currency: 'SGD', display_status: 'AWAITING_SHIPMENT',
+  }, over)
+  const order = (id, updated, over) => Object.assign({
+    id, status: 'AWAITING_SHIPMENT', create_time: updated - 100, update_time: updated,
+    payment: { total_amount: '10', currency: 'SGD' }, line_items: [lineOf(id)],
+  }, over)
+  const ret = (id, updated, lineItemId) => ({
+    return_id: id, order_id: 'o-' + id, return_type: 'REFUND',
+    return_status: 'RETURN_OR_REFUND_REQUEST_COMPLETE', create_time: updated - 50, update_time: updated,
+    return_line_items: [{ return_line_item_id: 'rl-' + id, order_line_item_id: lineItemId || 'li-x',
+      sku_id: 'S1', seller_sku: 'A1', refund_amount: { refund_total: '10', currency: 'SGD' } }],
+  })
+
+  const install = (props) => {
+    if (!savedHeaders) {
+      savedHeaders = {}
+      TABS.forEach((t) => { savedHeaders[t] = gs.__headers(t) })
+      savedProps = authState.props
+      savedSheet = gs.__getSheetImpl()
+      savedFetch = gs.__getUrlFetch()
+    }
+    TABS.forEach((t) => gs.__setHeaders(t, gs.__realHeaders[t]))
+    tabs = {}; logs = []
+    Object.assign(st, {
+      clockMs: T * 1000, run: 0, calls: [], orders: [], returns: [], strays: [], product: null,
+      perCallMs: 0, ignoreUpdateFilter: false, tokensDieBetweenRuns: false,
+      orderSearches: 0, onOrderSearch: null,
+    })
+    lockState.refused = false
+    lockState.acquisitions = 0
+    cacheState.store = {}
+    cacheState.ttl = {}
+    authState.props = Object.assign({
+      HZ_APP_KEY: 'k', HZ_APP_SECRET: 's', HZ_ACCESS_TOKEN: 't', HZ_SHOP_CIPHER: 'c',
+      HZ_ACCESS_EXPIRES: String(T + 60 * 86400),
+      // Pushed an hour ago: the every-firing tier, unless a test says otherwise.
+      LAST_LISTED_HZ: String((T - 3600) * 1000),
+    }, props || {})
+  }
+  const restore = () => {
+    lockState.refused = false
+    if (!savedHeaders) return
+    TABS.forEach((t) => gs.__setHeaders(t, savedHeaders[t]))
+    authState.props = savedProps
+    gs.__setSheetImpl(savedSheet)
+    gs.__setUrlFetch(savedFetch)
+    savedHeaders = null
+    gs.invalidateRead_()
+  }
+  const withClock = (fn) => {
+    const realNow = Date.now
+    Date.now = () => st.clockMs
+    gs.invalidateRead_()
+    gs.__setUrlFetch(tiktok)
+    gs.__setSheetImpl(memSheet)
+    try { return fn() } finally { Date.now = realNow }
+  }
+  /** One firing of the timer, at `atSec` (or a minute after the last). */
+  const run = (atSec) => {
+    st.run++
+    st.clockMs = (atSec !== undefined ? atSec : Math.floor(st.clockMs / 1000) + 60) * 1000
+    withClock(() => gs.syncRecentOrdersOnce_())
+  }
+  const test = (name, fn) => check(name, () => { try { fn() } finally { restore() } })
+
+  test('the boundary order is written once, not once a minute', () => {
+    // The live symptom: TS-ORD-08 3,747 times, one a minute, because the same
+    // order with one unresolvable line was rewritten on every run.
+    install()
+    st.orders = [order('o1', T - 30, { line_items: [lineOf('o1', { sku_id: '', seller_sku: '', sku_name: 'Default' })] })]
+    run(T)
+    eq(rowsOf('Order Items').length, 1)
+    eq(warned('TS-ORD-08'), 1)
+    const locks = lockState.acquisitions
+    const versionBefore = authState.props.ORDERS_VERSION
+    run(); run(); run()
+    eq(searches('orders/search').length, 4, 'TikTok is still asked every minute')
+    eq(warned('TS-ORD-08'), 1, 'but the unchanged order is not written, so not logged, again')
+    eq(lockState.acquisitions, locks, 'and no lock is taken for nothing')
+    eq(authState.props.ORDERS_VERSION, versionBefore, 'and the sold-count cache is not retired for nothing')
+  })
+
+  test('an idle run writes no property except its own run stamp', () => {
+    install()
+    st.orders = [order('o1', T - 30)]
+    run(T)
+    const before = Object.assign({}, authState.props)
+    run()
+    const changed = Object.keys(Object.assign({}, before, authState.props))
+      .filter((k) => before[k] !== authState.props[k])
+    eq(changed, ['LAST_SYNC_RUN_HZ'])
+  })
+
+  test('a changed order is written again', () => {
+    install()
+    st.orders = [order('o1', T - 30)]
+    run(T)
+    st.orders = [order('o1', T + 20, { status: 'CANCELLED', line_items: [lineOf('o1', { display_status: 'CANCELLED' })] })]
+    run()
+    eq(rowsOf('Order Items').map((r) => r.status), ['CANCELLED'])
+    eq(authState.props.LAST_SYNCED_HZ, String(T + 20))
+  })
+
+  test('an order TikTok indexed late is still picked up', () => {
+    install()
+    st.orders = [order('o1', T - 10)]
+    run(T)
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 10))
+    // Stamped BEFORE o1, but only in TikTok's search after the run that read o1.
+    st.orders.push(order('late', T - 40))
+    run()
+    eq(rowsOf('Orders').map((r) => r.order_id).sort(), ['late', 'o1'])
+    eq(searches('orders/search').pop().body.update_time_ge, T - 10 - OVERLAP)
+    eq(gs.SYNC_OVERLAP_S, OVERLAP)
+  })
+
+  test('returns overlap too, and their watermark is the newest change seen, not the clock', () => {
+    install({ LAST_RETURNS_HZ: String(T - 600) })
+    st.returns = [ret('r1', T - 300)]
+    run(T)
+    eq(searches('returns/search').pop().body.update_time_ge, T - 600 - OVERLAP)
+    eq(authState.props.LAST_RETURNS_HZ, String(T - 300), 'TikTok\'s stamp, not ours')
+    st.returns.push(ret('r2', T - 350))
+    run()
+    eq(rowsOf('Returns').map((r) => r.return_id).sort(), ['r1', 'r2'])
+    eq(logs.filter((l) => l[2] === 'sync_returns').length, 2, 'r2 written, r1 not again')
+    run()
+    eq(logs.filter((l) => l[2] === 'sync_returns').length, 2, 'an idle run writes no returns')
+  })
+
+  test('an order a little behind the lower bound is written, without the fallback', () => {
+    install({ LAST_SYNCED_HZ: String(T - 60) })
+    // TikTok answers the update_time query with one order ten minutes behind it.
+    st.strays = [order('lag', T - 800)]
+    run(T)
+    eq(warned('TS-ORD-25'), 0)
+    eq(st.calls.some((c) => c.body.create_time_ge !== undefined), false, 'no creation-time fallback')
+    eq(rowsOf('Orders').map((r) => r.order_id), ['lag'])
+  })
+
+  test('a filter genuinely ignored still falls back, and the returns pass still runs', () => {
+    install({ LAST_SYNCED_HZ: String(T - 60) })
+    st.orders = [order('fresh', T - 30), order('ancient', T - 2 * 86400)]
+    st.returns = [ret('r1', T - 100)]
+    st.ignoreUpdateFilter = true
+    run(T)
+    eq(warned('TS-ORD-25'), 1)
+    eq(st.calls.some((c) => c.body.create_time_ge !== undefined), true, 'fell back to creation time')
+    eq(rowsOf('Orders').map((r) => r.order_id), ['fresh'])
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 60), 'an ignored filter does not move the watermark')
+    eq(rowsOf('Returns').map((r) => r.return_id), ['r1'], 'refunds are still read on a fallback run')
+  })
+
+  const backlog = (n) => {
+    const out = []
+    for (let i = 0; i < n; i++) out.push(order('b' + String(i).padStart(5, '0'), T - 86400 + 10 + i * 20))
+    return out
+  }
+
+  test('a backlog past sixty pages is written as it is read, and finished on the next run', () => {
+    install({ LAST_SYNCED_HZ: String(T - 86400) })
+    const N = 61 * 50 + 7
+    st.orders = backlog(N)
+    st.perCallMs = 5000
+    run(T)
+    const first = rowsOf('Orders').length
+    eq(warned('TS-ORD-02') + warned('TS-ORD-24'), 0, 'no give-up at sixty pages')
+    eq(first > 0 && first < N, true, 'written page by page before the budget ran out: ' + first)
+    eq(warned('TS-ORD-34'), 1, 'and it says it stopped')
+    eq(Boolean(authState.props.SYNC_CURSOR_HZ), true, 'where it stopped is saved')
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 86400), 'the watermark waits for the last page')
+    const lastMs = st.clockMs
+    eq(lastMs - T * 1000 <= gs.SYNC_BUDGET_MS + st.perCallMs * 2, true, 'stopped near the budget')
+    run()
+    eq(rowsOf('Orders').length, N, 'every order, once')
+    eq(new Set(rowsOf('Orders').map((r) => r.order_id)).size, N)
+    eq(authState.props.SYNC_CURSOR_HZ, undefined, 'the scan is finished')
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 86400 + 10 + (N - 1) * 20))
+    const resumed = searches('orders/search').filter((c) => c.run === 2)[0]
+    eq(Boolean(resumed.query.page_token), true, 'the second run carried on, it did not start again')
+  })
+
+  test('a write refused by a busy lock loses nothing: the next run starts at that page', () => {
+    // TS-ORD-24 BUSY is in the live Log: a push held the lock for the length
+    // of the sync's wait. The pages before it must stay written, and the page
+    // it failed on must be the one asked for next.
+    install({ LAST_SYNCED_HZ: String(T - 86400) })
+    st.orders = backlog(120)
+    st.onOrderSearch = (n) => { if (n === 2) lockState.refused = true }
+    run(T)
+    eq(warned('TS-ORD-24'), 1, 'the run says it failed')
+    eq(rowsOf('Orders').length, 50, 'the page written before the lock was refused is kept')
+    lockState.refused = false
+    st.onOrderSearch = null
+    run()
+    eq(searches('orders/search').filter((c) => c.run === 2)[0].query.page_token, '1:50',
+      'from the page whose write failed')
+    eq(rowsOf('Orders').length, 120)
+    eq(authState.props.SYNC_CURSOR_HZ, undefined)
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 86400 + 10 + 119 * 20))
+  })
+
+  test('a saved page TikTok will not continue from is started again, not skipped', () => {
+    install({ LAST_SYNCED_HZ: String(T - 86400) })
+    st.orders = backlog(61 * 50)
+    st.perCallMs = 5000
+    st.tokensDieBetweenRuns = true
+    run(T)
+    run()
+    eq(warned('TS-ORD-35'), 1)
+    const second = searches('orders/search').filter((c) => c.run === 2)
+    eq(Boolean(second[0].query.page_token), true, 'it tried the saved page first')
+    eq(second[1].query.page_token, undefined, 'then asked again from the start')
+    eq(second[1].body.update_time_ge, T - 86400 - OVERLAP, 'from the unmoved watermark')
+    eq(authState.props.LAST_SYNCED_HZ, String(T - 86400))
+  })
+
+  test('the one-run-at-a-time guard lasts as long as the longest run can', () => {
+    // A run may now spend SYNC_BUDGET_MS on a backlog and then do returns. A
+    // five-minute guard could lapse under it and let a second run resume the
+    // same saved page alongside it.
+    install()
+    withClock(() => gs.syncRecentOrders())
+    eq(cacheState.ttl.sync_running, 360)
+    eq(cacheState.store.sync_running, undefined, 'and it is released when the run ends')
+  })
+
+  test('the morning after, TikTok is asked every ten minutes, not every minute', () => {
+    install({ LAST_LISTED_HZ: String((T - 20 * 3600) * 1000) })
+    run(T)
+    eq(searches('orders/search').length, 1)
+    for (let i = 0; i < 8; i++) run()
+    eq(searches('orders/search').length, 1, 'nine firings, one sync')
+    run(); run()
+    eq(searches('orders/search').length, 2)
+  })
+
+  test('the next listing refresh after a sync sees it, not a minute later', () => {
+    install()
+    st.orders = [order('o1', T - 30)]
+    run(T)
+    const count = () => withClock(() => gs.salesFor_(gs.variationSalesCached_('P1'), 'S1', 'A1'))
+    eq(count().units, 1)
+    st.orders = [order('o1', T + 20, { status: 'CANCELLED', line_items: [lineOf('o1', { display_status: 'CANCELLED' })] })]
+    run()
+    eq(count().units, 0, 'the cancellation shows on the very next read')
+    eq(count().unsold, 1)
+  })
+
+  test('a refund written to Returns retires the cached count too', () => {
+    install()
+    st.orders = [order('o1', T - 30)]
+    run(T)
+    const count = () => withClock(() => gs.salesFor_(gs.variationSalesCached_('P1'), 'S1', 'A1'))
+    eq(count().units, 1)
+    st.returns = [ret('r1', T + 30, 'li-o1')]
+    run()
+    eq(count().units, 0)
+    eq(count().refunded, 1)
+  })
+
+  test('with nothing written, the count is kept for hours rather than a minute', () => {
+    install()
+    st.orders = [order('o1', T - 30)]
+    run(T)
+    withClock(() => gs.variationSalesCached_('P1'))
+    const keys = Object.keys(cacheState.ttl).filter((k) => k.indexOf('sales:') === 0)
+    eq(keys.length, 1)
+    eq(cacheState.ttl[keys[0]], 21600)
+    eq(gs.SALES_CACHE_TTL_S, 21600)
+  })
+
+  test('the listing screen shows unpaid apart from cancelled, and the total does not move', () => {
+    install()
+    putRows('SKUs', [{
+      sku_id: 's1', listing_id: 'P1', shop_id: 'HZ', identifier: 'A1', variant: 'Mug', price: '10',
+      status: 'pushed', tiktok_sku_id: 'S1', confirmed_at: '2026-09-20T00:00:00.000Z',
+      created_at: '2026-09-20T00:00:00.000Z', pushed_at: '2026-09-20T00:00:00.000Z',
+    }])
+    st.orders = [
+      order('o1', T - 30, { status: 'DELIVERED', line_items: [lineOf('o1', { display_status: 'DELIVERED' })] }),
+      order('o2', T - 40, { status: 'CANCELLED', line_items: [lineOf('o2', { display_status: 'CANCELLED' })] }),
+      order('o3', T - 50, { status: 'UNPAID', line_items: [lineOf('o3', { display_status: 'UNPAID' })] }),
+    ]
+    run(T)
+    st.product = {
+      id: 'P1', title: 'Mug stream', status: 'ACTIVATE',
+      skus: [{ id: 'S1', seller_sku: 'A1', price: { sale_price: '10' },
+        sales_attributes: [{ id: '100089', name: 'Design', value_id: 'v1', value_name: 'A1 Mug' }],
+        inventory: [{ warehouse_id: 'W1', quantity: 5 }] }],
+    }
+    const v = withClock(() => gs.listingState_('P1')).variants.find((x) => x.identifier === 'A1')
+    eq(v.sold, 1)
+    eq(v.cancelled, 1, 'cancelled is what was cancelled')
+    eq(v.unpaid, 1)
+    eq(v.stock_available, 5)
+    // available + sold, exactly as before UNPAID had a name: whether TikTok
+    // takes an unpaid unit out of stock is not confirmed either way.
+    eq(v.stock_total, 6)
+  })
+}
+describe_backgroundSync()
+
 console.log('\nwhat a status means for the money')
 
 /**
@@ -2385,10 +3004,15 @@ check('a blank or missing status is unknown, not sold', () => {
   eq(gs.lineStatusMeaning_('   '), 'unknown')
 })
 
-check('the money did not stick on these three', () => {
-  eq(gs.lineStatusMeaning_('UNPAID'), 'unsold')
+check('the money did not stick on these two', () => {
   eq(gs.lineStatusMeaning_('CANCELLED'), 'unsold')
   eq(gs.lineStatusMeaning_('CANCEL'), 'unsold')
+})
+
+check('UNPAID is its own outcome, not a cancellation', () => {
+  // It was 'unsold', so the listing screen showed a basket waiting on payment
+  // as "1 cancelled" while nobody had cancelled anything.
+  eq(gs.lineStatusMeaning_('UNPAID'), 'unpaid')
 })
 
 check('ON_HOLD is held, not sold', () => {
@@ -2413,7 +3037,7 @@ check('case and whitespace do not change the answer', () => {
 check('every status in the table has a meaning the counter understands', () => {
   // A typo'd value here would silently become "unknown" for every order with
   // that status — sold units quietly dropping out of a payout.
-  const allowed = { sold: 1, unsold: 1, held: 1 }
+  const allowed = { sold: 1, unsold: 1, unpaid: 1, held: 1 }
   Object.keys(gs.LINE_STATUS_MEANING).forEach(function (k) {
     if (!allowed[gs.LINE_STATUS_MEANING[k]]) throw new Error(k + ' => ' + gs.LINE_STATUS_MEANING[k])
   })
@@ -2947,6 +3571,60 @@ check('money is rounded to cents in the cells, not left as float drift', () => {
 
 check('an empty export still has the six columns rather than none', () => {
   eq(gs.tallyHeader_(gs.tallyColumns_([])), SIX)
+})
+
+console.log('\nunpaid is not cancelled')
+
+/**
+ * UNPAID counted as 'unsold', so the listing screen read a basket waiting on
+ * payment as "1 cancelled". It now has its own name. The money columns still
+ * count it with cancelled — it is not revenue either way, and the export and
+ * the orders screen have always shown it there — so it is a breakdown of
+ * cancelled, not a seventh bucket, and the only place it comes back out is the
+ * listing screen's per-variation figure.
+ */
+check('the listing screen tells an unpaid basket from a cancelled one', () => {
+  const idx = gs.salesIndex_(gs.groupVariationSales_([
+    line({ status: 'DELIVERED' }),
+    line({ order_id: 'o2', status: 'CANCELLED' }),
+    line({ order_id: 'o3', status: 'UNPAID' }),
+    line({ order_id: 'o4', status: 'UNPAID' }),
+  ]))
+  const v = gs.salesFor_(idx, '9001', '')
+  eq(v.units, 1, 'sold does not move')
+  eq(v.unsold, 1, 'cancelled is only what was cancelled')
+  eq(v.unpaid, 2)
+})
+
+check('an unpaid unit stays in the cancelled figures the export subtracts', () => {
+  // The factory's sheet must come out exactly as it did before UNPAID had a
+  // name: same columns, same Cancelled, same Net sold.
+  const rows = [
+    line({ status: 'COMPLETED', sale_price: '10.00' }),
+    line({ order_id: 'o2', status: 'CANCELLED', sale_price: '10.00' }),
+    line({ order_id: 'o3', status: 'UNPAID', sale_price: '10.00' }),
+  ]
+  const l = gs.summariseItems_(rows).listings[0]
+  assertDisjoint(l, 'with an unpaid line')
+  const cols = gs.tallyColumns_([l])
+  eq(gs.tallyHeader_(cols), SIX, 'no column added for it')
+  const vals = gs.tallyValues_(cols, l)
+  eq(vals[SIX.indexOf('Total sold')], 3)
+  eq(vals[SIX.indexOf('Cancelled')], 2)
+  eq(vals[SIX.indexOf('Net sold')], 1)
+  eq(vals[SIX.indexOf('Cancelled sales (SGD)')], 20)
+  eq(l.unsold_units, 2, 'the orders screen still reads "2 cancelled or unpaid"')
+})
+
+check('the unpaid breakdown survives being totalled and rounded', () => {
+  const rows = [
+    line({ status: 'UNPAID', sale_price: '10.10' }),
+    line({ order_id: 'o2', sku_id: '9002', status: 'UNPAID', sale_price: '2.25' }),
+  ]
+  const out = gs.summariseItems_(rows)
+  eq(out.totals.unpaid_units, 2)
+  eq(out.totals.unpaid_value, 12.35)
+  eq(out.totals.cancelled_units, 2)
 })
 
 

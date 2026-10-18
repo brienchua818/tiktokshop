@@ -222,8 +222,17 @@ export interface LiveVariant {
    * different thing from zero and stays distinguishable on screen.
    */
   sold: number | null
-  /** Ordered then cancelled or unpaid. Shown separately, never netted off. */
+  /**
+   * Ordered then cancelled (unpaid too, from a backend that predates
+   * `unpaid`). Shown separately, never netted off.
+   */
   cancelled: number | null
+  /**
+   * Placed and not paid for yet. A backend that sends this has taken these
+   * units OUT of `cancelled`; one pasted before it does not send it at all,
+   * hence optional. `null` means orders have not been synced, as for `sold`.
+   */
+  unpaid?: number | null
 }
 
 /** A listing's live review state and stock, read back from TikTok. */
@@ -467,7 +476,10 @@ export type Me = SignedInUser & {
  * Writes never come through here.
  */
 export interface ReadPlan {
-  /** Send a second, parallel request if the first has not answered by now. */
+  /**
+   * Send a second, parallel request if the first has not answered by now.
+   * `Infinity` sends none.
+   */
   hedgeMs: number
   /** How long each attempt may take in all. */
   deadlineMs: number
@@ -494,6 +506,18 @@ export const LIGHT_READ: ReadPlan = { hedgeMs: 8_000, deadlineMs: 25_000, attemp
  * while on a big listing. It hedges later, so honest work is not doubled up.
  */
 export const HEAVY_READ: ReadPlan = { hedgeMs: 20_000, deadlineMs: 40_000, attempts: 2 }
+
+/**
+ * A read nobody is waiting on: the listing screen asking again by itself.
+ *
+ * One request, no hedge, no second attempt. The hedge and the retry are there
+ * for a person looking at a screen that will not answer. A timed read that is
+ * slow is only late, and the next tick asks again; hedging it would double the
+ * TikTok reads behind every slow tick, every twenty seconds, for as long as
+ * the listing is open. The same 40 s deadline as HEAVY_READ, because it is the
+ * same work on the backend.
+ */
+export const POLL_READ: ReadPlan = { hedgeMs: Infinity, deadlineMs: 40_000, attempts: 1 }
 
 /** Refusals about the journey, not the person: the twin may still land. */
 const TRIP_REFUSALS = new Set(['CREDENTIAL_LOST_IN_TRANSIT', 'GOOGLE_UNREACHABLE'])
@@ -590,6 +614,9 @@ function hedged<T>(read: (timeoutMs: number) => Promise<T>, plan: ReadPlan): Pro
     }
 
     launch(plan.deadlineMs)
+    // No hedge is said with Infinity, and setTimeout reads Infinity as zero:
+    // without this the "never" plan would hedge at once.
+    if (!Number.isFinite(plan.hedgeMs)) return
     hedgeTimer = setTimeout(() => {
       hedgeTimer = null
       if (settled) return
@@ -717,8 +744,11 @@ export const api = {
    *
    * The one call that answers "did it actually land, and is it live yet"
    * without opening Seller Center.
+   *
+   * `plan` is HEAVY_READ for a read somebody asked for — opening the listing,
+   * the refresh button — and POLL_READ for the screen's own timer.
    */
-  listingState: (listingId: string) =>
+  listingState: (listingId: string, plan: ReadPlan = HEAVY_READ) =>
     /**
      * Retried twice, not three times.
      *
@@ -735,7 +765,7 @@ export const api = {
      */
     retryRead(
       (timeoutMs) => call<ListingState>('listingState', { body: { listing_id: listingId }, timeoutMs }),
-      HEAVY_READ,
+      plan,
     ),
 
   /**

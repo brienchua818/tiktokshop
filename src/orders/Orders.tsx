@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { bucketText, tallyOf } from './tally'
 import {
   api,
@@ -12,6 +12,7 @@ import type { Shop } from '../types'
 import Icon from '../ui/Icon'
 import BarSpacer from '../ui/BarSpacer'
 import { useDismiss } from '../ui/useDismiss'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
 
 /**
  * Orders, grouped by listing, inside a date and time window.
@@ -33,6 +34,39 @@ function todaySgt(): string {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Singapore' })
 }
 
+/** Now, in Singapore, as HH:MM. */
+function clockSgt(): string {
+  return new Date().toLocaleTimeString('en-SG', {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'Asia/Singapore',
+  })
+}
+
+/**
+ * Whether the window has not ended yet, so its figures can still move.
+ *
+ * Compared as "yyyy-MM-dd HH:MM" text in Singapore time, which sorts the way
+ * the instants do. sv-SE is the locale whose date-time format is exactly that.
+ */
+function includesNow(w: DateWindow): boolean {
+  const now = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Singapore' }).slice(0, 16)
+  return `${w.from_date} ${w.from_time}` <= now && now <= `${w.to_date} ${w.to_time}`
+}
+
+/**
+ * Between reads while the window is still open.
+ *
+ * The backend pulls new orders from TikTok every minute on its own timer
+ * (`syncRecentOrders`, Orders.gs), so the Sheet this reads changes about that
+ * often during a stream and no faster.
+ */
+const POLL_MS = 60_000
+/** Coming back to the tab reads at once if the figures are older than this. */
+const STALE_ON_RETURN_MS = 30_000
+/** A date or time being typed is read this long after the last change. */
+const FIELD_SETTLE_MS = 500
+
 export default function Orders({ shop }: { shop: Shop }) {
   const today = todaySgt()
 
@@ -46,8 +80,24 @@ export default function Orders({ shop }: { shop: Shop }) {
     to_time: '23:59',
   })
 
+  /**
+   * The window the figures are read for: `win`, once it has stopped changing.
+   *
+   * Every change to a date or time field started a read of the whole Order
+   * Items tab, and a picker being scrolled or a date typed digit by digit
+   * changes the field several times on the way to the value wanted. Each was
+   * a read, and their answers could land in any order.
+   */
+  const [readWin, setReadWin] = useState<DateWindow>(win)
+  useEffect(() => {
+    const timer = setTimeout(() => setReadWin(win), FIELD_SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [win])
+
   const [summary, setSummary] = useState<OrderSummary | null>(null)
   const [openListing, setOpenListing] = useState<string | null>(null)
+  /** `openListing` as of now, for a read that started before it changed. */
+  const openNow = useRef<string | null>(null)
   const [detail, setDetail] = useState<ListingOrders | null>(null)
   const [busy, setBusy] = useState(false)
   const [syncing, setSyncing] = useState(false)
@@ -62,24 +112,107 @@ export default function Orders({ shop }: { shop: Shop }) {
    */
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [error, setError] = useState('')
+  /**
+   * A failed read, kept apart from a failed action.
+   *
+   * The timer reads every minute. Had it shared `error`, its next good answer
+   * would have wiped an export's failure off the screen before anybody had
+   * read it.
+   */
+  const [readError, setReadError] = useState('')
+  /** When the figures on screen were read, in Singapore time. */
+  const [readAt, setReadAt] = useState('')
 
-  const load = useCallback(async () => {
-    setBusy(true)
-    setError('')
-    try {
-      setSummary(await api.orderSummary(shop.shop_id, win))
-    } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.display : String(e))
-    } finally {
-      setBusy(false)
+  /**
+   * Which read is on screen, by the order the reads were asked for.
+   *
+   * Reads overlap — the one when the window changes, the one after a Sync,
+   * the timer's — and whichever answered last won, whatever it described: a
+   * read asked for before a sync, answering after the sync's own read, put the
+   * pre-sync figures back. An answer older than the one on screen is dropped.
+   */
+  const asked = useRef(0)
+  const shown = useRef(0)
+  /** Reads still out. The timer does not start another while any is. */
+  const loading = useRef(0)
+  const lastGood = useRef(0)
+  const detailAsked = useRef(0)
+  const detailShown = useRef(0)
+  /** Nothing is set after the tab has been left. */
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
     }
-  }, [shop.shop_id, win])
+  }, [])
+
+  const load = useCallback(
+    async (w: DateWindow) => {
+      const n = ++asked.current
+      loading.current++
+      setBusy(true)
+      try {
+        const s = await api.orderSummary(shop.shop_id, w)
+        if (!alive.current || n < shown.current) return
+        shown.current = n
+        lastGood.current = Date.now()
+        setSummary(s)
+        setReadAt(clockSgt())
+        setReadError('')
+      } catch (e: unknown) {
+        if (alive.current && n >= shown.current) setReadError(e instanceof ApiError ? e.display : String(e))
+      } finally {
+        loading.current--
+        if (alive.current) setBusy(loading.current > 0)
+      }
+    },
+    [shop.shop_id],
+  )
+
+  /** One listing's variations, for the drill-down that is open. */
+  const loadDetail = useCallback(async (listingId: string, w: DateWindow) => {
+    const n = ++detailAsked.current
+    try {
+      const d = await api.listingOrders(listingId, w)
+      if (!alive.current || n < detailShown.current || openNow.current !== listingId) return
+      detailShown.current = n
+      setDetail(d)
+    } catch (e: unknown) {
+      if (alive.current && n >= detailShown.current && openNow.current === listingId) {
+        setError(e instanceof ApiError ? e.display : String(e))
+      }
+    }
+  }, [])
 
   useEffect(() => {
+    openNow.current = null
     setOpenListing(null)
     setDetail(null)
-    void load()
-  }, [load])
+    setError('')
+    void load(readWin)
+  }, [load, readWin])
+
+  /**
+   * Read again by itself while the window is still open and the tab is on
+   * screen, and on coming back to it.
+   *
+   * It read once when opened, when the window changed and after Sync, so
+   * figures left on screen during a stream stopped moving while the backend's
+   * own timer kept pulling orders in. The open drill-down is read with it, or
+   * its rows would disagree with the total above them.
+   */
+  useAutoRefresh({
+    enabled: includesNow(readWin),
+    everyMs: POLL_MS,
+    staleAfterMs: STALE_ON_RETURN_MS,
+    lastGoodAt: () => lastGood.current,
+    busy: () => loading.current > 0 || syncing,
+    read: async () => {
+      await load(readWin)
+      if (openNow.current) await loadDetail(openNow.current, readWin)
+    },
+  })
 
   // A tick for a listing no longer in this window would export something
   // nobody can see on the screen. Keep only the ones still shown.
@@ -127,14 +260,9 @@ export default function Orders({ shop }: { shop: Shop }) {
     setError('')
     try {
       await api.syncOrders({ shop_id: shop.shop_id, ...win })
-      setSyncedAt(
-        new Date().toLocaleTimeString('en-SG', {
-          hour: '2-digit',
-          minute: '2-digit',
-          timeZone: 'Asia/Singapore',
-        }),
-      )
-      await load()
+      await load(win)
+      // The drill-down too: it is the same window, just synced.
+      if (openNow.current) await loadDetail(openNow.current, win)
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.display : String(e))
     } finally {
@@ -163,26 +291,22 @@ export default function Orders({ shop }: { shop: Shop }) {
 
   async function openDetail(listingId: string) {
     if (openListing === listingId) {
+      openNow.current = null
       setOpenListing(null)
       setDetail(null)
       return
     }
+    openNow.current = listingId
     setOpenListing(listingId)
     setDetail(null)
     // The other three handlers clear this before starting and this one did
     // not, so a refusal from a previous action stayed on screen while a
     // perfectly successful drill-down rendered underneath it.
     setError('')
-    try {
-      setDetail(await api.listingOrders(listingId, win))
-    } catch (e: unknown) {
-      setError(e instanceof ApiError ? e.display : String(e))
-    }
+    await loadDetail(listingId, readWin)
   }
 
   const [rangeOpen, setRangeOpen] = useState(false)
-  /** When this device last pulled from TikTok, in Singapore time. */
-  const [syncedAt, setSyncedAt] = useState('')
 
   function set(patch: Partial<DateWindow>) {
     setWin((w) => ({ ...w, ...patch }))
@@ -270,17 +394,19 @@ export default function Orders({ shop }: { shop: Shop }) {
               earlier one. Saying so is the difference between figures and
               figures somebody trusts: an error banner over live-looking totals
               invites reading them as current. */}
-          {error ? (
+          {error || readError ? (
             <span className="text-xs text-warn">from the last good read</span>
           ) : (
-            syncedAt && <span className="text-xs text-faint">synced {syncedAt}</span>
+            // Every read, not only one after Sync: the screen now reads by
+            // itself, and a figure needs its time beside it to be trusted.
+            readAt && <span className="text-xs text-faint">read {readAt}</span>
           )}
         </div>
       )}
 
-      {error && (
+      {(error || readError) && (
         <p className="text-sm text-bad bg-bad-tint border border-bad-line rounded-lg px-4 py-2">
-          {error}
+          {error || readError}
         </p>
       )}
 

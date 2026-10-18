@@ -20,13 +20,21 @@ the hard way, it goes here the same day, with the code that hit it.
 
 | Limit | Value | Source | Where handled |
 | --- | --- | --- | --- |
-| Execution time | **6 minutes** per invocation (consumer and Workspace) | [Quotas](https://developers.google.com/apps-script/guides/services/quotas) | Order sync pages at 100 with `MAX_PAGES = 60`; export builds one workbook per call. A range over ~6,000 orders needs narrowing (TS-ORD-02). |
-| URL Fetch calls | 20,000 / day; response ≤ 50 MB; 100 concurrent | Quotas | Photos fetched once and cached in Drive `_tiktok`; TikTok reads are paged. |
+| Execution time | **6 minutes** per invocation (consumer and Workspace) | [Quotas](https://developers.google.com/apps-script/guides/services/quotas) | The manual order sync pages at 50 (`ORDER_PAGE_SIZE`) with `MAX_PAGES = 60`, so a range over 3,000 orders needs narrowing (TS-ORD-02). The background sync writes each page as it reads it, stops starting pages at 4 minutes (`SYNC_BUDGET_MS`, TS-ORD-34) and resumes the saved page next run; its run guard lives 360 s. Export builds one workbook per call. |
+| URL Fetch calls | 20,000 / day; response ≤ 50 MB; 100 concurrent | Quotas | Photos fetched once and cached in Drive `_tiktok`; TikTok reads are paged. The listing screen reads `listingState` (two product fetches each) by itself while it is on screen: at most every 20 s, one at a time, never hedged (`POLL_READ`) — about 1,100 fetches per phone over a three-hour stream. |
+| Simultaneous executions | **30 per user**, 1,000 per script (consumer and Workspace). The web app runs as the deploying user (`executeAs: USER_DEPLOYING`), so every phone shares the one 30 | [Quotas](https://developers.google.com/apps-script/guides/services/quotas), "Current limitations" | Timed reads on the phone (`useAutoRefresh`) are a setTimeout started after the last read settles, never an interval, so one phone has at most one timed read out however slow the backend is. The Orders tab reads once a minute, only while its window includes now. |
 | Script lock | `tryLock` waits; a held lock blocks every write | LockService | `withScriptLock_` re-entrancy guard (`HELD_`); reads are not in `WRITE_ACTIONS`; sync and export do their own short locks only around Sheet writes. |
 | Web app POST | The `/exec` URL answers a POST with a **302** to `script.googleusercontent.com`, which accepts **GET only** | Observed 5–6 Sep | Client falls back to GET for read actions with payloads under 6,000 characters; the backend always returns HTTP 200 with `_status` in the body. |
-| Properties | 9 KB per value, 500 KB total | Quotas | Tokens per shop are small; nothing else is stored there. |
+| Properties | 9 KB per value, 500 KB total | Quotas | Tokens per shop are small. The order sync's per-shop memos (`SYNC_SEEN_`, `RETURNS_SEEN_`) and saved page (`SYNC_CURSOR_`) are measured against `SYNC_STATE_MAX_CHARS` (8,000) before every write: a memo is cut oldest-first (TS-ORD-36, TS-ORD-38), a page that does not fit is not saved (TS-ORD-37). At most about 50 KB across three shops. |
 | No image processing | There is no resize, crop or decode API | — | `imageDims_` reads headers; Drive does the resizing via `thumbnailLink`. |
 | OAuth scopes | Auto-detected from the code on deploy; a new service means a re-authorisation prompt on next run | Apps Script manifest | Expect a consent prompt after pasting a version that adds Drive API URL fetches. |
+
+## CacheService
+
+| Limit | Value | Source | Where handled |
+| --- | --- | --- | --- |
+| Expiry | **21,600 s (6 hours)** maximum, and only a maximum: the reference calls it "the maximum time the value remains in the cache" | [Cache.put](https://developers.google.com/apps-script/reference/cache/cache#putkey,-value,-expirationinseconds) | Every cache here is a speed-up, never the only copy: a miss reads the Sheet. The SKU slices and the per-listing sold counts are keyed on a version their writers bump (`SKUS_VERSION`, `ORDERS_VERSION`), so they can live the full six hours without serving a stale answer. Anything that must outlast a gap between runs is in Script Properties instead. |
+| Value size | **100 KB** per key | Cache.put | SKU slices are chunked at 90,000 characters. The sold-count index holds counts only, not rows, so a 200-SKU listing stays far inside it (estimated, not measured); a put that fails is TS-ORD-21 and the read is simply paid for. |
 
 ## Google Drive
 
@@ -54,6 +62,9 @@ the hard way, it goes here the same day, with the code that hit it.
 | Image upload | Must **not** carry `shop_cipher` | Error text, 6 Sep | `PATHS_WITHOUT_CIPHER`. |
 | Order line items | No `quantity` field — one line item is one unit | `inspectOrders`, 6 Sep | `quantity: 1` per line item. |
 | `seller_sku` on orders | **Inconsistent**: blank on some line items of a variation and present on others (F20, 4 Sep); blank on every line of F21 | Observed in the Order Items tab | `resolveSellerSkus_` fills it from a sibling line, our SKU rows, TikTok's product read, then the `<1–3 letters><number>` pattern at the front of the variation name (`identifierFromVariation_`). Grouping keys on `sku_id`. |
+| Get Order List (`/order/202309/orders/search`) | `update_time_ge`/`update_time_lt` filtering is **not confirmed** from documentation; an ignored filter would not error | Not read from here — see `ttSearchOrders_` | Checked on every page of the background sync: an order more than `SYNC_FILTER_TOLERANCE_S` (1 h) behind the query's lower bound means ignored, and the run falls back to a creation-time window (TS-ORD-25). Anything less is index lag, which `SYNC_OVERLAP_S` (120 s) re-asks about. |
+| Get Order List: `page_size`, `sort_field`, `sort_order` | The code sends `page_size=50` and no sort. Whether 100 is accepted, and whether `sort_field=update_time` with `sort_order=ASC` is honoured, is **not confirmed** | Not read from here | Nothing relies on result order. The watermark moves only when a scan reaches its last page; an unfinished scan saves its page token with the exact bounds it was issued for. |
+| Page token lifetime | **Unknown.** The background sync reuses a token in the next execution, a minute or more later | Not documented anywhere found | A refused token restarts the scan from the unmoved watermark (TS-ORD-35): slower, never a gap. If tokens turn out to die between executions, a backlog bigger than one 4-minute run never finishes and TS-ORD-35 repeats every run — that is the signal to confirm `sort_field=update_time` and move the watermark per page instead. |
 | Rate limits | Dynamic per app × shop; ~1 write/s is the safe assumption; HTTP 429 or code 36009002 | Docs | Pushes serialised by the script lock. |
 | Daily listing cap | 100 uploads/day on probation, 1,000 after | Products overview | Allowance shown in the app. |
 | Product page URL | `https://shop.tiktok.com/view/product/<id>?region=SG` | Shareable link format | `listingUrl_`. |

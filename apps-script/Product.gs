@@ -666,10 +666,10 @@ function listingState_(listingId) {
   /**
    * Units sold per variation, from the orders already synced for this listing.
    *
-   * Cached for a minute, because reading it costs a full pass over the Order
-   * Items tab and this screen refreshes throughout a broadcast. A sold count
-   * up to sixty seconds old is indistinguishable from a live one here: orders
-   * land minutes after a SKU is called.
+   * Cached, because reading it costs a full pass over the Order Items tab and
+   * this screen refreshes throughout a broadcast. The cache is keyed on a
+   * version every order or returns write bumps, so the first refresh after a
+   * sync shows it — see variationSalesCached_.
    *
    * Failure is not fatal. An empty map means every row reports `sold: null`,
    * which the screen already renders as "no sold figure" rather than zero —
@@ -754,6 +754,13 @@ function listingState_(listingId) {
        * stock (Brien, confirmed — cancel an order of 2 and 2 come back), so
        * they are already inside `available` and adding them would count them
        * twice.
+       *
+       * Unpaid units are not added either, which is what the total did while
+       * they were counted as cancelled. Whether TikTok takes a unit out of
+       * stock when the order is placed or only when it is paid is not
+       * confirmed anywhere this code can point to — Brien's confirmation was
+       * about cancelling — so naming them separately leaves the arithmetic
+       * exactly where it was rather than guessing in either direction.
        */
       stock_total: st.quantity === null
         ? null
@@ -783,8 +790,14 @@ function listingState_(listingId) {
        * distinguishable.
        */
       sold: sold,
-      /** Ordered then cancelled or unpaid. Shown separately, never netted. */
-      cancelled: sale ? sale.unsold : null
+      /** Ordered then cancelled. Shown separately, never netted. */
+      cancelled: sale ? sale.unsold : null,
+      /**
+       * Placed and not paid for yet. Counted inside `cancelled` until it had a
+       * name, which is how a basket waiting on payment came to read as
+       * "1 cancelled" while nobody had cancelled anything.
+       */
+      unpaid: sale ? (sale.unpaid || 0) : null
     };
   });
 
@@ -826,7 +839,8 @@ function listingState_(listingId) {
       // carry TikTok's sku id, so it can be matched and counted like any
       // other.
       sold: extSale ? extSale.units : null,
-      cancelled: extSale ? extSale.unsold : null
+      cancelled: extSale ? extSale.unsold : null,
+      unpaid: extSale ? (extSale.unpaid || 0) : null
     });
   });
 
@@ -990,7 +1004,8 @@ function removedVariations_(listingId, limit) {
         refunded: null,
         at_risk: null,
         sold: null,
-        cancelled: null
+        cancelled: null,
+        unpaid: null
       };
     }),
     checked_at: new Date().toISOString()

@@ -1,5 +1,13 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { api, ApiError, type ListingState, type LiveVariant } from '../lib/api'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  api,
+  ApiError,
+  HEAVY_READ,
+  POLL_READ,
+  type ListingState,
+  type LiveVariant,
+  type ReadPlan,
+} from '../lib/api'
 import {
   allDrafts,
   getPhoto,
@@ -13,11 +21,14 @@ import {
 } from '../offline/queue'
 import type { QueuedDraft } from '../offline/queue'
 import { useOnlineStatus } from '../hooks/useOnlineStatus'
+import { useAutoRefresh } from '../hooks/useAutoRefresh'
+import { usePageVisible } from '../hooks/usePageVisible'
 import { LISTING_FULL_MARKER } from '../offline/push'
 import { kickQueue } from '../offline/runner'
 import {
   draftsTakenOver,
   driftedDrafts,
+  landed,
   mergeRows,
   nameWithoutIdentifier,
   showsOriginalTotal,
@@ -27,6 +38,15 @@ import {
 import { MAX_SKUS_PER_PRODUCT } from '../lib/tiktok-rules'
 import Icon from '../ui/Icon'
 import { useDismiss } from '../ui/useDismiss'
+
+/** Between reads while something on the listing has not settled. */
+const POLL_SETTLING_MS = 20_000
+/** Between reads once everything on it has. */
+const POLL_SETTLED_MS = 30_000
+/** Coming back to the screen reads at once if the figures are older than this. */
+const STALE_ON_RETURN_MS = 10_000
+/** After a push lands, wait this long so a run of them costs one read. */
+const PUSH_SETTLE_MS = 3_000
 
 /**
  * The draft queue: what has been built, what has landed, and what has not.
@@ -111,20 +131,110 @@ export default function DraftQueue({
     }
   }
 
-  async function refresh() {
-    if (!listingId) return
-    setChecking(true)
-    setCheckError('')
-    try {
-      const state = await api.listingState(listingId)
-      setLive(state)
-      onLive?.(state)
-      await reconcile(state)
-    } catch (e: unknown) {
-      setCheckError(e instanceof ApiError ? e.display : String(e))
-    } finally {
-      setChecking(false)
+  /**
+   * Which read is on screen, by the order the reads were asked for.
+   *
+   * Reads overlap — the timer's, a tap, the one after a removal — and they do
+   * not answer in the order they were sent. An answer asked for before the one
+   * on screen describes the listing as it was earlier: a read sent just before
+   * a removal, answering after the removal's own read, would put the removed
+   * variation back on the list. So it is dropped.
+   */
+  const readsAsked = useRef(0)
+  const readShown = useRef(0)
+  /** Reads still out. The timer does not start another while any is. */
+  const reading = useRef(0)
+  /** A push landed while a read was out, and that read may predate it. */
+  const readAgain = useRef(false)
+  /** When the answer on screen arrived, on this phone's clock. */
+  const lastGood = useRef(0)
+  const [readAt, setReadAt] = useState(0)
+  /** `live` as of now, for handlers created by an earlier render. */
+  const liveNow = useRef<ListingState | null>(null)
+  /**
+   * Nothing is drawn, handed up or reconciled after the screen has gone. A
+   * read can take forty seconds, and the listing can be closed in one.
+   */
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
     }
+  }, [])
+
+  function show(state: ListingState) {
+    liveNow.current = state
+    setLive(state)
+    onLive?.(state)
+  }
+
+  /**
+   * Read the listing. HEAVY_READ when somebody asked; the timer passes
+   * POLL_READ. Resolves to what was shown, or null if nothing was.
+   */
+  async function refresh(plan: ReadPlan = HEAVY_READ): Promise<ListingState | null> {
+    if (!listingId) return null
+    const n = ++readsAsked.current
+    reading.current++
+    setChecking(true)
+    try {
+      const state = await api.listingState(listingId, plan)
+      if (!alive.current || n < readShown.current) return null
+      readShown.current = n
+      lastGood.current = Date.now()
+      setReadAt(lastGood.current)
+      // Cleared on an answer rather than when asking, so a background read
+      // does not blank "no reply" for the forty seconds it may take.
+      setCheckError('')
+      show(state)
+      await reconcile(state)
+      return state
+    } catch (e: unknown) {
+      // An older read failing says nothing about the newer answer on screen.
+      if (alive.current && n >= readShown.current) setCheckError(e instanceof ApiError ? e.display : String(e))
+      return null
+    } finally {
+      reading.current--
+      if (alive.current) {
+        setChecking(reading.current > 0)
+        if (reading.current === 0 && readAgain.current) {
+          readAgain.current = false
+          void refresh(POLL_READ)
+        }
+      }
+    }
+  }
+
+  /**
+   * A stock change, on screen as soon as the backend has answered.
+   *
+   * `after` is TikTok's own figure, read back by the backend after the write,
+   * so it is as good as a fresh read for this one variation. Waiting for the
+   * whole listing to be read again left the old number on the row for as long
+   * as that read took, and on a failed read, until the next one.
+   *
+   * It counts as an answer for the ordering above: a read asked for before
+   * the change landed would put the old number back.
+   */
+  function showStock(v: LiveVariant, after: number) {
+    const was = liveNow.current
+    if (!was) return
+    readShown.current = ++readsAsked.current
+    show(withStock(was, v, after))
+  }
+
+  /**
+   * The stock change may or may not have landed: look, never send it again.
+   *
+   * `setStock` is a delta. Repeating one that did land adds it twice, so the
+   * person is shown what TikTok holds now — in the sheet they are about to
+   * tap again — before they decide whether to.
+   */
+  async function checkStock(v: LiveVariant) {
+    const state = await refresh()
+    const now = state?.variants.find((x) => sameVariant(x, v))
+    if (now) setAdjusting((open) => (open && sameVariant(now, open) ? now : open))
   }
 
   /**
@@ -177,18 +287,51 @@ export default function DraftQueue({
     if (drifted.length || takenOver.length) await onChanged()
   }
 
-  // Checked once when there is something to check, and after that on request.
-  // Not polled: it is a TikTok call per refresh, review takes minutes rather
-  // than seconds, and a timer firing through a three-hour broadcast would
-  // spend the shop's rate limit on nothing.
-  // Whenever there is a listing: a second phone with no drafts of its own
-  // still has to see what the first phone and Seller Center have put on it.
-  const pushedCount = drafts.filter((d) => d.status === 'pushed').length
+  // Read when the listing opens, whenever there is one: a second phone with no
+  // drafts of its own still has to see what the first phone and Seller Center
+  // have put on it.
   useEffect(() => {
-    if (!listingId || live || checking) return
-    void refresh()
+    if (listingId) void refresh()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [listingId, pushedCount])
+  }, [listingId])
+
+  /**
+   * Read again when a push lands.
+   *
+   * This was meant to happen already, through an effect keyed on the number
+   * of pushed drafts. It returned early once anything had been read, so after
+   * the first answer a landed push changed nothing on screen until somebody
+   * tapped refresh.
+   *
+   * "Lands" is a draft this screen saw unpushed that is now pushed. A draft
+   * that arrives already pushed is one the opening read is about to cover, not
+   * a push. A few seconds' wait lets a run of pushes share one read, and a
+   * push landing while a read is out is remembered rather than dropped: that
+   * read was asked for before it.
+   */
+  const statusBefore = useRef(new Map<string, QueuedDraft['status']>())
+  const pushRead = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => {
+    const before = statusBefore.current
+    const pushedNow = drafts.some(
+      (d) => d.status === 'pushed' && before.has(d.draft_id) && before.get(d.draft_id) !== 'pushed',
+    )
+    statusBefore.current = new Map(drafts.map((d) => [d.draft_id, d.status]))
+    if (!listingId || !pushedNow || pushRead.current) return
+    pushRead.current = setTimeout(() => {
+      pushRead.current = null
+      if (!alive.current) return
+      if (reading.current > 0) readAgain.current = true
+      else void refresh(POLL_READ)
+    }, PUSH_SETTLE_MS)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafts, listingId])
+  useEffect(
+    () => () => {
+      if (pushRead.current) clearTimeout(pushRead.current)
+    },
+    [],
+  )
 
   /**
    * The list as shown: this phone's drafts plus every variation the backend
@@ -224,6 +367,40 @@ export default function DraftQueue({
   /** The variation being put back, and how many to put back with it. */
   const [restoring, setRestoring] = useState<LiveVariant | null>(null)
   const removedCount = live?.removed_count ?? removed.length
+
+  /**
+   * Read the listing again by itself while somebody is looking at it.
+   *
+   * It was read once on opening and then only when somebody tapped refresh
+   * or this phone changed something, on the reasoning that review takes
+   * minutes and a timer through a three-hour broadcast spends the shop's rate
+   * limit on nothing. So a second phone did not see the first phone's SKUs
+   * arrive, and a Reviewing badge stayed after TikTok had passed it, until
+   * somebody thought to tap.
+   *
+   * What keeps the cost down instead: only while the page is visible and
+   * online; one read at a time, started after the last one settles; the light
+   * plan, so a slow tick is never hedged into two; and not while a sheet or
+   * the remove dialog is open, so the list does not change under a thumb.
+   * Twenty seconds while something is still settling, thirty once nothing is.
+   * Each read is two TikTok product reads and a Sheet read — at twenty
+   * seconds a three-hour stream is at most about 1,100 URL fetches per phone,
+   * against Apps Script's 20,000 a day (LIMITS.md).
+   */
+  const settling =
+    drafts.some((d) => d.status === 'pushed' && !landed(live, d.identifier)) ||
+    (live?.variants ?? []).some(
+      (v) => v.state === 'reviewing' || v.state === 'pending' || v.state === 'not_listed',
+    )
+  const pollMs = settling ? POLL_SETTLING_MS : POLL_SETTLED_MS
+  useAutoRefresh({
+    enabled: Boolean(listingId),
+    everyMs: pollMs,
+    staleAfterMs: STALE_ON_RETURN_MS,
+    lastGoodAt: () => lastGood.current,
+    busy: () => reading.current > 0 || adjusting !== null || removing !== null || restoring !== null,
+    read: () => refresh(POLL_READ),
+  })
 
   const loadRemoved = useCallback(async () => {
     if (!listingId) return
@@ -427,13 +604,13 @@ export default function DraftQueue({
             no reply · showing {checkedAt}
           </span>
         ) : (
-          checkedAt && (
-            <span
-              className="text-xs text-faint whitespace-nowrap shrink-0"
+          readAt > 0 && (
+            <CheckedAge
+              at={readAt}
+              warnAfterMs={2 * pollMs}
+              short={removedCount !== 0}
               title={`TikTok last checked at ${checkedAt}`}
-            >
-              {removedCount === 0 ? `checked ${checkedAt}` : checkedAt}
-            </span>
+            />
           )
         )}
         {listingId && (
@@ -570,11 +747,15 @@ export default function DraftQueue({
           v={adjusting}
           listingId={listingId}
           onClose={() => setAdjusting(null)}
-          onDone={async (note) => {
+          onDone={async (note, stock) => {
             setRemovedNote(note)
             setAdjusting(null)
-            await refresh()
+            if (stock) showStock(adjusting, stock.after)
+            // Still read: the rest of the row — sold, held, the badge — is the
+            // backend's to say, and only a read brings it.
+            await refresh(stock ? POLL_READ : HEAVY_READ)
           }}
+          onUnknown={() => void checkStock(adjusting)}
         />
       )}
 
@@ -739,6 +920,91 @@ function liveFor(live: ListingState | null, identifier: string): LiveVariant | n
   return live?.variants.find((v) => v.identifier === identifier) ?? null
 }
 
+/**
+ * The same variation on the listing, by TikTok's id where there is one.
+ *
+ * Not by identifier alone: a restored variation carries the identifier of the
+ * removed one it replaces, and both can be in one read.
+ */
+function sameVariant(a: LiveVariant, b: LiveVariant): boolean {
+  if (a.removed) return false
+  if (b.tiktok_sku_id) return a.tiktok_sku_id === b.tiktok_sku_id
+  return b.identifier !== '' && a.identifier === b.identifier
+}
+
+/**
+ * The listing with one variation's stock changed to `after`.
+ *
+ * The total moves by the same amount. The backend builds it as available plus
+ * sold, held, unrecognised and returning (Product.gs, `stock_total`), and a
+ * stock change moves only the first of those.
+ */
+function withStock(state: ListingState, v: LiveVariant, after: number): ListingState {
+  return {
+    ...state,
+    variants: state.variants.map((x) => {
+      if (!sameVariant(x, v) || x.stock_available === null) return x
+      const by = after - x.stock_available
+      return {
+        ...x,
+        stock_available: after,
+        stock_total: x.stock_total === null ? null : x.stock_total + by,
+      }
+    }),
+  }
+}
+
+/**
+ * How long ago TikTok was last read, as an age rather than a clock time.
+ *
+ * "checked 14:02" asks the reader to know what time it is now, mid-broadcast;
+ * "checked 2 min ago" does not. Counted from when the answer reached this
+ * phone, on this phone's clock — the backend's `checked_at` is on Google's,
+ * and the two need not agree. It turns to the warning colour once it is older
+ * than two polls, which means reads have stopped landing.
+ */
+function CheckedAge({
+  at,
+  warnAfterMs,
+  short,
+  title,
+}: {
+  at: number
+  warnAfterMs: number
+  /** Without "checked", for when the two tabs share the strip. */
+  short: boolean
+  title: string
+}) {
+  const visible = usePageVisible()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!visible) return
+    setNow(Date.now())
+    // An interval is fine here, unlike for the reads: this only redraws a
+    // label, so a late tick cannot pile up behind a slow one.
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [visible])
+  const age = Math.max(0, now - at)
+  return (
+    <span
+      className={`text-xs whitespace-nowrap shrink-0 ${age > warnAfterMs ? 'text-warn' : 'text-faint'}`}
+      title={title}
+    >
+      {short ? ageText(age) : `checked ${ageText(age)}`}
+    </span>
+  )
+}
+
+function ageText(ms: number): string {
+  const s = Math.floor(ms / 1000)
+  if (s < 5) return 'just now'
+  if (s < 60) return `${s} s ago`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} min ago`
+  return `${Math.floor(m / 60)} h ago`
+}
+
 
 
 /**
@@ -829,11 +1095,15 @@ function StockSheet({
   listingId,
   onClose,
   onDone,
+  onUnknown,
 }: {
   v: LiveVariant
   listingId: string | null
   onClose: () => void
-  onDone: (note: string) => Promise<void>
+  /** `stock` is TikTok's figure after the change, for the row to show at once. */
+  onDone: (note: string, stock?: { after: number }) => Promise<void>
+  /** The change may have landed with its reply lost. Look; never resend. */
+  onUnknown?: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -855,9 +1125,10 @@ function StockSheet({
         ...body,
       })
       // TikTok's number, not ours. "Set to 31" is a promise; "31 left" is a fact.
-      await onDone(`${r.identifier || v.variant}: ${r.after} left, was ${r.before}.`)
+      await onDone(`${r.identifier || v.variant}: ${r.after} left, was ${r.before}.`, r)
     } catch (e: unknown) {
       setError(e instanceof ApiError ? e.display : String(e))
+      if (e instanceof ApiError && e.isOutcomeUnknown) onUnknown?.()
     } finally {
       setBusy(false)
     }
@@ -1270,6 +1541,9 @@ function variantMeta(v: LiveVariant): string {
   if (v.refunded !== null && v.refunded > 0) bits.push(`${v.refunded} refunded`)
   if (v.at_risk !== null && v.at_risk > 0) bits.push(`${v.at_risk} returning`)
   if (v.held !== null && v.held > 0) bits.push(`${v.held} unconfirmed`)
+  // An order nobody has paid for yet is not a cancellation. It read as one,
+  // so a sale placed a moment ago showed on the row as "1 cancelled".
+  if (v.unpaid != null && v.unpaid > 0) bits.push(`${v.unpaid} awaiting payment`)
   if (v.cancelled !== null && v.cancelled > 0) bits.push(`${v.cancelled} cancelled`)
   if (v.external) bits.push('added outside this app')
   else if (v.created_by) bits.push(v.created_by)

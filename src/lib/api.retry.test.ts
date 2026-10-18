@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { retryRead, LIGHT_READ, HEAVY_READ, type ReadPlan } from './api'
+import { retryRead, LIGHT_READ, HEAVY_READ, POLL_READ, type ReadPlan } from './api'
 import { ScriptError, setIdToken, setSessionToken } from './script-api'
 
 /**
@@ -266,6 +266,36 @@ describe('retryRead', () => {
     const { read } = scripted([{ after: 12_000, ok: 'state' }])
     const r = await timed(retryRead(read, HEAVY_READ as ReadPlan))
     expect(r.v).toBe('state')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  /**
+   * The listing screen's timer. A slow tick is only late, and the next tick
+   * asks again; hedging it would double the TikTok reads behind every slow
+   * tick, every twenty seconds, for as long as the listing is open.
+   */
+  it('a timed read is one request however slow, never hedged', async () => {
+    const { read, deadlines } = scripted([{ after: 39_000, ok: 'late' }])
+    const r = await timed(retryRead(read, POLL_READ))
+    expect(r.v).toBe('late')
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(deadlines).toEqual([POLL_READ.deadlineMs])
+  })
+
+  it('a timed read that fails is not asked again, slow or fast', async () => {
+    const deadlined = vi.fn((ms: number) =>
+      new Promise((_, reject) => setTimeout(() => reject(timeout()), ms)),
+    )
+    const slow = await timed(retryRead(deadlined, POLL_READ))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(slow.ok).toBe(false)
+    expect(deadlined).toHaveBeenCalledTimes(1)
+
+    // A fast failure sends the hedge at once on the other plans. Not here.
+    const { read } = scripted([{ after: 1_000, fail: new ScriptError(502, 'bad gateway', 'NOT_JSON') }])
+    const fast = await timed(retryRead(read, POLL_READ))
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(fast.ok).toBe(false)
     expect(read).toHaveBeenCalledTimes(1)
   })
 })

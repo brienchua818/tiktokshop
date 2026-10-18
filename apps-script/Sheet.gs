@@ -124,13 +124,16 @@ function sheet_(name) {
  * Everything that must happen after a tab's rows change, in one place.
  *
  * Each cache over a tab is retired here rather than by whoever wrote: the
- * request read memo, the SKU slices (by version), and sign-in's copy of the
- * Users tab (by version). Callers used to repeat the right subset themselves,
- * and the one that forgot was always the one nobody was looking at.
+ * request read memo, the SKU slices (by version), the per-listing sold counts
+ * (by version), and sign-in's copy of the Users tab (by version). Callers used
+ * to repeat the right subset themselves, and the one that forgot was always
+ * the one nobody was looking at.
  */
 function tabChanged_(name) {
   invalidateRead_(name);
   if (name === TAB_SKUS) bumpSkuVersion_();
+  // A refund changes a sold count as surely as an order does.
+  if (name === TAB_ORDER_ITEMS || name === TAB_RETURNS) bumpOrdersVersion_();
   if (name === TAB_USERS) invalidateUsersCache_();
 }
 
@@ -601,6 +604,23 @@ function skuVersion_() {
   return Number(PropertiesService.getScriptProperties().getProperty(SKU_TAB_VERSION_KEY) || 0);
 }
 
+/**
+ * The same arrangement for the sold counts, which are built from Order Items
+ * and Returns. See variationSalesCached_.
+ */
+var ORDERS_VERSION_KEY = 'ORDERS_VERSION';
+
+function bumpOrdersVersion_() {
+  var props = PropertiesService.getScriptProperties();
+  var next = Number(props.getProperty(ORDERS_VERSION_KEY) || 0) + 1;
+  props.setProperty(ORDERS_VERSION_KEY, String(next));
+  return next;
+}
+
+function ordersVersion_() {
+  return Number(PropertiesService.getScriptProperties().getProperty(ORDERS_VERSION_KEY) || 0);
+}
+
 function listSkus_(listingId) {
   var key = 'skus:v' + skuVersion_() + ':' + String(listingId);
   var cache = null;
@@ -900,5 +920,5 @@ function recordSku_(sku) {
   appendRows_(TAB_SKUS, [row]);
   // One property write, so the background order sync can decide whether this
   // shop is worth syncing without reading a whole tab to find out.
-  if (sku.shop_id) noteListed_(String(sku.shop_id));
+  if (sku.shop_id) noteShopActivity_(String(sku.shop_id));
 }

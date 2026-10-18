@@ -303,6 +303,15 @@ describe('price', () => {
     expect(ctl.setPrice.mock.calls[0]![0].price).toBe('99.00')
   })
 
+  it('a backend not yet updated says so in plain words, rather than "Unknown action"', async () => {
+    ctl.setPrice.mockRejectedValue(new ApiError(400, 'Unknown action: setPrice'))
+    await mount()
+    type('input[aria-label="New price"]', '9.9')
+    await click(titled('Save price'))
+    expect(el.textContent).toContain('needs the updated backend, which has not been pasted into Apps Script yet')
+    expect(el.textContent).not.toContain('Unknown action')
+  })
+
   it('a price typed with a comma, as some phones offer it, is sent with a point', async () => {
     ctl.setPrice.mockResolvedValue({
       identifier: 'A1', before: '12.90', after: '12.50', requested: '12.50', pending_price: false, currency: 'SGD',

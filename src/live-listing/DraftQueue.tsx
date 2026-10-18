@@ -1309,6 +1309,14 @@ export function StockSheet({
             setError(
               `Still busy after ${BUSY_RETRY_MS.length} retries. Nothing was changed — try again in a minute.`,
             )
+          } else if (e instanceof ApiError && e.status === 400 && /^Unknown action/.test(e.message)) {
+            // The app updates itself the moment it is published; the backend
+            // only when somebody pastes it into Apps Script. Between the two,
+            // a new action reaches a backend that has never heard of it.
+            setError(
+              `This ${what} needs the updated backend, which has not been pasted into Apps Script yet. ` +
+                'Nothing was changed.',
+            )
           } else {
             setError(e instanceof ApiError ? e.display : String(e))
             if (e instanceof ApiError && MOVED_SINCE.has(String(e.code))) onStale?.()

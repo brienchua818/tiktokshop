@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { Tally } from '../lib/api'
-import { otherBuckets, netOf, netValueOf, bucketText, tallyOf } from './tally'
+import { otherBuckets, netOf, netValueOf, bucketText, tallyOf, unsoldText } from './tally'
 
 function tally(over: Partial<Tally> = {}): Tally {
   return {
@@ -88,5 +88,19 @@ describe('a response from a backend older than the app', () => {
 
   it('refuses a NaN that would render as "NaN sold"', () => {
     expect(tallyOf({ sold_units: Number('x') }).sold_units).toBe(0)
+  })
+})
+
+describe('unsoldText', () => {
+  it('says "awaiting payment" for the unpaid part, not "cancelled"', () => {
+    expect(unsoldText(3, { unpaid_units: 1 })).toBe('2 cancelled · 1 awaiting payment')
+    expect(unsoldText(1, { unpaid_units: 1 })).toBe('1 awaiting payment')
+    expect(unsoldText(2, {})).toBe('2 cancelled')
+    expect(unsoldText(0, {})).toBe('')
+  })
+
+  it('an older backend that does not split them still reads as before', () => {
+    expect(unsoldText(2, null)).toBe('2 cancelled')
+    expect(unsoldText(2, { unpaid_units: 5 })).toBe('2 awaiting payment')
   })
 })

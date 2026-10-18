@@ -42,6 +42,21 @@ export function driftedDrafts(drafts: readonly QueuedDraft[], live: ListingState
 }
 
 /**
+ * The moment after which a read can say a push is absent.
+ *
+ * Not the backend's `checked_at`: that is stamped at the END of the read,
+ * after it has read the SKU rows, so a push that landed while the read was
+ * out came home before `checked_at` and looked absent — and its draft was
+ * deleted, its row blinking out until the next read. The screen now reads
+ * every 20 s during a stream, so that overlap became routine. When the phone
+ * asked is before the backend looked, and on the phone's own clock, the one
+ * `pushed_at` is stamped on.
+ */
+function readBegan(live: ListingState): string {
+  return live.asked_at ?? live.checked_at
+}
+
+/**
  * Drafts the backend has taken over, which this phone should stop keeping.
  *
  * **Why two phones showed different rows.**
@@ -77,7 +92,7 @@ export function draftsTakenOver(
     // same rule isRemoved uses, and for the same reason: a SKU pushed after
     // the last refresh is legitimately missing from it.
     const pushedAt = d.pushed_at ?? d.created_at
-    return Boolean(pushedAt) && pushedAt < live.checked_at
+    return Boolean(pushedAt) && pushedAt < readBegan(live)
   })
 }
 
@@ -224,7 +239,7 @@ export function isRemoved(row: QueueRow, live: ListingState | null): boolean {
    */
   if (!live || row.draft.status !== 'pushed') return false
   const pushedAt = row.draft.pushed_at ?? row.draft.created_at
-  return Boolean(pushedAt) && pushedAt < live.checked_at
+  return Boolean(pushedAt) && pushedAt < readBegan(live)
 }
 
 /**

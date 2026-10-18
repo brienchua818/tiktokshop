@@ -362,6 +362,21 @@ describe('draftsTakenOver', () => {
     expect(draftsTakenOver([d], live)).toHaveLength(0)
   })
 
+  it('keeps a draft whose push landed while the read was out', () => {
+    // The backend stamps checked_at at the end of the read, after it has read
+    // the SKU rows. A push that came home while the read was out is before
+    // checked_at and yet missing from it; judged by when the phone asked, it
+    // is not judged at all. With a read every 20 s this overlap is routine.
+    const d = draft({ identifier: 'B99', status: 'pushed', pushed_at: '2026-09-15T09:59:58.000Z' })
+    const overlapping = { ...live, asked_at: '2026-09-15T09:59:50.000Z' }
+    expect(draftsTakenOver([d], overlapping)).toHaveLength(0)
+    const row = mergeRows([d], overlapping)[0]!
+    expect(isRemoved(row, overlapping)).toBe(false)
+    // Asked after it landed, and still absent: that is an answer.
+    const later = { ...live, asked_at: '2026-09-15T09:59:59.000Z' }
+    expect(draftsTakenOver([d], later).map((x) => x.identifier)).toEqual(['B99'])
+  })
+
   it('keeps queued, uploading and failed drafts', () => {
     for (const status of ['queued', 'uploading', 'failed'] as const) {
       const d = draft({ identifier: 'B99', status, pushed_at: undefined })

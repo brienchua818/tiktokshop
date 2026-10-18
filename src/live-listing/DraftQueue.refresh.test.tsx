@@ -447,4 +447,37 @@ describe('6. how old the figures are', () => {
     expect(rowText('A1')).toContain('2 awaiting payment')
     expect(rowText('A1')).toContain('1 cancelled')
   })
+
+  it('the refresh button works while a background read is still out', async () => {
+    await mount()
+    const before = reads()
+    ctl.listingState.mockImplementation(() => new Promise(() => {}))
+    await advance(30_000)
+    expect(reads()).toBe(before + 1)                // the poll is out, and stays out
+    const b = el.querySelector('[aria-label="Check TikTok for this listing"]') as HTMLButtonElement
+    expect(b.disabled).toBe(false)
+    await click('Check TikTok for this listing')
+    expect(reads()).toBe(before + 2)                // the tap read at once
+    expect(b.disabled).toBe(true)                   // and is off while its own read is out
+  })
+
+  it('a push that lands while a read is out is not taken for a removal', async () => {
+    // The reviewer's race: the read is asked, A2's push comes home, then the
+    // answer arrives without A2 and stamped after it. Judged by checked_at,
+    // A2 looked removed and its draft and photo were deleted.
+    const q = await import('../offline/queue')
+    await mount()
+    const answer = deferred<ListingState>()
+    ctl.listingState.mockImplementationOnce(() => answer.promise)
+    await click('Check TikTok for this listing')
+    await advance(1_500)
+    const landed = { ...draft('A2', 'pushed'), pushed_at: new Date().toISOString() } as QueuedDraft
+    vi.mocked(q.allDrafts).mockResolvedValue([landed])
+    vi.mocked(q.removeDraft).mockClear()
+    await advance(1_000)
+    await act(async () => answer.resolve(state(variant('A1'))))
+    await advance(0)
+    expect(q.removeDraft).not.toHaveBeenCalled()
+    vi.mocked(q.allDrafts).mockResolvedValue([])
+  })
 })

@@ -692,6 +692,12 @@ function listingState_(listingId) {
   var live = versions.pending;
   var buyable = versions.buyable;
 
+  // A listing open on a phone is a shop being worked, whether or not anything
+  // is pushed: a stream that only sells and tops up never pushes. Keeps its
+  // orders syncing every minute. At most one property write per five minutes,
+  // however many phones are polling.
+  noteShopActivityIfStale_(shopId);
+
   // TikTok's name for it, now. Renamed in Seller Center, the app kept the
   // name it was added under; it is corrected here, where the product has just
   // been read anyway. Never allowed to fail the screen.
@@ -1257,6 +1263,7 @@ function removeVariation_(listingId, tiktokSkuId, user) {
   var label = built.removed.sellerSku || built.removed.valueName || tiktokSkuId;
   logEvent_(user.name, 'remove_variation', shop.brand,
     label + ' from ' + listingId + ' (' + built.skus.length + ' remain)', 'ok');
+  noteShopActivity_(shopId);
 
   return {
     removed: label,
@@ -2780,6 +2787,7 @@ function restoreVariation_(listingId, identifier, stock, user) {
 
   logEvent_(user.name, 'restore_variation', shop.brand,
     identifier + ' back on ' + listingId + ' with ' + want + ' in stock', 'ok');
+  noteShopActivity_(shopId);
 
   return {
     identifier: identifier,

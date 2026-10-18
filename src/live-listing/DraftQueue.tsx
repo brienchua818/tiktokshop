@@ -173,13 +173,18 @@ export default function DraftQueue({
    * Read the listing. HEAVY_READ when somebody asked; the timer passes
    * POLL_READ. Resolves to what was shown, or null if nothing was.
    */
+  /** A refresh tapped by a person, still out. */
+  const [tapped, setTapped] = useState(false)
+
   async function refresh(plan: ReadPlan = HEAVY_READ): Promise<ListingState | null> {
     if (!listingId) return null
     const n = ++readsAsked.current
     reading.current++
     setChecking(true)
+    // Before the request leaves: see readBegan in reconcile.ts.
+    const asked_at = new Date().toISOString()
     try {
-      const state = await api.listingState(listingId, plan)
+      const state = { ...(await api.listingState(listingId, plan)), asked_at }
       if (!alive.current || n < readShown.current) return null
       readShown.current = n
       lastGood.current = Date.now()
@@ -627,8 +632,16 @@ export default function DraftQueue({
         )}
         {listingId && (
           <button
-            onClick={() => void refresh()}
-            disabled={checking}
+            // Off only while this tap's own read is out. It was off for any
+            // read, so a tap during a slow background read did nothing for
+            // up to forty seconds; the newest answer wins either way.
+            onClick={() => {
+              setTapped(true)
+              void refresh().finally(() => {
+                if (alive.current) setTapped(false)
+              })
+            }}
+            disabled={tapped}
             className={`min-h-11 min-w-11 inline-flex items-center justify-center rounded-lg disabled:opacity-50 ${
               stale ? 'text-warn' : 'text-fg2'
             }`}

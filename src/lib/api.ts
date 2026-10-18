@@ -251,6 +251,11 @@ export interface ListingState {
   max_skus: number
   variants: LiveVariant[]
   checked_at: string
+  /**
+   * When this phone asked for the read, on this phone's clock — the clock
+   * `pushed_at` is on. Set by the screen, not sent by the backend.
+   */
+  asked_at?: string
 }
 
 /**
@@ -295,6 +300,12 @@ export interface Tally {
   /** Cancelled or never paid for. TikTok returns these to stock. */
   cancelled_units: number
   cancelled_value: number
+  /**
+   * The not-paid-for-yet part of `cancelled_*`, from a backend that splits it
+   * out. Optional: an older backend does not send it.
+   */
+  unpaid_units?: number
+  unpaid_value?: number
   /** Bought, then given back. No order status can show this. */
   refunded_units: number
   refunded_value: number

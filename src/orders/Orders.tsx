@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { bucketText, tallyOf } from './tally'
+import { bucketText, tallyOf, unsoldText } from './tally'
 import {
   api,
   ApiError,
@@ -549,7 +549,7 @@ export default function Orders({ shop }: { shop: Shop }) {
                     {l.unsold_units > 0 && (
                       <span className="text-warn/80">
                         {' '}
-                        · {l.unsold_units} cancelled or unpaid
+                        · {unsoldText(l.unsold_units, l)}
                       </span>
                     )}
                     {/* Refunded, returning, on hold, unrecognised. A unit in
@@ -815,7 +815,7 @@ function VariationTable({ detail }: { detail: ListingOrders }) {
                 <td className="py-1.5 pr-3 text-right whitespace-nowrap">
                   <span className="text-fg">{v.units} sold</span>
                   {v.unsold_units > 0 && (
-                    <span className="text-warn/70"> · {v.unsold_units} cancelled</span>
+                    <span className="text-warn/70"> · {unsoldText(v.unsold_units, v)}</span>
                   )}
                   {bucketText(tallyOf(v)) && (
                     <span className="text-warn/70"> · {bucketText(tallyOf(v))}</span>

@@ -2653,7 +2653,8 @@ function describe_backgroundSync() {
       st.orderSearches++
       if (st.onOrderSearch) st.onOrderSearch(st.orderSearches)
       const byUpdate = body.update_time_ge !== undefined
-      const list = st.orders.filter((o) => {
+      const pool = st.ordersFor ? st.ordersFor(query.shop_cipher) : st.orders
+      const list = pool.filter((o) => {
         if (byUpdate && st.ignoreUpdateFilter) return true
         return byUpdate
           ? o.update_time >= body.update_time_ge && o.update_time < body.update_time_lt
@@ -2706,7 +2707,7 @@ function describe_backgroundSync() {
     Object.assign(st, {
       clockMs: T * 1000, run: 0, calls: [], orders: [], returns: [], strays: [], product: null,
       perCallMs: 0, ignoreUpdateFilter: false, tokensDieBetweenRuns: false,
-      orderSearches: 0, onOrderSearch: null,
+      orderSearches: 0, onOrderSearch: null, ordersFor: null, beforeWrite: null,
     })
     lockState.refused = false
     lockState.acquisitions = 0
@@ -2862,21 +2863,23 @@ function describe_backgroundSync() {
     eq(Boolean(resumed.query.page_token), true, 'the second run carried on, it did not start again')
   })
 
-  test('a write refused by a busy lock loses nothing: the next run starts at that page', () => {
+  test('a write refused by a busy lock loses nothing: the next run reads it again', () => {
     // TS-ORD-24 BUSY is in the live Log: a push held the lock for the length
-    // of the sync's wait. The pages before it must stay written, and the page
-    // it failed on must be the one asked for next.
+    // of the sync's wait. Nothing is remembered as written, and no saved page
+    // points past it, until it has been written — so the next run asks again
+    // from the unmoved watermark.
     install({ LAST_SYNCED_HZ: String(T - 86400) })
     st.orders = backlog(120)
     st.onOrderSearch = (n) => { if (n === 2) lockState.refused = true }
     run(T)
     eq(warned('TS-ORD-24'), 1, 'the run says it failed')
-    eq(rowsOf('Orders').length, 50, 'the page written before the lock was refused is kept')
+    eq(rowsOf('Orders').length, 0, 'nothing was written')
+    eq(authState.props.SYNC_CURSOR_HZ, undefined, 'and nothing says it was')
     lockState.refused = false
     st.onOrderSearch = null
     run()
-    eq(searches('orders/search').filter((c) => c.run === 2)[0].query.page_token, '1:50',
-      'from the page whose write failed')
+    eq(searches('orders/search').filter((c) => c.run === 2)[0].query.page_token, undefined,
+      'from the start, not from a page past what was lost')
     eq(rowsOf('Orders').length, 120)
     eq(authState.props.SYNC_CURSOR_HZ, undefined)
     eq(authState.props.LAST_SYNCED_HZ, String(T - 86400 + 10 + 119 * 20))
@@ -2941,15 +2944,64 @@ function describe_backgroundSync() {
     eq(count().refunded, 1)
   })
 
-  test('with nothing written, the count is kept for hours rather than a minute', () => {
+  test('with nothing written, the count is kept for half an hour rather than a minute', () => {
+    // Not six hours: every version leaves an entry behind, and a cache full of
+    // dead ones is evicted from at will — the sync's run guard lives there.
     install()
     st.orders = [order('o1', T - 30)]
     run(T)
     withClock(() => gs.variationSalesCached_('P1'))
     const keys = Object.keys(cacheState.ttl).filter((k) => k.indexOf('sales:') === 0)
     eq(keys.length, 1)
-    eq(cacheState.ttl[keys[0]], 21600)
-    eq(gs.SALES_CACHE_TTL_S, 21600)
+    eq(cacheState.ttl[keys[0]], 1800)
+    eq(gs.SALES_CACHE_TTL_S, 1800)
+  })
+
+  test('pages are read back to back: nothing is written between two page reads', () => {
+    // A write can wait thirty seconds for the lock behind a push. If TikTok's
+    // page token is a position in the results, an order on a page already
+    // read that changes during that wait shifts the rest up one, and an
+    // unread order is skipped for good. The reviewer's probe: 80 orders, ten
+    // on page one changing before page two is fetched.
+    install({ LAST_SYNCED_HZ: String(T - 86400) })
+    st.orders = backlog(120)
+    const writtenAt = []
+    st.onOrderSearch = () => writtenAt.push(rowsOf('Orders').length)
+    run(T)
+    eq(writtenAt, [0, 0, 0], 'no rows written before the last page was read')
+    eq(rowsOf('Orders').length, 120)
+  })
+
+  test('a shop streaming now is read first, and one catching up cannot starve it', () => {
+    // HZ quiet for five days with a backlog, PM live: before, HZ went first
+    // (alphabetical) and spent the whole four minutes, so PM got one page a
+    // run, five minutes apart.
+    install({
+      LAST_SYNCED_HZ: String(T - 86400),
+      LAST_LISTED_HZ: String((T - 5 * 86400) * 1000),
+      PM_APP_KEY: 'k', PM_APP_SECRET: 's', PM_ACCESS_TOKEN: 't', PM_SHOP_CIPHER: 'c-pm',
+      PM_ACCESS_EXPIRES: String(T + 60 * 86400),
+      LAST_LISTED_PM: String((T - 60) * 1000),
+      LAST_SYNCED_PM: String(T - 3600),
+    })
+    const hz = backlog(61 * 50)
+    const pm = []
+    for (let i = 0; i < 120; i++) pm.push(order('pm' + String(i).padStart(4, '0'), T - 3000 + i * 20))
+    st.ordersFor = (cipher) => (cipher === 'c-pm' ? pm : hz)
+    st.perCallMs = 5000
+    run(T)
+    const pmRows = rowsOf('Orders').filter((o) => String(o.order_id).indexOf('pm') === 0)
+    eq(pmRows.length, 120, 'the live shop is fully synced in the same run')
+    const first = searches('orders/search')[0]
+    eq(first.query.shop_cipher, 'c-pm', 'and read first')
+    const hzReads = searches('orders/search').filter((c) => c.query.shop_cipher !== 'c-pm').length
+    eq(hzReads <= 10, true, 'the shop catching up got about 45 s, not 4 minutes: ' + hzReads + ' pages')
+    eq(warned('TS-ORD-34') >= 1, true, 'and says it will carry on')
+  })
+
+  check('shopsToSync_ puts the most recently active shop first', () => {
+    const now = 1_790_000_000_000
+    eq(gs.shopsToSync_({ HZ: now - 3600e3, PM: now - 60e3, TM: now - 7200e3 }, now, {}, {}), ['PM', 'HZ', 'TM'])
   })
 
   test('the listing screen shows unpaid apart from cancelled, and the total does not move', () => {
@@ -4998,6 +5050,20 @@ console.log('\na listing renamed on TikTok is renamed in the app')
     eq(writes, [])
     eq(lockState.waits, [0], 'asked for the lock without waiting')
     lockState.refused = false
+  })
+
+  check('a listing open on a phone keeps its shop syncing every minute, at one write per five minutes', () => {
+    install()
+    // withTikTok installs fresh credentials, so each stamp is set inside it.
+    const open = (stamp) => withTikTok(() => {
+      if (stamp === undefined) delete authState.props.LAST_LISTED_HZ
+      else authState.props.LAST_LISTED_HZ = String(stamp)
+      try { gs.listingState_('1001') } catch (e) { /* the rest of the screen is not under test */ }
+      return authState.props.LAST_LISTED_HZ
+    })
+    eq(open(undefined), String(FIXED_MS), 'stamped by the read')
+    eq(open(FIXED_MS - 60e3), String(FIXED_MS - 60e3), 'a minute-old stamp is left alone')
+    eq(open(FIXED_MS - 6 * 60e3), String(FIXED_MS), 'a six-minute-old one is refreshed')
   })
 
   check('opening a listing corrects its name from what TikTok just said', () => {

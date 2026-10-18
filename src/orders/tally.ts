@@ -56,6 +56,21 @@ export function netValueOf(t: Tally): number {
   )
 }
 
+/**
+ * "2 cancelled · 1 awaiting payment", or '' when neither.
+ *
+ * `unsold` counts both, as the export does. An order nobody has paid for yet
+ * is not a cancellation, and saying so put "1 cancelled" beside a sale placed
+ * a moment ago; the listing screen already says "awaiting payment".
+ */
+export function unsoldText(unsold: number, t: Partial<Tally> | null | undefined): string {
+  const unpaid = Math.min(Math.max(0, Number(t?.unpaid_units) || 0), unsold)
+  const cancelled = unsold - unpaid
+  return [cancelled > 0 ? `${cancelled} cancelled` : '', unpaid > 0 ? `${unpaid} awaiting payment` : '']
+    .filter(Boolean)
+    .join(' · ')
+}
+
 /** "1 refunded · 2 on hold", or '' when there is nothing to say. */
 export function bucketText(t: Tally): string {
   return otherBuckets(t)

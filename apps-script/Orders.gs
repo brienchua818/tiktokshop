@@ -271,6 +271,8 @@ var SOLD_IS_BEFORE_REFUNDS = true;
  * a date filter rather than a listing total.
  */
 function orderSummary_(shopId, fromDate, fromTime, toDate, toTime) {
+  // Somebody is watching this shop's orders: keep them syncing every minute.
+  noteShopActivityIfStale_(shopId);
   var fromEpoch = sgtEpoch_(fromDate, fromTime || '00:00');
   var toEpoch = sgtEndEpoch_(toDate, toTime);
 
@@ -868,14 +870,16 @@ function salesIndex_(byVariation) {
  * tab whether or not a single order had changed.
  *
  * Every write to Order Items or Returns bumps the version (`tabChanged_`), so
- * the entry is unreachable the moment anything it was built from changes, and
- * can otherwise live for CacheService's six-hour maximum. A quiet minute now
- * writes nothing, so it bumps nothing, so the screen keeps its cached answer.
+ * the entry is unreachable the moment anything it was built from changes. A
+ * quiet minute now writes nothing, so it bumps nothing, so the screen keeps
+ * its cached answer. Half an hour, not CacheService's six-hour maximum: every
+ * version leaves an entry behind, and a cache filled with dead ones is
+ * evicted from at will — the sync's one-at-a-time guard lives there too.
  *
  * Only the counts are cached, not the rows, so the payload stays far inside
  * the 100 KB per-key limit even for a 200-SKU stream.
  */
-var SALES_CACHE_TTL_S = 21600;
+var SALES_CACHE_TTL_S = 1800;
 
 function variationSalesCached_(listingId, known_) {
   var key = 'sales:v' + ordersVersion_() + ':' + String(listingId);
@@ -1045,6 +1049,20 @@ var SYNC_FILTER_TOLERANCE_S = 3600;
  */
 var SYNC_BUDGET_MS = 4 * 60 * 1000;
 
+/** Pages read back to back before what changed on them is written. See syncChangedOrders_. */
+var SYNC_PAGES_PER_WRITE = 10;
+
+/**
+ * The budget for a shop catching up while another is live.
+ *
+ * Shops share one run. A shop with a backlog — back after a token outage, or
+ * the first runs after this deploy for a shop quiet for weeks — would spend
+ * all four minutes, and a shop streaming at that moment got one page a run,
+ * five minutes apart. The live shop now goes first, and a catching-up shop
+ * gets this much while any shop is live: it still drains, a minute at a time.
+ */
+var SYNC_CATCHUP_MS = 45 * 1000;
+
 /**
  * Orders (and returns) already written whose update_time sits inside the
  * overlap, by id, so asking about them again does not write them again.
@@ -1141,7 +1159,13 @@ function shopsToSync_(lastListed, nowMs, lastRun, backlog) {
     if (every > 1 && last && last <= nowMs && nowMs - last < every * 60000 - 30000) return;
     out.push(shopId);
   });
-  return out.sort();
+  // Most recently active first, so a shop streaming now is read before a
+  // shop catching up can spend the run.
+  return out.sort(function (a, b) {
+    var at = Number((lastListed || {})[a] || 0);
+    var bt = Number((lastListed || {})[b] || 0);
+    return (bt - at) || (a < b ? -1 : a > b ? 1 : 0);
+  });
 }
 
 /**
@@ -1206,6 +1230,26 @@ function shopProps_(snapshot, prefix) {
  * write that says a shop is mid-broadcast. One property write, so the gate
  * above costs one property read.
  */
+/** How old an activity stamp may get before a read refreshes it. */
+var ACTIVITY_RESTAMP_MS = 5 * 60 * 1000;
+
+/**
+ * Stamp activity from a read — the listing screen, the Orders tab — but only
+ * when the stamp is older than ACTIVITY_RESTAMP_MS. Those screens poll, so an
+ * unthrottled stamp would be a property write every few seconds per phone.
+ */
+function noteShopActivityIfStale_(shopId, nowMs) {
+  if (!shopId) return;
+  try {
+    var at = Number(PropertiesService.getScriptProperties().getProperty(LAST_LISTED_PREFIX + String(shopId)) || 0);
+    var now = nowMs || Date.now();
+    if (at && at <= now && now - at < ACTIVITY_RESTAMP_MS) return;
+  } catch (e) {
+    // Fall through: a stamp written needlessly is cheaper than one missed.
+  }
+  noteShopActivity_(shopId);
+}
+
 function noteShopActivity_(shopId) {
   try {
     PropertiesService.getScriptProperties()
@@ -1384,6 +1428,49 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
     : fresh();
   var resuming = Boolean(scan.token);
 
+  /**
+   * Read pages back to back; write what changed, then save the memo and where
+   * to carry on, every SYNC_PAGES_PER_WRITE pages and at the end.
+   *
+   * It wrote after every page, and a write can wait thirty seconds for the
+   * lock behind a push. If TikTok's page token is a position in the results
+   * (undocumented), an order on a page already read that changes while a
+   * write waits leaves the results, everything after it moves up one, and the
+   * order that moves onto the page already read is never seen — and the
+   * watermark then passes it. Back to back, that window is one fetch again,
+   * as it was before writes were per page. Nothing is remembered as written,
+   * and no saved page points past it, until it has been written.
+   */
+  var held = [];
+  var unsaved = 0;
+  var save = function () {
+    if (held.length) writeOrders_(shopId, held, 'background sync');
+    held = [];
+    unsaved = 0;
+    var stored = seenText_(seen, SYNC_STATE_MAX_CHARS);
+    if (stored.dropped && !trimmed) {
+      trimmed = true;
+      warn_('TS-ORD-36', shopId + ': ' + stored.dropped + ' order(s) left out of the sync memo, ' +
+        'which is capped at ' + SYNC_STATE_MAX_CHARS + ' characters. They may be written once more.', shopId);
+    }
+    if (stored.text !== seenSaved) {
+      props.setProperty(seenKey, stored.text);
+      seenSaved = stored.text;
+    }
+    if (!scan.token) return;
+    var text = JSON.stringify(scan);
+    if (text.length <= SYNC_STATE_MAX_CHARS) {
+      props.setProperty(cursorKey, text);
+      cursorSaved = true;
+    } else {
+      // Not resumable, so the next run starts this scan again from the watermark.
+      warn_('TS-ORD-37', shopId + ': the order scan\'s page token is ' + text.length +
+        ' characters, too long to save; the next run starts the scan again.', shopId);
+      if (cursorSaved) props.deleteProperty(cursorKey);
+      cursorSaved = false;
+    }
+  };
+
   while (true) {
     var page;
     try {
@@ -1395,7 +1482,9 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
        *
        * How long a page token stays good is not documented anywhere we have
        * found. One that has lapsed costs a re-read from the watermark, which
-       * is what every run did before tokens were saved — never a gap.
+       * is what every run did before tokens were saved. Whether a token that
+       * does work walks the same results a minute later is not documented
+       * either: a scan resumed across runs relies on it.
        */
       warn_('TS-ORD-35', shopId + ': could not resume the saved order scan, so it starts ' +
         'again from the watermark. Reason: ' + (e && e.message ? e.message : e), shopId);
@@ -1409,7 +1498,10 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
 
     var check = changedSince_(page.orders, scan.ge);
     if (!check.applied) {
-      // A scan built on an ignored filter is not worth resuming.
+      // A scan built on an ignored filter is not worth resuming. What earlier
+      // pages read is still real, so it is written before falling back.
+      scan.token = '';
+      save();
       if (cursorSaved) props.deleteProperty(cursorKey);
       return { fallback: true, stale: check.stale };
     }
@@ -1417,38 +1509,21 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
     // Nothing changed: no Sheet is opened, nothing is written, and no lock is
     // taken. Which is the whole point of the question being "what changed"
     // rather than "what exists".
-    var changed = dropUnchanged_(page.orders, seen, 'id');
-    if (changed.length) writeOrders_(shopId, changed, 'background sync');
+    held = held.concat(dropUnchanged_(page.orders, seen, 'id'));
+    unsaved++;
 
     if (check.watermark > scan.newest) scan.newest = check.watermark;
     seen = rememberSeen_(seen, page.orders, 'id', Math.max(watermark, scan.newest) - SYNC_OVERLAP_S);
-    var stored = seenText_(seen, SYNC_STATE_MAX_CHARS);
-    if (stored.dropped && !trimmed) {
-      trimmed = true;
-      warn_('TS-ORD-36', shopId + ': ' + stored.dropped + ' order(s) left out of the sync memo, ' +
-        'which is capped at ' + SYNC_STATE_MAX_CHARS + ' characters. They may be written once more.', shopId);
-    }
-    if (stored.text !== seenSaved) {
-      props.setProperty(seenKey, stored.text);
-      seenSaved = stored.text;
-    }
 
-    if (!page.nextPageToken) break;
+    if (!page.nextPageToken) {
+      scan.token = '';
+      break;
+    }
     scan.token = page.nextPageToken;
 
-    var text = JSON.stringify(scan);
-    if (text.length <= SYNC_STATE_MAX_CHARS) {
-      props.setProperty(cursorKey, text);
-      cursorSaved = true;
-    } else {
-      // Not resumable, so the next run starts this scan again. Slower, never a gap.
-      warn_('TS-ORD-37', shopId + ': the order scan\'s page token is ' + text.length +
-        ' characters, too long to save; the next run starts the scan again.', shopId);
-      if (cursorSaved) props.deleteProperty(cursorKey);
-      cursorSaved = false;
-    }
-
-    if (Date.now() >= deadlineMs) {
+    var late = Date.now() >= deadlineMs;
+    if (late || unsaved >= SYNC_PAGES_PER_WRITE) save();
+    if (late) {
       var next = cursorSaved ? 'carries on from the same page' : 'starts the scan again';
       warn_('TS-ORD-34', shopId + ': more orders changed than one run can read. Stopped at ' +
         Math.round(SYNC_BUDGET_MS / 60000) + ' minutes with everything read so far written; ' +
@@ -1456,6 +1531,7 @@ function syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs) {
       return { pending: true };
     }
   }
+  save();
 
   // The last page: everything changed since the watermark has been read and
   // written, so — and only now — the watermark moves.
@@ -1524,6 +1600,12 @@ function syncRecentOrdersOnce_() {
   var props = PropertiesService.getScriptProperties();
   var nowEpoch = Math.floor(startedMs / 1000);
   var deadlineMs = startedMs + SYNC_BUDGET_MS;
+  var listed = lastListedAt_(snapshot);
+  var isLive = function (id) {
+    var at = Number(listed[id] || 0);
+    return Boolean(at) && syncEveryMinutes_(startedMs - at) === SYNC_EVERY_MINUTES;
+  };
+  var anyLive = shops.some(isLive);
 
   shops.forEach(function (shopId) {
     try {
@@ -1542,7 +1624,8 @@ function syncRecentOrdersOnce_() {
        * a cancellation, because cancelling does not change when an order was
        * created.
        */
-      var orders = syncChangedOrders_(shopId, snapshot, nowEpoch, deadlineMs);
+      var budget = anyLive && !isLive(shopId) ? Math.min(deadlineMs, Date.now() + SYNC_CATCHUP_MS) : deadlineMs;
+      var orders = syncChangedOrders_(shopId, snapshot, nowEpoch, budget);
 
       if (orders.fallback) {
         /**

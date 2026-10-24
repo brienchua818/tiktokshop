@@ -424,82 +424,101 @@ function auditReasons_(data) {
 }
 
 /**
- * What a listing looks like on TikTok right now, per variation.
+ * Which of TikTok's SKUs each of our rows is, in one copy of a listing — each
+ * SKU to at most one row, and no row to a SKU it cannot be shown to be.
  *
- * Answers the three questions that otherwise mean opening Seller Center: has
- * the push landed, is the variation live or still under review, and how much
- * stock is left.
+ * The cost of a wrong pair is not a wrong number: a row shows the stock and
+ * price of the SKU it is paired with, and its stock, price and Remove buttons
+ * act on that SKU. So each step below pairs only on evidence, and a row the
+ * evidence does not settle is left unpaired. Its SKU is then drawn as an
+ * external, under TikTok's own name and figures, where every button acts on
+ * exactly what is shown.
  *
- * `sold` is `set - available`, not a figure TikTok reports. The product API has
- * no sold count — that lives in orders — but we know what we asked for and it
- * tells us what remains, so the difference is sound unless someone edits stock
- * in Seller Center. Labelled as derived in the UI rather than presented as
- * TikTok's own number.
- */
-/**
- * Which of TikTok's SKUs each of our rows is, in one copy of a listing — and
- * each SKU to at most one row.
+ *   1. TikTok's id, when one row holds it. It names exactly one SKU, whoever
+ *      created it. (Matched on seller_sku alone, a variation added in Seller
+ *      Center — which usually has none — never matched its live copy and read
+ *      as in review: Brien, 24 Oct.)
+ *   2. An id two rows hold — an older build filled missing ids from whichever
+ *      SKU with that seller_sku it saw last — goes to the row whose name is
+ *      the SKU's name. Which row that is cannot be told from sheet order.
+ *   3. The name. A row's `variant` is the value name we sent, and TikTok
+ *      refuses two values with one name on a listing, so a name names one
+ *      SKU. Covers a row restored under a new id while its old copy is still
+ *      live, and a row whose id is stale.
+ *   4. seller_sku, for a row written before we kept the id, only when exactly
+ *      one such row and one unclaimed SKU share it. A row that has an id
+ *      TikTok no longer has is not matched to some other SKU by seller_sku:
+ *      its own is gone.
  *
- * TikTok's id first: it names exactly one SKU, whoever created it. seller_sku
- * is the fallback for a row TikTok's id cannot find in this copy — written
- * before we kept the id, restored under a new id while the old one is still
- * live, or holding an id another row already has — and only to a SKU no other
- * row has claimed. Every SKU with that seller_sku is considered, not just the
- * last.
- *
- * Two rows holding one id: an older build filled a missing id from the LAST
- * SKU with that seller_sku, which is the newest, so the id is the newer row's.
- * It goes to the newer row; the older one finds its own SKU by seller_sku.
- * Display only — nothing inferred here is written back.
- *
- * Matched on seller_sku alone, a variation added in Seller Center — which
- * usually has none — never matched its live copy and read as still in review
- * (Brien, 24 Oct). And without the one-row-per-SKU rule, a seller_sku changed
- * in Seller Center could pair one SKU with two rows, or let an old removed row
- * claim the variation that replaced it.
- *
- * Only rows the screen draws take part: pushed, then removed. A row in any
- * other state claims nothing, so its SKU is drawn as an external rather than
- * disappearing. `claimed` says which status claimed each SKU: only a pushed
- * row's claim keeps a SKU out of the externals, as before.
+ * Only rows the screen draws take part, and every listed row goes through all
+ * four steps before any removed row is tried: a removed B2 and the B2 put back
+ * after it share a name and a seller_sku, and while review of the new one
+ * runs, the old one's id is still in the live copy. A row in any other state
+ * claims nothing. `claimed` says which status claimed each SKU: only a
+ * pushed row's claim keeps a SKU out of the externals.
  */
 function pairRows_(rows, skus) {
   var byId = byTikTokId_(skus);
+  var byName = {};
   var bySeller = {};
   (skus || []).forEach(function (sku) {
-    if (!sku || !sku.sellerSku) return;
-    (bySeller[String(sku.sellerSku)] = bySeller[String(sku.sellerSku)] || []).push(sku);
+    if (!sku) return;
+    var name = nameKey_(sku.valueName);
+    if (name) byName[name] = sku;
+    if (sku.sellerSku) (bySeller[String(sku.sellerSku)] = bySeller[String(sku.sellerSku)] || []).push(sku);
   });
   var claimed = {};
   var byRow = {};
   var drawn = (rows || []).filter(function (r) {
     var st = String(r.status);
     return st === 'pushed' || st === 'removed';
-  }).sort(function (a, b) {
-    return (String(a.status) === 'pushed' ? 0 : 1) - (String(b.status) === 'pushed' ? 0 : 1);
+  });
+  var holders = {};
+  drawn.forEach(function (r) {
+    var id = String(r.tiktok_sku_id || '');
+    if (id) holders[id] = (holders[id] || 0) + 1;
   });
   var take = function (r, sku) {
-    if (!sku || claimed[skuKey_(sku)]) return;
+    if (!sku || claimed[skuKey_(sku)]) return false;
     byRow[String(r.sku_id)] = sku;
     claimed[skuKey_(sku)] = String(r.status);
+    return true;
   };
-  // By id, newest row first within each status (see above). Reversed, then
-  // sorted by status: the sort is stable, so newest-first holds in each group.
-  drawn.slice().reverse().sort(function (a, b) {
-    return (String(a.status) === 'pushed' ? 0 : 1) - (String(b.status) === 'pushed' ? 0 : 1);
-  }).forEach(function (r) {
-    var id = String(r.tiktok_sku_id || '');
-    if (id) take(r, byId[id]);
-  });
-  // By seller_sku, oldest row first: the oldest row takes the oldest SKU.
-  drawn.forEach(function (r) {
-    if (byRow[String(r.sku_id)]) return;
-    var same = r.identifier ? (bySeller[String(r.identifier)] || []) : [];
-    for (var i = 0; i < same.length; i++) {
-      if (!claimed[skuKey_(same[i])]) { take(r, same[i]); break; }
-    }
+  var open = function (r) { return !byRow[String(r.sku_id)]; };
+
+  ['pushed', 'removed'].forEach(function (status) {
+    var these = drawn.filter(function (r) { return String(r.status) === status; });
+    // 1. An id one row holds.
+    these.forEach(function (r) {
+      var id = String(r.tiktok_sku_id || '');
+      if (id && holders[id] === 1) take(r, byId[id]);
+    });
+    // 2. An id two rows hold: to the row whose name is the SKU's.
+    these.forEach(function (r) {
+      var id = String(r.tiktok_sku_id || '');
+      if (!open(r) || !id || holders[id] < 2 || !byId[id]) return;
+      if (nameKey_(byId[id].valueName) && nameKey_(byId[id].valueName) === nameKey_(r.variant)) take(r, byId[id]);
+    });
+    // 3. The name.
+    these.forEach(function (r) {
+      if (open(r) && nameKey_(r.variant)) take(r, byName[nameKey_(r.variant)]);
+    });
+    // 4. seller_sku, for a row with no id, only where it is unambiguous.
+    var idless = these.filter(function (r) { return open(r) && r.identifier && !String(r.tiktok_sku_id || ''); });
+    var waiting = {};
+    idless.forEach(function (r) { waiting[String(r.identifier)] = (waiting[String(r.identifier)] || 0) + 1; });
+    idless.forEach(function (r) {
+      if (waiting[String(r.identifier)] !== 1) return;
+      var free = (bySeller[String(r.identifier)] || []).filter(function (sku) { return !claimed[skuKey_(sku)]; });
+      if (free.length === 1) take(r, free[0]);
+    });
   });
   return { byRow: byRow, claimed: claimed };
+}
+
+/** A variation name as TikTok compares them: trimmed, spaces collapsed, any case. */
+function nameKey_(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
 /** The key a SKU is claimed under: TikTok's id, or its seller_sku if it has no id. */
@@ -540,6 +559,12 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
   // later.
   var pairs = pairRows_(rows, liveSkus);
   var onTikTok = byTikTokId_(liveSkus);
+  // seller_skus on TikTok that no row has claimed: an id-less row may be one
+  // of them, though pairRows_ will not guess which.
+  var unclaimedSeller = {};
+  (liveSkus || []).forEach(function (sku) {
+    if (sku && sku.sellerSku && !pairs.claimed[skuKey_(sku)]) unclaimedSeller[String(sku.sellerSku)] = true;
+  });
 
   var updates = [];
   (rows || []).forEach(function (r) {
@@ -577,6 +602,9 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
     // (see pairRows_). Whichever row it belongs to, the SKU is on sale, and a
     // removed mark would put a live variation in the Removed tab.
     if (String(r.tiktok_sku_id || '') && onTikTok[String(r.tiktok_sku_id)]) return;
+    // No id, and a SKU with its seller_sku is on TikTok unclaimed: not proof
+    // that it has gone.
+    if (!String(r.tiktok_sku_id || '') && r.identifier && unclaimedSeller[String(r.identifier)]) return;
 
     var seenAt = Date.parse(isoOf_(r.confirmed_at));
     if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
@@ -712,6 +740,19 @@ function noLiveVersion_(productId, e) {
   warn_('TS-PRD-33', 'No live version for ' + productId + ' (nothing buyable yet): ' + e);
 }
 
+/**
+ * What a listing looks like on TikTok right now, per variation.
+ *
+ * Answers the three questions that otherwise mean opening Seller Center: has
+ * the push landed, is the variation live or still under review, and how much
+ * stock is left.
+ *
+ * `sold` is `set - available`, not a figure TikTok reports. The product API has
+ * no sold count — that lives in orders — but we know what we asked for and it
+ * tells us what remains, so the difference is sound unless someone edits stock
+ * in Seller Center. Labelled as derived in the UI rather than presented as
+ * TikTok's own number.
+ */
 function listingState_(listingId) {
   /**
    * Read once.
@@ -1310,7 +1351,7 @@ function removeVariation_(listingId, tiktokSkuId, user) {
   // the live one for the prices it must not undo. See pricedFromLive_.
   var versions = productVersions_(shopId, String(listingId));
   var snapshot = versions.pending;
-  var ours = rows.filter(function (r) { return String(r.tiktok_sku_id || '') === String(tiktokSkuId); })[0];
+  var ours = ourRowFor_(rows, snapshot.skus, skuIn_(snapshot.skus, tiktokSkuId, ''));
   var alsoKeep = pendingToCarry_(listingId, snapshot, ours ? ours.identifier : null);
   var built = buildRemovePayload_(pricedFromLive_(snapshot, versions.buyable), alsoKeep, tiktokSkuId);
 
@@ -2465,7 +2506,7 @@ function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute,
   // the Sheet busy, a log line — must not report the change as failed: the
   // person would tap again and it would land twice.
   try {
-    var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+    var row = ourRowFor_(listSkus_(listingId), live.skus, sku);
     if (row) markSkus_([{ sku_id: String(row.sku_id), stock: after }]);
   } catch (e) {
     warn_('TS-STK-17', listingId + ': ' + label + ' is ' + after + ' on TikTok, but our row could not be ' +
@@ -2490,29 +2531,22 @@ function setVariationStock_(listingId, identifier, tiktokSkuId, delta, absolute,
 }
 
 /**
- * Our Sheet row for a variation TikTok has, or null.
+ * Our Sheet row for a SKU TikTok has, or null: the row the screen draws that
+ * SKU on (pairRows_), in the same copy of the listing.
  *
- * TikTok's own id first, because it names exactly one SKU. Then the
- * identifier, but only on a row that is still listed: a removed B74 and the
- * B74 put back after it share the identifier, and the removed one is usually
- * the older row, so "the first row with this identifier" — which the stock
- * change used — wrote the new figure onto the record of a deleted variation.
- * A variation added in Seller Center has no row, and gets null.
+ * Not "the first row holding its id". An older build could stamp one id on
+ * two rows, and the first of them was then sent the other variation's stock,
+ * price or removal — onto the record of a variation still on sale. Nor "the
+ * first row with this identifier": a removed B74 and the B74 put back after it
+ * share the identifier. A SKU the screen draws as an external — added in
+ * Seller Center, or one no row can be shown to be — gets null.
  */
-function ourRowFor_(rows, tiktokSkuId, identifier) {
-  var id = String(tiktokSkuId || '');
-  var i;
-  if (id) {
-    for (i = 0; i < rows.length; i++) {
-      if (String(rows[i].tiktok_sku_id || '') === id) return rows[i];
-    }
-  }
-  if (identifier) {
-    for (i = 0; i < rows.length; i++) {
-      if (String(rows[i].identifier) === String(identifier) && String(rows[i].status) === 'pushed') {
-        return rows[i];
-      }
-    }
+function ourRowFor_(rows, skus, sku) {
+  if (!sku) return null;
+  var byRow = pairRows_(rows, skus).byRow;
+  for (var i = 0; i < rows.length; i++) {
+    var paired = byRow[String(rows[i].sku_id)];
+    if (paired && skuKey_(paired) === skuKey_(sku)) return rows[i];
   }
   return null;
 }
@@ -2726,7 +2760,7 @@ function setVariationPrice_(listingId, identifier, tiktokSkuId, price, expectedB
   // As for stock: past this point the price is on TikTok, and our own record
   // failing must not report it as failed.
   try {
-    var row = ourRowFor_(listSkus_(listingId), sku.id, identifier);
+    var row = ourRowFor_(listSkus_(listingId), buyable.skus, sku);
     if (row) markSkus_([{ sku_id: String(row.sku_id), price: requested }]);
   } catch (e) {
     warn_('TS-PRC-13', listingId + ': ' + label + ' is ' + requested + ' on TikTok, but our row could not be ' +

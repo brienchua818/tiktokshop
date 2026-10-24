@@ -172,7 +172,7 @@ ${src}
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
     checkStockTotal_, skuForStock_, seqOf_,
     skuRowUpdates_, REMOVAL_GRACE_MS, pendingToCarry_,
-    pairRows_: typeof pairRows_ === 'function' ? pairRows_ : undefined,
+    pairRows_: typeof pairRows_ === 'function' ? pairRows_ : undefined, ourRowFor_,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_, isoOf_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
@@ -1791,30 +1791,132 @@ check('a restored variation is not claimed by the removed row it replaced', () =
 })
 
 check('two rows of one identifier stamped with the same id by an older build each find their own SKU', () => {
-  // An older build filled x's missing id from the LAST SKU with seller_sku
-  // B74 — the newest, y's 7402. So 7402 is y's; x is 7401. Nothing inferred
-  // is written back, and neither row is marked removed.
+  // An older build filled x's missing id from whichever B74 SKU it saw last —
+  // here y's 7402. The shared id goes to the row whose name it carries, and x
+  // finds 7401 by its own name. Nothing inferred is written back, and neither
+  // row is marked removed.
   const rows = [
-    { sku_id: 'x', identifier: 'B74', variant: 'red', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
-    { sku_id: 'y', identifier: 'B74', variant: 'blue', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+    { sku_id: 'x', identifier: 'B74', variant: 'B74 red', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+    { sku_id: 'y', identifier: 'B74', variant: 'B74 blue', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
   ]
-  const skus = [{ id: '7401', sellerSku: 'B74' }, { id: '7402', sellerSku: 'B74' }]
+  const skus = [{ id: '7401', sellerSku: 'B74', valueName: 'B74 red' }, { id: '7402', sellerSku: 'B74', valueName: 'B74 blue' }]
   const { byRow } = gs.pairRows_(rows, skus)
   eq([byRow.x.id, byRow.y.id], ['7401', '7402'])
   eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [])
 })
 
-check('a row whose id is on TikTok is never marked removed, even when another row holds that id', () => {
-  // Only 7402 left, held by both rows. It goes to the newer row; the older
-  // one is unpaired, and stays as it is rather than being called removed
-  // while the SKU it names is on sale.
+check('a shared id that is the OLDER row\'s SKU still goes to the older row, in either read order', () => {
+  // The case "the newer row wins" got wrong: X's own SKU is 100, and the build
+  // that stamped Y copied X's. Y showed X's stock, and Remove on Y deleted X.
+  const rows = [
+    { sku_id: 'X', identifier: 'B74', variant: 'B74 4 tier', status: 'pushed', tiktok_sku_id: '100', confirmed_at: HOUR_AGO },
+    { sku_id: 'Y', identifier: 'B74', variant: 'B74 Whirl', status: 'pushed', tiktok_sku_id: '100', confirmed_at: HOUR_AGO },
+  ]
+  const tier = { id: '100', sellerSku: 'B74', valueName: 'B74 4 tier' }
+  const whirl = { id: '200', sellerSku: 'B74', valueName: 'B74 Whirl' }
+  ;[rows, rows.slice().reverse()].forEach((sheet) => [[tier, whirl], [whirl, tier]].forEach((skus) => {
+    const order = sheet.map((r) => r.sku_id).join() + ' / ' + skus.map((s) => s.id).join()
+    const { byRow } = gs.pairRows_(sheet, skus)
+    eq([byRow.X.id, byRow.Y.id], ['100', '200'], order)
+    eq(gs.skuRowUpdates_(sheet, skus, 'NOW', Date.now()), [], order)
+  }))
+  // 100 deleted: Y is still 200 by its name, and X — whose SKU is gone — is
+  // marked removed once the grace period is over.
+  const { byRow } = gs.pairRows_(rows, [whirl])
+  eq([byRow.X, byRow.Y.id], [undefined, '200'])
+  eq(gs.skuRowUpdates_(rows, [whirl], 'NOW', Date.now()).map((u) => [u.sku_id, u.status]), [['X', 'removed']])
+})
+
+check('names are compared as TikTok compares them: case and spacing aside', () => {
+  const rows = [{ sku_id: 'a', identifier: 'B74', variant: ' b74  RED ', status: 'pushed', tiktok_sku_id: '' }]
+  const { byRow } = gs.pairRows_(rows, [{ id: '1', sellerSku: '', valueName: 'B74 red' }, { id: '2', sellerSku: 'B74', valueName: 'B74 blue' }])
+  eq(byRow.a.id, '1')
+})
+
+check('a row whose own SKU is gone is not matched to another SKU by seller_sku', () => {
+  // A1 (8001) deleted in Seller Center, and a new SKU given seller_sku A1
+  // there. That SKU is not ours: it is drawn as an external, and A1 — listed
+  // or removed — is not paired with it, nor brought back from Removed.
+  const sku = { id: '9050', sellerSku: 'A1', valueName: 'Something new' }
+  const listed = [{ sku_id: 'a', identifier: 'A1', variant: 'A1 item', status: 'pushed', tiktok_sku_id: '8001', confirmed_at: HOUR_AGO }]
+  const one = gs.pairRows_(listed, [sku])
+  eq([one.byRow.a, one.claimed['id:9050']], [undefined, undefined])
+  eq(gs.skuRowUpdates_(listed, [sku], 'NOW', Date.now()).map((u) => u.status), ['removed'])
+  const gone = [Object.assign({}, listed[0], { status: 'removed' })]
+  eq(gs.pairRows_(gone, [sku]).byRow.a, undefined)
+  eq(gs.skuRowUpdates_(gone, [sku], 'NOW', Date.now()), [])
+})
+
+check('a row the evidence does not settle is left unpaired, never guessed', () => {
+  // Two rows hold 7402, and nothing names either of them: neither is paired,
+  // so 7402 is drawn as an external under TikTok's own figures — and neither
+  // row is marked removed while the SKU its id names is on sale.
   const rows = [
     { sku_id: 'x', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
     { sku_id: 'y', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
   ]
   const skus = [{ id: '7402', sellerSku: 'B74' }]
-  eq(gs.pairRows_(rows, skus).byRow.y.id, '7402')
+  const { byRow, claimed } = gs.pairRows_(rows, skus)
+  eq([byRow.x, byRow.y, claimed['id:7402']], [undefined, undefined, undefined])
   eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [])
+  // By seller_sku alone, with rows written before we kept the id: two rows
+  // and one SKU, or one row and two SKUs, is a guess, so neither is paired.
+  const p = { sku_id: 'p', identifier: 'B75', status: 'pushed', tiktok_sku_id: '', confirmed_at: HOUR_AGO }
+  const q = { sku_id: 'q', identifier: 'B75', status: 'pushed', tiktok_sku_id: '', confirmed_at: HOUR_AGO }
+  const one = [{ id: '1', sellerSku: 'B75' }]
+  const both = gs.pairRows_([p, q], one)
+  eq([both.byRow.p, both.byRow.q, both.claimed['id:1']], [undefined, undefined, undefined])
+  // And neither is marked removed: one of them may well be that SKU.
+  eq(gs.skuRowUpdates_([p, q], one, 'NOW', Date.now()), [])
+  eq(gs.pairRows_([p], [{ id: '1', sellerSku: 'B75' }, { id: '2', sellerSku: 'B75' }]).byRow.p, undefined)
+  // With the SKU gone, or claimed by the row whose id it is, they are.
+  eq(gs.skuRowUpdates_([p], [], 'NOW', Date.now()).map((u) => u.status), ['removed'])
+  const holder = { sku_id: 'h', identifier: 'B75', status: 'pushed', tiktok_sku_id: '1', confirmed_at: HOUR_AGO }
+  eq(gs.skuRowUpdates_([holder, p], one, 'NOW', Date.now()).map((u) => [u.sku_id, u.status]), [['p', 'removed']])
+})
+
+check('a listed row is paired before a removed one, whatever the removed one holds', () => {
+  // B2 removed (9002) and put back (9102). Until review of 9102 passes, the
+  // live copy still has 9002: the listed B2 shows it, by name, and the
+  // removed row — whose id it is — stays in Removed.
+  const rows = [
+    { sku_id: 'old', identifier: 'B2', variant: 'B2 item', status: 'removed', tiktok_sku_id: '9002' },
+    { sku_id: 'new', identifier: 'B2', variant: 'B2 item', status: 'pushed', tiktok_sku_id: '9102' },
+  ]
+  const live = [{ id: '9002', sellerSku: 'B2', valueName: 'B2 item' }]
+  const { byRow, claimed } = gs.pairRows_(rows, live)
+  eq([byRow.new && byRow.new.id, byRow.old, claimed['id:9002']], ['9002', undefined, 'pushed'])
+})
+
+check('a row whose id is on TikTok is never marked removed, even when another row holds that id', () => {
+  // Only 7402 left, held by both rows. It goes to the row it names; the other
+  // is unpaired, and stays as it is rather than being called removed while
+  // the SKU its id names is on sale.
+  const rows = [
+    { sku_id: 'x', identifier: 'B74', variant: 'B74 red', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+    { sku_id: 'y', identifier: 'B74', variant: 'B74 blue', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+  ]
+  const skus = [{ id: '7402', sellerSku: 'B74', valueName: 'B74 blue' }]
+  const { byRow } = gs.pairRows_(rows, skus)
+  eq([byRow.x, byRow.y.id], [undefined, '7402'])
+  eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [])
+})
+
+check('our row for a SKU is the row the screen draws it on, not the first holding its id', () => {
+  const rows = [
+    { sku_id: 'X', identifier: 'B74', variant: 'B74 4 tier', status: 'pushed', tiktok_sku_id: '200' },
+    { sku_id: 'Y', identifier: 'B74', variant: 'B74 Whirl', status: 'pushed', tiktok_sku_id: '200' },
+    { sku_id: 'Z', identifier: 'C1', variant: 'C1 item', status: 'removed', tiktok_sku_id: '300' },
+    { sku_id: 'W', identifier: 'C1', variant: 'C1 item', status: 'pushed', tiktok_sku_id: '301' },
+  ]
+  const skus = [
+    { id: '100', sellerSku: 'B74', valueName: 'B74 4 tier' },
+    { id: '200', sellerSku: 'B74', valueName: 'B74 Whirl' },
+    { id: '301', sellerSku: 'C1', valueName: 'C1 item' },
+    { id: '900', sellerSku: '', valueName: 'Seller Center one' },
+  ]
+  const row = (id) => { const r = gs.ourRowFor_(rows, skus, skus.find((s) => s.id === id)); return r && r.sku_id }
+  eq([row('100'), row('200'), row('301'), row('900')], ['X', 'Y', 'W', null])
 })
 
 check('a row written before we kept the id is still found by seller_sku', () => {
@@ -5581,7 +5683,7 @@ const PRICE_CASES = [
     price: { sale_price: o.price, currency: 'SGD' },
     inventory: [{ warehouse_id: 'W1', quantity: o.qty }],
     sales_attributes: [{ id: '100089', name: 'Design', value_id: 'v' + o.id,
-      value_name: (o.seller || 'SC') + ' item', sku_img: { uri: 'img' + o.id } }],
+      value_name: o.name || ((o.seller || 'SC') + ' item'), sku_img: { uri: 'img' + o.id } }],
   })
   const product = (v) => ({ code: 0, data: {
     id: 'P1', title: 'Stream', status: v.status, main_images: [{ uri: 'main' }], skus: v.skus.map(rawSku),
@@ -5936,8 +6038,8 @@ const PRICE_CASES = [
     // x "B74 red" and y "B74 blue" both hold 7402, filled by an older build
     // from the newest B74 — blue's. Each line must show its own stock, and a
     // stock tap or Remove on a line must reach that line's SKU.
-    const red = { id: '7401', seller: 'B74', price: '10.00', qty: 3 }
-    const blue = { id: '7402', seller: 'B74', price: '20.00', qty: 6 }
+    const red = { id: '7401', seller: 'B74', name: 'B74 red', price: '10.00', qty: 3 }
+    const blue = { id: '7402', seller: 'B74', name: 'B74 blue', price: '20.00', qty: 6 }
     setup({
       v2: [A1, red, blue],
       rows: [
@@ -5953,6 +6055,46 @@ const PRICE_CASES = [
     eq([line('B74 red').tiktok_sku_id, line('B74 red').stock_available], ['7401', 3])
     eq([line('B74 blue').tiktok_sku_id, line('B74 blue').stock_available], ['7402', 6])
     eq(b74(), before, 'nothing written back to either B74 row')
+  })
+
+  check('with one id on two rows, stock, price and Remove on a line reach that line\'s SKU and row', () => {
+    // X "B74 4 tier" and Y "B74 Whirl" both hold 100 — X's own SKU, copied to
+    // Y by an older build. Each line must show its own SKU, and what is done
+    // on Y must reach 200 on TikTok AND be recorded on Y, never on X.
+    const tier = { id: '100', seller: 'B74', name: 'B74 4 tier', price: '10.00', qty: 7 }
+    const whirl = { id: '200', seller: 'B74', name: 'B74 Whirl', price: '20.00', qty: 2 }
+    ;[[A1, whirl, tier], [A1, tier, whirl]].forEach((v2) => {
+      setup({
+        v2,
+        rows: [
+          ROWS[0],
+          ours({ sku_id: 'X', identifier: 'B74', tiktok_sku_id: '100', variant: 'B74 4 tier', price: '10.00', stock: 7,
+            confirmed_at: '2026-10-01T00:00:00Z' }),
+          ours({ sku_id: 'Y', identifier: 'B74', tiktok_sku_id: '100', variant: 'B74 Whirl', price: '20.00', stock: 2,
+            confirmed_at: '2026-10-01T00:00:00Z' }),
+        ],
+      })
+      const order = v2.map((x) => x.id).join()
+      const out = call('listingState', { listing_id: 'P1' })
+      const line = (name) => out.ok.variants.find((v) => v.variant === name)
+      eq([line('B74 4 tier').tiktok_sku_id, line('B74 4 tier').stock_available], ['100', 7], order)
+      eq([line('B74 Whirl').tiktok_sku_id, line('B74 Whirl').stock_available], ['200', 2], order)
+
+      const sent = call('setStock', { listing_id: 'P1', identifier: 'B74', tiktok_sku_id: '200', absolute: 5, expected_before: 2 })
+      eq(sent.ok && sent.ok.after, 5, JSON.stringify(sent))
+      eq([qtyOf('100'), qtyOf('200')], [7, 5], order)
+      eq([cell(1, 'stock'), cell(2, 'stock')], [7, 5], 'stock recorded on Y, ' + order)
+
+      const priced = call('setPrice', { listing_id: 'P1', identifier: 'B74', tiktok_sku_id: '200', price: '18.00', expected_before: '20.00' })
+      eq(Boolean(priced.ok), true, JSON.stringify(priced))
+      eq([cell(1, 'price'), cell(2, 'price')], ['10.00', '18.00'], 'price recorded on Y, ' + order)
+
+      const removed = call('removeVariation', { listing_id: 'P1', tiktok_sku_id: '200' })
+      eq(Boolean(removed.ok), true, JSON.stringify(removed))
+      const edit = tt.writes.filter((w) => w.path.endsWith('/partial_edit')).pop()
+      eq(edit.body.skus.map((x) => x.id).filter(Boolean).sort(), ['100', '9001'], order)
+      eq([cell(1, 'status'), cell(2, 'status')], ['pushed', 'removed'], 'Y marked removed, X still listed, ' + order)
+    })
   })
 
   check('a variation restored straight after its removal shows the copy still live', () => {

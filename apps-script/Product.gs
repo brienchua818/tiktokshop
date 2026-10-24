@@ -462,6 +462,15 @@ function shownAsOurs_(rows) {
   return shown;
 }
 
+/** The same rows, by the TikTok id each one holds. */
+function shownIdsAsOurs_(rows) {
+  var shown = {};
+  rows.forEach(function (r) {
+    if (String(r.status) === 'pushed' && r.tiktok_sku_id) shown[String(r.tiktok_sku_id)] = true;
+  });
+  return shown;
+}
+
 /**
  * Reconcile our rows against what TikTok is showing, and say what to write.
  *
@@ -490,6 +499,10 @@ function shownAsOurs_(rows) {
  */
 function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
   var live = {};
+  // By TikTok's id as well, asked first: a variation of ours whose seller_sku
+  // was changed or cleared in Seller Center is still ours and still on sale,
+  // and matched on seller_sku alone it was marked removed ten minutes later.
+  var liveById = byTikTokId_(liveSkus);
   (liveSkus || []).forEach(function (s) {
     if (s && s.sellerSku) live[String(s.sellerSku)] = s;
   });
@@ -499,7 +512,7 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
     var status = String(r.status);
     if (status !== 'pushed' && status !== 'removed') return;
 
-    var found = live[String(r.identifier)];
+    var found = (String(r.tiktok_sku_id || '') && liveById[String(r.tiktok_sku_id)]) || live[String(r.identifier)];
 
     if (found) {
       var patch = { sku_id: String(r.sku_id) };
@@ -584,7 +597,16 @@ function variationState_(identifier, tiktokSkuId, liveSku, pendingSku) {
   return { state: 'not_listed', on_tiktok: false, buyable: false, sku: null, quantity: null };
 }
 
-/** Index a version's SKUs by seller_sku, the only key both sides agree on. */
+/** Index a version's SKUs by TikTok's own id. */
+function byTikTokId_(skus) {
+  var out = {};
+  (skus || []).forEach(function (sku) {
+    if (sku && sku.id) out[String(sku.id)] = sku;
+  });
+  return out;
+}
+
+/** Index a version's SKUs by seller_sku: ours have one, Seller Center's often do not. */
 function bySellerSku_(skus) {
   var out = {};
   (skus || []).forEach(function (sku) {
@@ -710,6 +732,23 @@ function listingState_(listingId) {
   }
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
   var pendingSkus = bySellerSku_(live.skus);
+  /**
+   * And by TikTok's own id, which is asked first.
+   *
+   * seller_sku is ours: a variation added in Seller Center usually has none,
+   * so matched on it alone, one that was live read as still in review, with
+   * no stock and no way to change it (Brien, 24 Oct: "120*60 Random Do Not"
+   * showing Reviewing and 0 left while it sold on TikTok). TikTok's id names
+   * exactly one SKU whoever created it; seller_sku stays as the fallback for
+   * rows written before we kept the id.
+   */
+  var liveById = byTikTokId_(buyable ? buyable.skus : []);
+  var pendingById = byTikTokId_(live.skus);
+  var inVersion = function (byId, bySeller, tiktokSkuId, sellerSku) {
+    var id = String(tiktokSkuId || '');
+    if (id && byId[id]) return byId[id];
+    return sellerSku ? (bySeller[String(sellerSku)] || null) : null;
+  };
 
   /**
    * Record what TikTok is showing, and what it has stopped showing.
@@ -760,7 +799,8 @@ function listingState_(listingId) {
   }).map(function (r) {
     var st = variationState_(
       r.identifier, r.tiktok_sku_id,
-      liveSkus[String(r.identifier)], pendingSkus[String(r.identifier)]
+      inVersion(liveById, liveSkus, r.tiktok_sku_id, r.identifier),
+      inVersion(pendingById, pendingSkus, r.tiktok_sku_id, r.identifier)
     );
     var match = st.sku;
     var sale = salesFor_(sales, (match && match.id) || r.tiktok_sku_id, r.identifier);
@@ -881,18 +921,18 @@ function listingState_(listingId) {
   // or on another tool. Shown, or the app claims a listing has four variations
   // while listing three, and offers an identifier that is already taken.
   var oursByIdentifier = shownAsOurs_(rows);
-  var liveById = {};
-  (buyable ? buyable.skus : []).forEach(function (s) {
-    if (s.id) liveById[String(s.id)] = s;
-  });
+  var oursById = shownIdsAsOurs_(rows);
   live.skus.forEach(function (s) {
     if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
+    // Ours by TikTok's id too: a row of ours whose seller_sku was cleared in
+    // Seller Center is drawn as ours above, and must not be drawn twice.
+    if (s.id && oursById[String(s.id)]) return;
     var extSale = salesFor_(sales, s.id, s.sellerSku);
-    var extState = variationState_(s.sellerSku, s.id, liveSkus[String(s.sellerSku)], s);
-    // The live price before the one under review, which can lag a price
-    // change (see pricedFromLive_). By TikTok's id first: a Seller Center
-    // variation often has no seller_sku to match on.
-    var extLive = liveById[String(s.id)] || (s.sellerSku ? liveSkus[String(s.sellerSku)] : null);
+    // The live copy by TikTok's id first: a Seller Center variation often has
+    // no seller_sku to match on. The live price comes from it too, before the
+    // one under review, which can lag a price change (see pricedFromLive_).
+    var extLive = inVersion(liveById, liveSkus, s.id, s.sellerSku);
+    var extState = variationState_(s.sellerSku, s.id, extLive, s);
     variants.push({
       identifier: String(s.sellerSku || ''),
       variant: String(s.valueName || ''),
@@ -997,8 +1037,12 @@ function listingState_(listingId) {
  */
 function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
   var seen = {};
+  var seenIds = {};
   snapshot.skus.forEach(function (sku) {
     if (sku.sellerSku) seen[String(sku.sellerSku)] = true;
+    // And by id: a SKU of ours already in the read, under a seller_sku changed
+    // in Seller Center, must not be sent a second time beside itself.
+    if (sku.id) seenIds[String(sku.id)] = true;
   });
   var cutoff = Date.now() - REVIEW_WINDOW_MS;
   return listSkus_(listingId).filter(function (r) {
@@ -1006,6 +1050,7 @@ function pendingToCarry_(listingId, snapshot, excludeIdentifier) {
     if (excludeIdentifier && String(r.identifier) === String(excludeIdentifier)) return false;
     if (seen[String(r.identifier)]) return false;
     if (!String(r.tiktok_sku_id || '')) return false;
+    if (seenIds[String(r.tiktok_sku_id)]) return false;
     if (String(r.confirmed_at || '')) return false;
     var pushedAt = Date.parse(isoOf_(r.pushed_at) || isoOf_(r.created_at));
     return !isNaN(pushedAt) && pushedAt >= cutoff;

@@ -480,4 +480,29 @@ describe('6. how old the figures are', () => {
     expect(q.removeDraft).not.toHaveBeenCalled()
     vi.mocked(q.allDrafts).mockResolvedValue([])
   })
+
+  it('a Seller Center variation with no stock figure does not read "0 left"', async () => {
+    ctl.listingState.mockResolvedValue(
+      state(
+        variant('A1'),
+        variant('', {
+          variant: '120*60 Random', external: true, status: 'external', created_by: '', tiktok_sku_id: 'S9',
+          state: 'reviewing', buyable: false, stock_available: null, stock_total: null, sold: null,
+        }),
+      ),
+    )
+    await mount()
+    const row = [...el.querySelectorAll('li')].find((li) => (li.textContent ?? '').includes('120*60 Random'))!
+    expect(row.textContent).not.toMatch(/left/)
+    expect(row.textContent).toContain('Reviewing')
+  })
+
+  it('a live Seller Center variation shows its stock', async () => {
+    ctl.listingState.mockResolvedValue(
+      state(variant('', { variant: '120*60 Random', external: true, status: 'external', tiktok_sku_id: 'S9', stock_available: 4, stock_total: 6 })),
+    )
+    await mount()
+    const row = [...el.querySelectorAll('li')].find((li) => (li.textContent ?? '').includes('120*60 Random'))!
+    expect(row.textContent).toContain('4 left')
+  })
 })

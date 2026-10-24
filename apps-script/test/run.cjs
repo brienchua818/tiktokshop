@@ -171,7 +171,7 @@ ${src}
     returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
     checkStockTotal_, skuForStock_, seqOf_,
-    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS,
+    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS, pendingToCarry_,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_, isoOf_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
@@ -1724,6 +1724,16 @@ check('a first sighting stamps the id and the time, and only once', () => {
   // Nothing left to write on the next refresh.
   const settled = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: HOUR_AGO, tiktok_sku_id: '77' }]
   eq(gs.skuRowUpdates_(settled, live, 'NOW', Date.now()).length, 0)
+})
+
+check('a variation of ours whose seller_sku was changed in Seller Center is not marked removed', () => {
+  // Matched on seller_sku alone, it vanished from the match and was marked
+  // removed ten minutes later, while it was still on sale.
+  const rows = [{ sku_id: 'r1', identifier: 'B74', status: 'pushed', confirmed_at: HOUR_AGO, tiktok_sku_id: '77' }]
+  eq(gs.skuRowUpdates_(rows, [{ sellerSku: '', id: '77' }], 'NOW', Date.now()), [])
+  eq(gs.skuRowUpdates_(rows, [{ sellerSku: 'B74-renamed', id: '77' }], 'NOW', Date.now()), [])
+  // And one that really has gone still is.
+  eq(gs.skuRowUpdates_(rows, [{ sellerSku: 'B75', id: '78' }], 'NOW', Date.now()).map((u) => u.status), ['removed'])
 })
 
 check('only rows the screen actually draws suppress the external fallback', () => {
@@ -5808,6 +5818,41 @@ const PRICE_CASES = [
     let message = ''
     try { gs.skuForStock_({ skus: [] }, 'B9', '') } catch (e) { message = e.message; eq(gs.codeOf_(e), 'TS-STK-02') }
     eq(/under review is not returned|wait for it to go live/.test(message), false, message)
+  })
+
+  // ── what the listing screen is told ─────────────────────────────────────
+
+  check('a Seller Center variation with no seller_sku that is live reads as live, with its stock', () => {
+    // Brien, 24 Oct: "120*60 Random Do Not" read Reviewing and 0 left while it
+    // was live and selling. Matched on seller_sku alone, it never matched.
+    setup()
+    const out = call('listingState', { listing_id: 'P1' })
+    const sc = out.ok.variants.find((v) => v.tiktok_sku_id === '9003')
+    eq([sc.state, sc.buyable, sc.on_tiktok, sc.stock_available], ['live', true, true, 4], JSON.stringify(sc))
+  })
+
+  check('one still only in the copy under review reads as reviewing', () => {
+    setup({ v1: [A1, B2] })
+    const out = call('listingState', { listing_id: 'P1' })
+    const sc = out.ok.variants.find((v) => v.tiktok_sku_id === '9003')
+    eq([sc.state, sc.buyable, sc.stock_available], ['reviewing', false, null])
+  })
+
+  check('a row of ours whose seller_sku was cleared in Seller Center is drawn once, as ours, live', () => {
+    const cleared = Object.assign({}, A1, { seller: '' })
+    setup({ v2: [cleared, B2, SC] })
+    const out = call('listingState', { listing_id: 'P1' })
+    const a1 = out.ok.variants.filter((v) => v.tiktok_sku_id === '9001')
+    eq(a1.length, 1, JSON.stringify(a1))
+    eq([a1[0].external, a1[0].identifier, a1[0].state, a1[0].stock_available], [false, 'A1', 'live', 10])
+  })
+
+  check('a SKU of ours already in the read under a changed seller_sku is not carried a second time', () => {
+    const fresh = ours({ sku_id: 's1', identifier: 'A1', tiktok_sku_id: '9001', price: '12.90', stock: 10,
+      pushed_at: new Date().toISOString(), confirmed_at: '' })
+    setup({ rows: [fresh] })
+    eq(gs.pendingToCarry_('P1', { skus: [] }).length, 1, 'not in the read, still under review: carried')
+    eq(gs.pendingToCarry_('P1', { skus: [{ id: '9001', sellerSku: '' }] }).length, 0, 'in the read by id: not carried')
   })
 
   // ── price ──────────────────────────────────────────────────────────────

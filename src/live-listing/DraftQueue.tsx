@@ -1088,11 +1088,14 @@ function RemoteRow({
       }
       price={v.price}
       stock={
-        v.external ? (
+        // No figure is not zero. A Seller Center variation TikTok had not
+        // matched read "0 left" while it was selling; with no figure it says
+        // what state it is in instead, as our own rows do.
+        v.external && v.stock_available !== null ? (
           soldOut(v) ? (
             <span className="text-bad font-semibold tracking-wide shrink-0">SOLD OUT</span>
           ) : (
-            <span className="text-fg2 shrink-0">{v.stock_available ?? 0} left</span>
+            <span className="text-fg2 shrink-0">{v.stock_available} left</span>
           )
         ) : (
           <StockState v={v} />

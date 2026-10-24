@@ -1790,6 +1790,21 @@ check('a restored variation is not claimed by the removed row it replaced', () =
   eq(byRow.old, undefined)
 })
 
+check('two rows of one identifier stamped with the same id by an older build each find their own SKU', () => {
+  // An older build filled a missing id from the last SKU with that seller_sku,
+  // so both B74 rows got 7402. One is 7402; the other must find 7401, not be
+  // marked removed while it is still on sale.
+  const rows = [
+    { sku_id: 'x', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+    { sku_id: 'y', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+  ]
+  const skus = [{ id: '7401', sellerSku: 'B74' }, { id: '7402', sellerSku: 'B74' }]
+  const { byRow } = gs.pairRows_(rows, skus)
+  eq([byRow.x.id, byRow.y.id], ['7402', '7401'])
+  // And the id on y is corrected, not y marked removed.
+  eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [{ sku_id: 'y', tiktok_sku_id: '7401' }])
+})
+
 check('a row written before we kept the id is still found by seller_sku', () => {
   const { byRow } = gs.pairRows_([{ sku_id: 'a', identifier: 'B74', status: 'pushed', tiktok_sku_id: '' }],
     [{ id: '77', sellerSku: 'B74' }])
@@ -5903,6 +5918,20 @@ const PRICE_CASES = [
     const drawn9001 = out.ok.variants.filter((v) => !v.removed && v.on_tiktok && v.tiktok_sku_id === '9001')
     eq(drawn9001.length, 1, JSON.stringify(drawn9001))
     eq(drawn9001[0].identifier, 'A1')
+  })
+
+  check('a variation restored straight after its removal shows the copy still live', () => {
+    // Under review: the restored B2 (new id 9102). Live, until review passes:
+    // the old B2 (9002), still buyable. As before, the row shows the live one.
+    const restored = { id: '9102', seller: 'B2', price: '20.00', qty: 5 }
+    setup({
+      v2: [A1, restored, SC], v1: [A1, B2, SC],
+      rows: [ROWS[0], ours({ sku_id: 's2', identifier: 'B2', tiktok_sku_id: '9102', price: '20.00', stock: 5, variant: 'B2 item' })],
+    })
+    const out = call('listingState', { listing_id: 'P1' })
+    const b2 = out.ok.variants.filter((v) => v.identifier === 'B2' && !v.removed)
+    eq(b2.length, 1, JSON.stringify(b2))
+    eq([b2[0].state, b2[0].stock_available], ['live', 5])
   })
 
   check('a SKU of ours already in the read under a changed seller_sku is not carried a second time', () => {

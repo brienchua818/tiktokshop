@@ -441,10 +441,11 @@ function auditReasons_(data) {
  * each SKU to at most one row.
  *
  * TikTok's id first: it names exactly one SKU, whoever created it. seller_sku
- * is the fallback, for a row TikTok's id cannot find — written before we kept
- * the id — and only to a SKU no other row has claimed. A row whose id TikTok
- * does have, in this copy or the other (`idElsewhere`), is that SKU and no
- * other: it is never matched by seller_sku to a second one.
+ * is the fallback for a row TikTok's id cannot find in this copy — written
+ * before we kept the id, restored under a new id while the old one is still
+ * live, or holding an id another row already has (an older build stamped one
+ * id on two rows of the same identifier) — and only to a SKU no other row has
+ * claimed. Every SKU with that seller_sku is considered, not just the last.
  *
  * Matched on seller_sku alone, a variation added in Seller Center — which
  * usually has none — never matched its live copy and read as still in review
@@ -457,11 +458,17 @@ function auditReasons_(data) {
  * disappearing. `claimed` says which status claimed each SKU: only a pushed
  * row's claim keeps a SKU out of the externals, as before.
  */
-function pairRows_(rows, skus, idElsewhere) {
+function pairRows_(rows, skus) {
   var byId = byTikTokId_(skus);
-  var bySeller = bySellerSku_(skus);
+  var bySeller = {};
+  (skus || []).forEach(function (sku) {
+    if (!sku || !sku.sellerSku) return;
+    (bySeller[String(sku.sellerSku)] = bySeller[String(sku.sellerSku)] || []).push(sku);
+  });
   var claimed = {};
   var byRow = {};
+  // Rows whose id names a SKU on TikTok that another row was paired with.
+  var idTaken = {};
   var drawn = (rows || []).filter(function (r) {
     var st = String(r.status);
     return st === 'pushed' || st === 'removed';
@@ -480,10 +487,13 @@ function pairRows_(rows, skus, idElsewhere) {
   drawn.forEach(function (r) {
     if (byRow[String(r.sku_id)]) return;
     var id = String(r.tiktok_sku_id || '');
-    if (id && (byId[id] || (idElsewhere && idElsewhere[id]))) return;
-    if (r.identifier) take(r, bySeller[String(r.identifier)]);
+    if (id && byId[id]) idTaken[String(r.sku_id)] = true;
+    var same = r.identifier ? (bySeller[String(r.identifier)] || []) : [];
+    for (var i = 0; i < same.length; i++) {
+      if (!claimed[skuKey_(same[i])]) { take(r, same[i]); break; }
+    }
   });
-  return { byRow: byRow, claimed: claimed };
+  return { byRow: byRow, claimed: claimed, idTaken: idTaken };
 }
 
 /** The key a SKU is claimed under: TikTok's id, or its seller_sku if it has no id. */
@@ -542,6 +552,12 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
         changed = true;
       }
       if (found.id && !String(r.tiktok_sku_id || '')) {
+        patch.tiktok_sku_id = String(found.id);
+        changed = true;
+      }
+      // An id another row holds — two rows of one identifier stamped with the
+      // same id by an older build. This row is the other SKU: say so.
+      if (found.id && pairs.idTaken[String(r.sku_id)] && String(found.id) !== String(r.tiktok_sku_id)) {
         patch.tiktok_sku_id = String(found.id);
         changed = true;
       }
@@ -749,7 +765,6 @@ function listingState_(listingId) {
   }
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
   var liveById = byTikTokId_(buyable ? buyable.skus : []);
-  var pendingById = byTikTokId_(live.skus);
 
   /**
    * Record what TikTok is showing, and what it has stopped showing.
@@ -796,8 +811,8 @@ function listingState_(listingId) {
   }
 
   // Each SKU to one row, in each copy, by TikTok's id first (pairRows_).
-  var pendingPairs = pairRows_(rows, live.skus, liveById);
-  var livePairs = pairRows_(rows, buyable ? buyable.skus : [], pendingById);
+  var pendingPairs = pairRows_(rows, live.skus);
+  var livePairs = pairRows_(rows, buyable ? buyable.skus : []);
 
   var variants = rows.filter(function (r) {
     return String(r.status) === 'pushed' || String(r.status) === 'removed';

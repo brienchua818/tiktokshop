@@ -437,38 +437,58 @@ function auditReasons_(data) {
  * TikTok's own number.
  */
 /**
- * What the screen shows as ours, by identifier.
+ * Which of TikTok's SKUs each of our rows is, in one copy of a listing — and
+ * each SKU to at most one row.
  *
- * The invariant this exists to hold: **every SKU TikTok is showing appears
- * on the screen exactly once.** A live variation is either rendered from our
- * own row, or — if we have no row that renders — rendered as an external.
- * Never neither.
+ * TikTok's id first: it names exactly one SKU, whoever created it. seller_sku
+ * is the fallback, for a row TikTok's id cannot find — written before we kept
+ * the id — and only to a SKU no other row has claimed. A row whose id TikTok
+ * does have, in this copy or the other (`idElsewhere`), is that SKU and no
+ * other: it is never matched by seller_sku to a second one.
  *
- * It used to be built from EVERY row, while only `pushed` rows are actually
- * rendered. So any row in another state suppressed the external fallback for
- * an identifier it then did not draw, and the variation vanished from a
- * listing TikTok was serving. Brien, 15 Sep: Seller Center showed B74, B75
- * and A2 on I12; the app drew A2 alone and its own header said 3/100 next to
- * a list of one.
+ * Matched on seller_sku alone, a variation added in Seller Center — which
+ * usually has none — never matched its live copy and read as still in review
+ * (Brien, 24 Oct). And without the one-row-per-SKU rule, a seller_sku changed
+ * in Seller Center could pair one SKU with two rows, or let an old removed row
+ * claim the variation that replaced it.
  *
- * Keyed on `seller_sku`, which is the identifier this app assigns and the
- * only field both sides agree on before a push returns.
+ * Only rows the screen draws take part: pushed, then removed. A row in any
+ * other state claims nothing, so its SKU is drawn as an external rather than
+ * disappearing. `claimed` says which status claimed each SKU: only a pushed
+ * row's claim keeps a SKU out of the externals, as before.
  */
-function shownAsOurs_(rows) {
-  var shown = {};
-  rows.forEach(function (r) {
-    if (String(r.status) === 'pushed') shown[String(r.identifier)] = true;
+function pairRows_(rows, skus, idElsewhere) {
+  var byId = byTikTokId_(skus);
+  var bySeller = bySellerSku_(skus);
+  var claimed = {};
+  var byRow = {};
+  var drawn = (rows || []).filter(function (r) {
+    var st = String(r.status);
+    return st === 'pushed' || st === 'removed';
+  }).sort(function (a, b) {
+    return (String(a.status) === 'pushed' ? 0 : 1) - (String(b.status) === 'pushed' ? 0 : 1);
   });
-  return shown;
+  var take = function (r, sku) {
+    if (!sku || claimed[skuKey_(sku)]) return;
+    byRow[String(r.sku_id)] = sku;
+    claimed[skuKey_(sku)] = String(r.status);
+  };
+  drawn.forEach(function (r) {
+    var id = String(r.tiktok_sku_id || '');
+    if (id) take(r, byId[id]);
+  });
+  drawn.forEach(function (r) {
+    if (byRow[String(r.sku_id)]) return;
+    var id = String(r.tiktok_sku_id || '');
+    if (id && (byId[id] || (idElsewhere && idElsewhere[id]))) return;
+    if (r.identifier) take(r, bySeller[String(r.identifier)]);
+  });
+  return { byRow: byRow, claimed: claimed };
 }
 
-/** The same rows, by the TikTok id each one holds. */
-function shownIdsAsOurs_(rows) {
-  var shown = {};
-  rows.forEach(function (r) {
-    if (String(r.status) === 'pushed' && r.tiktok_sku_id) shown[String(r.tiktok_sku_id)] = true;
-  });
-  return shown;
+/** The key a SKU is claimed under: TikTok's id, or its seller_sku if it has no id. */
+function skuKey_(sku) {
+  return sku.id ? 'id:' + String(sku.id) : 'seller:' + String(sku.sellerSku || '');
 }
 
 /**
@@ -498,21 +518,18 @@ function shownIdsAsOurs_(rows) {
  *    version.
  */
 function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
-  var live = {};
-  // By TikTok's id as well, asked first: a variation of ours whose seller_sku
-  // was changed or cleared in Seller Center is still ours and still on sale,
-  // and matched on seller_sku alone it was marked removed ten minutes later.
-  var liveById = byTikTokId_(liveSkus);
-  (liveSkus || []).forEach(function (s) {
-    if (s && s.sellerSku) live[String(s.sellerSku)] = s;
-  });
+  // Paired as the screen pairs them (pairRows_): a variation of ours whose
+  // seller_sku was changed or cleared in Seller Center is still ours and still
+  // on sale, and matched on seller_sku alone it was marked removed ten minutes
+  // later.
+  var pairs = pairRows_(rows, liveSkus);
 
   var updates = [];
   (rows || []).forEach(function (r) {
     var status = String(r.status);
     if (status !== 'pushed' && status !== 'removed') return;
 
-    var found = (String(r.tiktok_sku_id || '') && liveById[String(r.tiktok_sku_id)]) || live[String(r.identifier)];
+    var found = pairs.byRow[String(r.sku_id)];
 
     if (found) {
       var patch = { sku_id: String(r.sku_id) };
@@ -731,24 +748,8 @@ function listingState_(listingId) {
     warn_('TS-PRD-39', 'Could not update the name of listing ' + listingId + ': ' + e);
   }
   var liveSkus = bySellerSku_(buyable ? buyable.skus : []);
-  var pendingSkus = bySellerSku_(live.skus);
-  /**
-   * And by TikTok's own id, which is asked first.
-   *
-   * seller_sku is ours: a variation added in Seller Center usually has none,
-   * so matched on it alone, one that was live read as still in review, with
-   * no stock and no way to change it (Brien, 24 Oct: "120*60 Random Do Not"
-   * showing Reviewing and 0 left while it sold on TikTok). TikTok's id names
-   * exactly one SKU whoever created it; seller_sku stays as the fallback for
-   * rows written before we kept the id.
-   */
   var liveById = byTikTokId_(buyable ? buyable.skus : []);
   var pendingById = byTikTokId_(live.skus);
-  var inVersion = function (byId, bySeller, tiktokSkuId, sellerSku) {
-    var id = String(tiktokSkuId || '');
-    if (id && byId[id]) return byId[id];
-    return sellerSku ? (bySeller[String(sellerSku)] || null) : null;
-  };
 
   /**
    * Record what TikTok is showing, and what it has stopped showing.
@@ -794,13 +795,17 @@ function listingState_(listingId) {
     warn_('TS-ORD-22', 'Could not read sales for ' + listingId + ': ' + e);
   }
 
+  // Each SKU to one row, in each copy, by TikTok's id first (pairRows_).
+  var pendingPairs = pairRows_(rows, live.skus, liveById);
+  var livePairs = pairRows_(rows, buyable ? buyable.skus : [], pendingById);
+
   var variants = rows.filter(function (r) {
     return String(r.status) === 'pushed' || String(r.status) === 'removed';
   }).map(function (r) {
     var st = variationState_(
       r.identifier, r.tiktok_sku_id,
-      inVersion(liveById, liveSkus, r.tiktok_sku_id, r.identifier),
-      inVersion(pendingById, pendingSkus, r.tiktok_sku_id, r.identifier)
+      livePairs.byRow[String(r.sku_id)] || null,
+      pendingPairs.byRow[String(r.sku_id)] || null
     );
     var match = st.sku;
     var sale = salesFor_(sales, (match && match.id) || r.tiktok_sku_id, r.identifier);
@@ -920,18 +925,14 @@ function listingState_(listingId) {
   // Everything TikTok has that this app did not list — added in Seller Center,
   // or on another tool. Shown, or the app claims a listing has four variations
   // while listing three, and offers an identifier that is already taken.
-  var oursByIdentifier = shownAsOurs_(rows);
-  var oursById = shownIdsAsOurs_(rows);
   live.skus.forEach(function (s) {
-    if (s.sellerSku && oursByIdentifier[String(s.sellerSku)]) return;
-    // Ours by TikTok's id too: a row of ours whose seller_sku was cleared in
-    // Seller Center is drawn as ours above, and must not be drawn twice.
-    if (s.id && oursById[String(s.id)]) return;
+    // A SKU one of our listed rows was paired with is drawn above, as ours.
+    if (pendingPairs.claimed[skuKey_(s)] === 'pushed') return;
     var extSale = salesFor_(sales, s.id, s.sellerSku);
-    // The live copy by TikTok's id first: a Seller Center variation often has
-    // no seller_sku to match on. The live price comes from it too, before the
+    // Its live copy by TikTok's id: a Seller Center variation usually has no
+    // seller_sku to match on. The live price comes from it too, before the
     // one under review, which can lag a price change (see pricedFromLive_).
-    var extLive = inVersion(liveById, liveSkus, s.id, s.sellerSku);
+    var extLive = s.id ? (liveById[String(s.id)] || null) : (s.sellerSku ? (liveSkus[String(s.sellerSku)] || null) : null);
     var extState = variationState_(s.sellerSku, s.id, extLive, s);
     variants.push({
       identifier: String(s.sellerSku || ''),

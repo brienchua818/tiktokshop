@@ -171,7 +171,8 @@ ${src}
     returnStatusMeaning_, RETURN_STATUS_MEANING, returnRows_, refundIndex_,
     SYNC_EVERY_MINUTES, SYNC_ALLOWED_MINUTES,
     checkStockTotal_, skuForStock_, seqOf_,
-    skuRowUpdates_, shownAsOurs_, REMOVAL_GRACE_MS, pendingToCarry_,
+    skuRowUpdates_, REMOVAL_GRACE_MS, pendingToCarry_,
+    pairRows_: typeof pairRows_ === 'function' ? pairRows_ : undefined,
     readAll_, invalidateRead_, appendRows_, markSkus_, resolveSellerSkus_, replaceByKey_, isoOf_,
     listSkus_, listSkusFromSheet_, bumpSkuVersion_, skuVersion_,
     variationState_, bySellerSku_, shopsToSync_, SYNC_ACTIVE_HOURS, changedSince_,
@@ -1741,25 +1742,58 @@ check('only rows the screen actually draws suppress the external fallback', () =
   // suppression set was built from EVERY row — so a row in any other state
   // hid a live variation from both paths at once.
   const rows = [
-    { identifier: 'A2', status: 'pushed' },
-    { identifier: 'B74', status: 'removed' },
-    { identifier: 'B75', status: 'error' },
-    { identifier: 'B76', status: 'queued' },
+    { sku_id: 'r1', identifier: 'A2', status: 'pushed' },
+    { sku_id: 'r2', identifier: 'B74', status: 'removed' },
+    { sku_id: 'r3', identifier: 'B75', status: 'error' },
+    { sku_id: 'r4', identifier: 'B76', status: 'queued' },
   ]
-  const shown = gs.shownAsOurs_(rows)
-  eq(shown['A2'], true)
+  const skus = ['A2', 'B74', 'B75', 'B76'].map((x, i) => ({ id: String(i + 1), sellerSku: x }))
+  const { claimed } = gs.pairRows_(rows, skus)
+  eq(claimed['id:1'], 'pushed')
   // Each of these is on TikTok. None of them is drawn as ours, so each must
   // fall through to the external path rather than disappearing.
-  eq(shown['B74'], undefined)
-  eq(shown['B75'], undefined)
-  eq(shown['B76'], undefined)
+  eq(claimed['id:2'] === 'pushed', false)
+  eq(claimed['id:3'], undefined)
+  eq(claimed['id:4'], undefined)
 })
 
-check('nothing is drawn twice', () => {
-  // The other half of the invariant: a row that IS drawn as ours must not also
-  // appear as an external, or the count doubles and the identifier reads as taken.
-  const shown = gs.shownAsOurs_([{ identifier: 'A2', status: 'pushed' }])
-  eq(shown['A2'], true)
+check('nothing is drawn twice: each SKU belongs to at most one row', () => {
+  // Rows A1 (9001) and B2 (9002). In Seller Center 9002 is deleted and 9001's
+  // seller_sku "corrected" to B2. A1 is 9001 by id; B2 must not fall back to
+  // 9001 by seller_sku as well, or one SKU is drawn twice and a stock tap on B2
+  // changes A1's.
+  const rows = [
+    { sku_id: 'a', identifier: 'A1', status: 'pushed', tiktok_sku_id: '9001' },
+    { sku_id: 'b', identifier: 'B2', status: 'pushed', tiktok_sku_id: '9002' },
+  ]
+  const { byRow } = gs.pairRows_(rows, [{ id: '9001', sellerSku: 'B2' }])
+  eq(byRow.a && byRow.a.id, '9001')
+  eq(byRow.b, undefined)
+})
+
+check('a row whose id TikTok has is that SKU, never another by seller_sku', () => {
+  // 9001 renamed away from A1, and another SKU 9050 given seller_sku A1: the
+  // A1 row is 9001, and 9050 is left to be drawn as an external.
+  const rows = [{ sku_id: 'a', identifier: 'A1', status: 'pushed', tiktok_sku_id: '9001' }]
+  const { byRow, claimed } = gs.pairRows_(rows, [{ id: '9001', sellerSku: 'A1-old' }, { id: '9050', sellerSku: 'A1' }])
+  eq(byRow.a.id, '9001')
+  eq(claimed['id:9050'], undefined)
+})
+
+check('a restored variation is not claimed by the removed row it replaced', () => {
+  const rows = [
+    { sku_id: 'old', identifier: 'B2', status: 'removed', tiktok_sku_id: '7777' },
+    { sku_id: 'new', identifier: 'B2', status: 'pushed', tiktok_sku_id: '9002' },
+  ]
+  const { byRow } = gs.pairRows_(rows, [{ id: '9002', sellerSku: 'B2' }])
+  eq(byRow.new.id, '9002')
+  eq(byRow.old, undefined)
+})
+
+check('a row written before we kept the id is still found by seller_sku', () => {
+  const { byRow } = gs.pairRows_([{ sku_id: 'a', identifier: 'B74', status: 'pushed', tiktok_sku_id: '' }],
+    [{ id: '77', sellerSku: 'B74' }])
+  eq(byRow.a.id, '77')
 })
 
 /**
@@ -5845,6 +5879,30 @@ const PRICE_CASES = [
     const a1 = out.ok.variants.filter((v) => v.tiktok_sku_id === '9001')
     eq(a1.length, 1, JSON.stringify(a1))
     eq([a1[0].external, a1[0].identifier, a1[0].state, a1[0].stock_available], [false, 'A1', 'live', 10])
+  })
+
+  check('a SKU given an identifier of ours in Seller Center is still drawn, as an external', () => {
+    // 9001 renamed away from A1, and another SKU given seller_sku A1. Before,
+    // that SKU was hidden by A1's identifier while A1 drew 9001: on TikTok,
+    // buyable, and nowhere in the app.
+    const renamed = Object.assign({}, A1, { seller: 'A1-old' })
+    const taker = { id: '9050', seller: 'A1', price: '5.00', qty: 3 }
+    setup({ v2: [renamed, taker, B2, SC] })
+    const out = call('listingState', { listing_id: 'P1' })
+    const ids = out.ok.variants.filter((v) => !v.removed && v.on_tiktok).map((v) => v.tiktok_sku_id).sort()
+    eq(ids, ['9001', '9002', '9003', '9050'])
+    eq(out.ok.variants.find((v) => v.tiktok_sku_id === '9050').external, true)
+  })
+
+  check('one SKU is never drawn on two rows', () => {
+    // B2's SKU deleted in Seller Center and A1's seller_sku "corrected" to B2:
+    // A1 is 9001 by id, and B2 must not claim 9001 by seller_sku too.
+    const corrected = Object.assign({}, A1, { seller: 'B2' })
+    setup({ v2: [corrected, SC] })
+    const out = call('listingState', { listing_id: 'P1' })
+    const drawn9001 = out.ok.variants.filter((v) => !v.removed && v.on_tiktok && v.tiktok_sku_id === '9001')
+    eq(drawn9001.length, 1, JSON.stringify(drawn9001))
+    eq(drawn9001[0].identifier, 'A1')
   })
 
   check('a SKU of ours already in the read under a changed seller_sku is not carried a second time', () => {

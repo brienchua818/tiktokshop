@@ -1791,18 +1791,30 @@ check('a restored variation is not claimed by the removed row it replaced', () =
 })
 
 check('two rows of one identifier stamped with the same id by an older build each find their own SKU', () => {
-  // An older build filled a missing id from the last SKU with that seller_sku,
-  // so both B74 rows got 7402. One is 7402; the other must find 7401, not be
-  // marked removed while it is still on sale.
+  // An older build filled x's missing id from the LAST SKU with seller_sku
+  // B74 — the newest, y's 7402. So 7402 is y's; x is 7401. Nothing inferred
+  // is written back, and neither row is marked removed.
+  const rows = [
+    { sku_id: 'x', identifier: 'B74', variant: 'red', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+    { sku_id: 'y', identifier: 'B74', variant: 'blue', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
+  ]
+  const skus = [{ id: '7401', sellerSku: 'B74' }, { id: '7402', sellerSku: 'B74' }]
+  const { byRow } = gs.pairRows_(rows, skus)
+  eq([byRow.x.id, byRow.y.id], ['7401', '7402'])
+  eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [])
+})
+
+check('a row whose id is on TikTok is never marked removed, even when another row holds that id', () => {
+  // Only 7402 left, held by both rows. It goes to the newer row; the older
+  // one is unpaired, and stays as it is rather than being called removed
+  // while the SKU it names is on sale.
   const rows = [
     { sku_id: 'x', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
     { sku_id: 'y', identifier: 'B74', status: 'pushed', tiktok_sku_id: '7402', confirmed_at: HOUR_AGO },
   ]
-  const skus = [{ id: '7401', sellerSku: 'B74' }, { id: '7402', sellerSku: 'B74' }]
-  const { byRow } = gs.pairRows_(rows, skus)
-  eq([byRow.x.id, byRow.y.id], ['7402', '7401'])
-  // And the id on y is corrected, not y marked removed.
-  eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [{ sku_id: 'y', tiktok_sku_id: '7401' }])
+  const skus = [{ id: '7402', sellerSku: 'B74' }]
+  eq(gs.pairRows_(rows, skus).byRow.y.id, '7402')
+  eq(gs.skuRowUpdates_(rows, skus, 'NOW', Date.now()), [])
 })
 
 check('a row written before we kept the id is still found by seller_sku', () => {
@@ -5918,6 +5930,29 @@ const PRICE_CASES = [
     const drawn9001 = out.ok.variants.filter((v) => !v.removed && v.on_tiktok && v.tiktok_sku_id === '9001')
     eq(drawn9001.length, 1, JSON.stringify(drawn9001))
     eq(drawn9001[0].identifier, 'A1')
+  })
+
+  check('two older rows sharing one id each show their own variation, and nothing is written', () => {
+    // x "B74 red" and y "B74 blue" both hold 7402, filled by an older build
+    // from the newest B74 — blue's. Each line must show its own stock, and a
+    // stock tap or Remove on a line must reach that line's SKU.
+    const red = { id: '7401', seller: 'B74', price: '10.00', qty: 3 }
+    const blue = { id: '7402', seller: 'B74', price: '20.00', qty: 6 }
+    setup({
+      v2: [A1, red, blue],
+      rows: [
+        ROWS[0],
+        ours({ sku_id: 'x', identifier: 'B74', tiktok_sku_id: '7402', variant: 'B74 red', confirmed_at: '2026-10-01T00:00:00Z' }),
+        ours({ sku_id: 'y', identifier: 'B74', tiktok_sku_id: '7402', variant: 'B74 blue', confirmed_at: '2026-10-01T00:00:00Z' }),
+      ],
+    })
+    const b74 = () => JSON.stringify(skuRows.slice(1))
+    const before = b74()
+    const out = call('listingState', { listing_id: 'P1' })
+    const line = (name) => out.ok.variants.find((v) => v.variant === name)
+    eq([line('B74 red').tiktok_sku_id, line('B74 red').stock_available], ['7401', 3])
+    eq([line('B74 blue').tiktok_sku_id, line('B74 blue').stock_available], ['7402', 6])
+    eq(b74(), before, 'nothing written back to either B74 row')
   })
 
   check('a variation restored straight after its removal shows the copy still live', () => {

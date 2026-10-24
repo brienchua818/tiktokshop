@@ -443,9 +443,14 @@ function auditReasons_(data) {
  * TikTok's id first: it names exactly one SKU, whoever created it. seller_sku
  * is the fallback for a row TikTok's id cannot find in this copy — written
  * before we kept the id, restored under a new id while the old one is still
- * live, or holding an id another row already has (an older build stamped one
- * id on two rows of the same identifier) — and only to a SKU no other row has
- * claimed. Every SKU with that seller_sku is considered, not just the last.
+ * live, or holding an id another row already has — and only to a SKU no other
+ * row has claimed. Every SKU with that seller_sku is considered, not just the
+ * last.
+ *
+ * Two rows holding one id: an older build filled a missing id from the LAST
+ * SKU with that seller_sku, which is the newest, so the id is the newer row's.
+ * It goes to the newer row; the older one finds its own SKU by seller_sku.
+ * Display only — nothing inferred here is written back.
  *
  * Matched on seller_sku alone, a variation added in Seller Center — which
  * usually has none — never matched its live copy and read as still in review
@@ -467,8 +472,6 @@ function pairRows_(rows, skus) {
   });
   var claimed = {};
   var byRow = {};
-  // Rows whose id names a SKU on TikTok that another row was paired with.
-  var idTaken = {};
   var drawn = (rows || []).filter(function (r) {
     var st = String(r.status);
     return st === 'pushed' || st === 'removed';
@@ -480,20 +483,23 @@ function pairRows_(rows, skus) {
     byRow[String(r.sku_id)] = sku;
     claimed[skuKey_(sku)] = String(r.status);
   };
-  drawn.forEach(function (r) {
+  // By id, newest row first within each status (see above). Reversed, then
+  // sorted by status: the sort is stable, so newest-first holds in each group.
+  drawn.slice().reverse().sort(function (a, b) {
+    return (String(a.status) === 'pushed' ? 0 : 1) - (String(b.status) === 'pushed' ? 0 : 1);
+  }).forEach(function (r) {
     var id = String(r.tiktok_sku_id || '');
     if (id) take(r, byId[id]);
   });
+  // By seller_sku, oldest row first: the oldest row takes the oldest SKU.
   drawn.forEach(function (r) {
     if (byRow[String(r.sku_id)]) return;
-    var id = String(r.tiktok_sku_id || '');
-    if (id && byId[id]) idTaken[String(r.sku_id)] = true;
     var same = r.identifier ? (bySeller[String(r.identifier)] || []) : [];
     for (var i = 0; i < same.length; i++) {
       if (!claimed[skuKey_(same[i])]) { take(r, same[i]); break; }
     }
   });
-  return { byRow: byRow, claimed: claimed, idTaken: idTaken };
+  return { byRow: byRow, claimed: claimed };
 }
 
 /** The key a SKU is claimed under: TikTok's id, or its seller_sku if it has no id. */
@@ -533,6 +539,7 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
   // on sale, and matched on seller_sku alone it was marked removed ten minutes
   // later.
   var pairs = pairRows_(rows, liveSkus);
+  var onTikTok = byTikTokId_(liveSkus);
 
   var updates = [];
   (rows || []).forEach(function (r) {
@@ -555,12 +562,6 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
         patch.tiktok_sku_id = String(found.id);
         changed = true;
       }
-      // An id another row holds — two rows of one identifier stamped with the
-      // same id by an older build. This row is the other SKU: say so.
-      if (found.id && pairs.idTaken[String(r.sku_id)] && String(found.id) !== String(r.tiktok_sku_id)) {
-        patch.tiktok_sku_id = String(found.id);
-        changed = true;
-      }
       if (!String(r.confirmed_at || '')) {
         patch.confirmed_at = nowIso;
         changed = true;
@@ -571,6 +572,11 @@ function skuRowUpdates_(rows, liveSkus, nowIso, nowMs) {
 
     // Already marked and still absent: nothing to say.
     if (status === 'removed') return;
+
+    // Its id is on TikTok — paired with another row that holds the same id
+    // (see pairRows_). Whichever row it belongs to, the SKU is on sale, and a
+    // removed mark would put a live variation in the Removed tab.
+    if (String(r.tiktok_sku_id || '') && onTikTok[String(r.tiktok_sku_id)]) return;
 
     var seenAt = Date.parse(isoOf_(r.confirmed_at));
     if (!isNaN(seenAt) && nowMs - seenAt > REMOVAL_GRACE_MS) {
